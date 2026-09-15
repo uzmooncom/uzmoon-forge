@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-forge-bg: #0d0d0f;
+  --color-forge-surface: #141416;
+  --color-forge-surface-2: #1a1a1e;
+  --color-forge-border: #262629;
+  --color-forge-border-2: #2e2e33;
+  --color-forge-text: #e8e8ec;
+  --color-forge-muted: #7a7a85;
+  --color-forge-accent: #6366f1;
+  --color-forge-accent-hover: #7578f3;
+  --color-forge-green: #34d399;
+  --color-forge-red: #f87171;
+  --color-forge-yellow: #fbbf24;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #0d0d0f;
+  color: #e8e8ec;
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #2e2e33;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3a42;
+}
+
+/* Code highlight overrides for dark theme */
+pre code.hljs {
+  background: transparent !important;
+  padding: 0 !important;
+}
+.hljs {
+  background: transparent !important;
+}
+
+/* Drag region for macOS */
+.drag-region {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Custom selection */
+::selection {
+  background: rgba(99, 102, 241, 0.35);
+}
+
+/* Textarea resize */
+textarea {
+  resize: none;
+}
+
+/* Focus ring */
+*:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.6);
+  outline-offset: 2px;
+}
