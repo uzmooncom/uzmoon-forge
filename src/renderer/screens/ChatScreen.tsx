@@ -5,7 +5,14 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
-import type { Conversation, ChatMessage, Attachment, AttachmentInput } from "../../shared/types.js";
+import type {
+  Conversation,
+  ChatMessage,
+  Attachment,
+  AttachmentInput,
+  QueueItem,
+  ConvQueueState,
+} from "../../shared/types.js";
 
 // Chat sub-components
 import { FileChip } from "../chat/components/FileChip.js";
@@ -31,6 +38,8 @@ import {
   SettingsIcon,
   SearchIcon,
   InboxIcon,
+  TrashIcon,
+  PencilIcon,
 } from "../chat/icons.js";
 import type { PendingAttachment, StreamingState, ReplyTarget } from "../chat/types.js";
 import { blobUrlCache, draftStore } from "../chat/types.js";
@@ -40,6 +49,140 @@ import { blobUrlCache, draftStore } from "../chat/types.js";
 const MIN_SIDEBAR_WIDTH = 180;
 const MAX_SIDEBAR_WIDTH = 340;
 const DEFAULT_SIDEBAR_WIDTH = 224;
+const LONG_MSG_THRESHOLD = 4000;
+
+// ── QueuePanel ─────────────────────────────────────────────────────────────
+
+interface QueuePanelProps {
+  convId: string;
+  queueState: ConvQueueState | null;
+  isStreaming: boolean;
+  onResume: () => void;
+  onRetry: (itemId: string) => void;
+  onSkip: (itemId: string) => void;
+  onRemove: (itemId: string) => void;
+  onEdit: (item: QueueItem) => void;
+}
+
+function QueuePanel({
+  convId: _convId,
+  queueState,
+  isStreaming,
+  onResume,
+  onRetry,
+  onSkip,
+  onRemove,
+  onEdit,
+}: QueuePanelProps) {
+  if (!queueState) return null;
+
+  const pending = queueState.items.filter(
+    (i) => i.status === "queued" || i.status === "processing" || i.status === "paused"
+  );
+  const failed = queueState.items.filter((i) => i.status === "failed");
+
+  if (pending.length === 0 && failed.length === 0 && !queueState.paused) return null;
+
+  return (
+    <div className="mx-4 mb-2 max-w-[800px] mx-auto">
+      <div className="bg-[#1a1a27] border border-white/8 rounded-xl overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5">
+          <div
+            className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+              isStreaming
+                ? "bg-blue-400 animate-pulse"
+                : queueState.paused
+                ? "bg-amber-400"
+                : "bg-emerald-400"
+            }`}
+          />
+          <span className="text-xs text-white/50 flex-1">
+            {isStreaming
+              ? "Processing…"
+              : queueState.paused
+              ? "Queue paused"
+              : `${pending.length} message${pending.length !== 1 ? "s" : ""} queued`}
+          </span>
+          {queueState.paused && !isStreaming && (
+            <button
+              onClick={onResume}
+              className="text-[11px] px-2 py-0.5 rounded-md bg-blue-600/20 text-blue-400 hover:bg-blue-600/30 transition-colors"
+            >
+              Resume
+            </button>
+          )}
+        </div>
+
+        {/* Failed items */}
+        {failed.map((item) => (
+          <div
+            key={item.id}
+            className="flex items-start gap-2 px-3 py-2 border-b border-white/5 bg-red-900/10"
+          >
+            <div className="flex-1 min-w-0">
+              <div className="text-[11px] text-red-400/70 mb-0.5">Failed</div>
+              <div className="text-xs text-white/60 truncate">{item.content.slice(0, 80)}</div>
+              {item.lastError && (
+                <div className="text-[10px] text-red-400/60 mt-0.5 truncate">{item.lastError}</div>
+              )}
+            </div>
+            <div className="flex gap-1 flex-shrink-0">
+              <button
+                onClick={() => onRetry(item.id)}
+                className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-white/40 hover:text-white/70 hover:bg-white/10 transition-colors"
+              >
+                Retry
+              </button>
+              <button
+                onClick={() => onSkip(item.id)}
+                className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-white/40 hover:text-white/70 hover:bg-white/10 transition-colors"
+              >
+                Skip
+              </button>
+            </div>
+          </div>
+        ))}
+
+        {/* Queued items (not processing) */}
+        {pending
+          .filter((i) => i.status === "queued" || i.status === "paused")
+          .map((item) => (
+            <div
+              key={item.id}
+              className="flex items-start gap-2 px-3 py-2 border-b border-white/5 last:border-b-0"
+            >
+              <div className="flex-1 min-w-0">
+                <div className="text-[11px] text-white/30 mb-0.5">
+                  {item.status === "paused" ? "Paused" : "Queued"}
+                </div>
+                <div className="text-xs text-white/60 truncate">
+                  {item.content.slice(0, 80)}
+                  {item.content.length > 80 ? "…" : ""}
+                </div>
+              </div>
+              <div className="flex gap-1 flex-shrink-0">
+                <button
+                  onClick={() => onEdit(item)}
+                  className="w-6 h-6 flex items-center justify-center rounded bg-white/5 text-white/30 hover:text-white/70 hover:bg-white/10 transition-colors"
+                  title="Edit message"
+                >
+                  <PencilIcon size={10} />
+                </button>
+                <button
+                  onClick={() => onRemove(item.id)}
+                  className="w-6 h-6 flex items-center justify-center rounded bg-white/5 text-white/30 hover:text-red-400 hover:bg-red-400/10 transition-colors"
+                  title="Remove from queue"
+                >
+                  <TrashIcon size={10} />
+                </button>
+              </div>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
 
 // ── ChatScreen ─────────────────────────────────────────────────────────────
 
@@ -72,18 +215,20 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // ── Streaming (keyed by conversationId) ───────────────────────────────
   const [streamingMap, setStreamingMap] = useState<Record<string, StreamingState>>({});
   const streaming = activeConvId ? (streamingMap[activeConvId] ?? null) : null;
-  const activeStreamId = useRef<string | null>(null);
-  const activeStreamConvId = useRef<string | null>(null);
+  // Map<streamId, convId> so we can route chunks/end events
+  const streamConvMap = useRef<Map<string, string>>(new Map());
 
-  const setStreaming = useCallback((value: StreamingState | null) => {
+  const setStreaming = useCallback((value: StreamingState | null, convId: string) => {
     if (value !== null) {
-      setStreamingMap((prev) => ({ ...prev, [value.conversationId]: value }));
+      setStreamingMap((prev) => ({ ...prev, [convId]: value }));
     } else {
-      const convId = activeStreamConvId.current;
-      if (!convId) return;
       setStreamingMap((prev) => { const n = { ...prev }; delete n[convId]; return n; });
     }
   }, []);
+
+  // ── Queue state (keyed by conversationId) ─────────────────────────────
+  const [queueMap, setQueueMap] = useState<Record<string, ConvQueueState>>({});
+  const activeQueueState = activeConvId ? (queueMap[activeConvId] ?? null) : null;
 
   // ── Scroll ─────────────────────────────────────────────────────────────
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -97,6 +242,9 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Editing queue item ──────────────────────────────────────────────────
+  const [editingQueueItemId, setEditingQueueItemId] = useState<string | null>(null);
 
   // ── Lightbox ───────────────────────────────────────────────────────────
   const [lightboxAtt, setLightboxAtt] = useState<Attachment | null>(null);
@@ -130,17 +278,14 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     });
   }, []);
 
-  // Load conversations once
+  // Load conversations
   const loadConversations = useCallback(async () => {
     const convs = await window.forgeApi.listConversations(showArchived);
     setConversations(convs);
     return convs;
   }, [showArchived]);
 
-  // Reload when showArchived toggles
-  useEffect(() => {
-    void loadConversations();
-  }, [showArchived, loadConversations]);
+  useEffect(() => { void loadConversations(); }, [showArchived, loadConversations]);
 
   const initializedRef = useRef(false);
   useEffect(() => {
@@ -156,15 +301,24 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   useEffect(() => {
     if (!activeConvId) { setMessages([]); return; }
     window.forgeApi.getConversationMessages(activeConvId).then(setMessages);
+    // Also fetch queue state for this conversation
+    window.forgeApi.getQueue(activeConvId).then((q) => {
+      if (q.items.length > 0 || q.paused) {
+        setQueueMap((prev) => ({
+          ...prev,
+          [activeConvId]: { conversationId: activeConvId, ...q },
+        }));
+      }
+    });
   }, [activeConvId]);
 
   // Persist sidebar prefs
   useEffect(() => {
-    try { localStorage.setItem("forge:sidebarOpen", String(sidebarOpen)); } catch { /* */ }
+    try { localStorage.setItem("forge:sidebarOpen", String(sidebarOpen)); } catch { /**/ }
   }, [sidebarOpen]);
 
   useEffect(() => {
-    try { localStorage.setItem("forge:sidebarWidth", String(sidebarWidth)); } catch { /* */ }
+    try { localStorage.setItem("forge:sidebarWidth", String(sidebarWidth)); } catch { /**/ }
   }, [sidebarWidth]);
 
   // Auto-scroll
@@ -194,9 +348,22 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // Stream subscriptions
   useEffect(() => {
+    const unsubStart = window.forgeApi.onStreamStart(({ streamId, userMessage, conversation }) => {
+      const convId = conversation?.id ?? userMessage?.conversationId;
+      if (!convId) return;
+      streamConvMap.current.set(streamId, convId);
+      setStreaming({ streamId, text: "", conversationId: convId }, convId);
+      if (conversation) {
+        setConversations((prev) => {
+          const exists = prev.find((c) => c.id === conversation.id);
+          if (!exists) return [conversation, ...prev];
+          return prev.map((c) => (c.id === conversation.id ? conversation : c));
+        });
+      }
+    });
+
     const unsubChunk = window.forgeApi.onStreamChunk(({ streamId, chunk }) => {
-      if (activeStreamId.current !== streamId) return;
-      const convId = activeStreamConvId.current;
+      const convId = streamConvMap.current.get(streamId);
       if (!convId) return;
       setStreamingMap((prev) => {
         const cur = prev[convId];
@@ -206,46 +373,60 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     });
 
     const unsubEnd = window.forgeApi.onStreamEnd(({ streamId, message, cancelled, conversation }) => {
-      if (activeStreamId.current !== streamId) return;
-      const convId = activeStreamConvId.current;
-      activeStreamId.current = null;
-      activeStreamConvId.current = null;
-      if (convId) setStreamingMap((prev) => { const n = { ...prev }; delete n[convId]; return n; });
+      const convId = streamConvMap.current.get(streamId);
+      streamConvMap.current.delete(streamId);
+      if (!convId) return;
+      setStreaming(null, convId);
       if (message) {
-        setMessages((prev) => {
-          if (message.conversationId === activeConvIdRef.current || convId === activeConvIdRef.current) {
+        if (convId === activeConvIdRef.current) {
+          setMessages((prev) => {
+            // avoid duplicate if already appended
+            if (prev.find((m) => m.id === message.id)) return prev;
             return [...prev, message];
-          }
-          return prev;
-        });
+          });
+        }
       }
       if (conversation) {
         setConversations((prev) => {
           const exists = prev.find((c) => c.id === conversation.id);
           if (!exists) return [conversation, ...prev];
-          return prev.map((c) => c.id === conversation.id ? conversation : c);
+          return prev.map((c) => (c.id === conversation.id ? conversation : c));
         });
       }
       if (!cancelled) void loadConversations();
     });
 
     const unsubErr = window.forgeApi.onStreamError(({ streamId, message }) => {
-      if (activeStreamId.current !== streamId) return;
-      const convId = activeStreamConvId.current;
-      activeStreamId.current = null;
-      activeStreamConvId.current = null;
-      if (convId) setStreamingMap((prev) => { const n = { ...prev }; delete n[convId]; return n; });
-      setMessages((prev) => {
-        if (message.conversationId === activeConvIdRef.current || convId === activeConvIdRef.current) {
+      const convId = streamConvMap.current.get(streamId);
+      streamConvMap.current.delete(streamId);
+      if (!convId) return;
+      setStreaming(null, convId);
+      if (convId === activeConvIdRef.current) {
+        setMessages((prev) => {
+          if (prev.find((m) => m.id === message.id)) return prev;
           return [...prev, message];
-        }
-        return prev;
-      });
+        });
+      }
     });
 
-    return () => { unsubChunk(); unsubEnd(); unsubErr(); };
+    const unsubQueue = window.forgeApi.onQueueState((state) => {
+      setQueueMap((prev) => ({ ...prev, [state.conversationId]: state }));
+      // When queue completes a message, reload messages for active conv
+      const hasCompletedNew = state.items.some((i) => i.status === "completed");
+      if (hasCompletedNew && state.conversationId === activeConvIdRef.current) {
+        // Messages are updated via stream end — no need to reload here
+      }
+    });
+
+    return () => {
+      unsubStart();
+      unsubChunk();
+      unsubEnd();
+      unsubErr();
+      unsubQueue();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadConversations]);
+  }, [loadConversations, setStreaming]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -313,6 +494,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setInput("");
     setPendingAttachments([]);
     setReplyTarget(null);
+    setEditingQueueItemId(null);
     setTimeout(() => textareaRef.current?.focus(), 50);
   }, [activeConvId, input]);
 
@@ -324,6 +506,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       setInput(saved?.input ?? "");
       setPendingAttachments([]);
       setReplyTarget(null);
+      setEditingQueueItemId(null);
       setTimeout(() => textareaRef.current?.focus(), 50);
     },
     [activeConvId, input]
@@ -472,23 +655,84 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   };
 
   // ══════════════════════════════════════════════════════════════════════
+  // Queue actions
+  // ══════════════════════════════════════════════════════════════════════
+
+  const handleQueueResume = useCallback(() => {
+    if (!activeConvId) return;
+    void window.forgeApi.resumeQueue(activeConvId);
+  }, [activeConvId]);
+
+  const handleQueueRetry = useCallback((itemId: string) => {
+    if (!activeConvId) return;
+    void window.forgeApi.resumeQueue(activeConvId, "retry", itemId);
+  }, [activeConvId]);
+
+  const handleQueueSkip = useCallback((itemId: string) => {
+    if (!activeConvId) return;
+    void window.forgeApi.resumeQueue(activeConvId, "skip", itemId);
+  }, [activeConvId]);
+
+  const handleQueueRemove = useCallback((itemId: string) => {
+    if (!activeConvId) return;
+    void window.forgeApi.removeQueueItem(activeConvId, itemId);
+    // Also remove the optimistic message from view
+    setMessages((prev) => {
+      const qs = queueMap[activeConvId];
+      if (!qs) return prev;
+      const item = qs.items.find((i) => i.id === itemId);
+      if (!item) return prev;
+      return prev.filter((m) => m.id !== item.messageId);
+    });
+  }, [activeConvId, queueMap]);
+
+  const handleQueueEdit = useCallback((item: QueueItem) => {
+    setInput(item.content);
+    setEditingQueueItemId(item.id);
+    setTimeout(() => textareaRef.current?.focus(), 30);
+  }, []);
+
+  const handleEditQueueItemSubmit = useCallback(async () => {
+    if (!activeConvId || !editingQueueItemId || !input.trim()) return;
+    const ok = await window.forgeApi.editQueueItem(activeConvId, editingQueueItemId, input.trim());
+    if (ok) {
+      // Update displayed message immediately
+      setMessages((prev) => {
+        const qs = queueMap[activeConvId];
+        const item = qs?.items.find((i) => i.id === editingQueueItemId);
+        if (!item) return prev;
+        return prev.map((m) =>
+          m.id === item.messageId ? { ...m, content: input.trim() } : m
+        );
+      });
+    }
+    setEditingQueueItemId(null);
+    setInput("");
+    setTimeout(() => textareaRef.current?.focus(), 30);
+  }, [activeConvId, editingQueueItemId, input, queueMap]);
+
+  // ══════════════════════════════════════════════════════════════════════
   // Send / Cancel / Retry / Edit / Quote
   // ══════════════════════════════════════════════════════════════════════
 
+  // Queue allows sending even while streaming
   const canSend =
     (input.trim() !== "" || pendingAttachments.some((a) => a.savedId)) &&
-    !streaming &&
     !pendingAttachments.some((a) => a.uploading);
 
-  const LONG_MSG_THRESHOLD = 4000; // chars
-
   const handleSend = useCallback(async () => {
+    // If we're editing a queue item, submit the edit instead
+    if (editingQueueItemId) {
+      await handleEditQueueItemSubmit();
+      return;
+    }
+
     if (!canSend) return;
     let content = input.trim();
     const convId = activeConvId ?? draftConvId.current;
     const attachmentIds = pendingAttachments.filter((a) => a.savedId).map((a) => a.savedId!);
 
-    // Auto-file: if message exceeds threshold, upload excess as a .txt and shorten inline text
+    // Auto-file: if message exceeds threshold, upload excess as a .txt
     if (content.length > LONG_MSG_THRESHOLD) {
       const fullText = content;
       const preview = content.slice(0, 120).replace(/\n/g, " ");
@@ -500,7 +744,6 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         id: randomId(), file, previewUrl, mimeType: "text/plain", uploading: true,
       };
       setPendingAttachments((prev) => [...prev, pending]);
-      // Upload synchronously before send
       const b64 = await new Promise<string>((resolve) => {
         const reader = new FileReader();
         reader.onload = (evt) => resolve(((evt.target?.result as string).split(",")[1]) ?? "");
@@ -518,8 +761,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       } else {
         setPendingAttachments((prev) => prev.filter((p) => p.id !== pending.id));
         URL.revokeObjectURL(previewUrl);
-        // Fall back: restore original content
-        content = fullText;
+        content = fullText; // fallback
       }
     }
 
@@ -537,6 +779,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     draftStore.delete(convId);
     textareaRef.current?.focus();
 
+    // Optimistic user message in UI
     const optimisticId = randomId();
     const optimisticUserMsg: ChatMessage = {
       id: optimisticId,
@@ -549,64 +792,70 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     };
     setMessages((prev) => [...prev, optimisticUserMsg]);
 
-    const unsubStart = window.forgeApi.onStreamStart(({ streamId, userMessage: serverUserMsg, conversation }) => {
-      unsubStart();
-      activeStreamId.current = streamId;
-      activeStreamConvId.current = convId;
-      setStreaming({ streamId, text: "", conversationId: convId });
-      const persistedUser: ChatMessage = {
-        ...serverUserMsg,
-        conversationId: convId,
-        ...(pendingAttsSnapshot.length > 0 && { attachments: pendingAttsSnapshot }),
-        ...(reply && { replyToMessageId: reply.messageId }),
-      };
-      setMessages((prev) => prev.map((m) => m.id === optimisticId ? persistedUser : m));
-      setConversations((prev) => {
-        const exists = prev.find((c) => c.id === conversation.id);
-        if (!exists) return [conversation, ...prev];
-        return prev.map((c) => c.id === conversation.id ? conversation : c);
-      });
-      if (!activeConvId) {
-        setActiveConvId(convId);
-        draftConvId.current = randomId();
-      }
-    });
+    // Set active conversation immediately for new drafts
+    if (!activeConvId) {
+      setActiveConvId(convId);
+      draftConvId.current = randomId();
+    }
 
-    window.forgeApi.sendMessage({
+    const res = await window.forgeApi.sendMessage({
       conversationId: convId,
       content,
       ...(attachmentIds.length > 0 && { attachmentIds }),
       ...(reply && { replyToMessageId: reply.messageId }),
-    }).then((res) => {
-      if (res.error && activeStreamId.current === null) {
-        unsubStart();
-        setInput(content);
-        setTimeout(() => textareaRef.current?.focus(), 30);
-        setMessages((prev) => {
-          const filtered = prev.filter((m) => m.id !== optimisticId);
-          return [...filtered, {
-            id: randomId(), conversationId: convId, role: "error" as const,
-            content: res.error!, createdAt: Date.now(), isError: true,
-          }];
-        });
-      }
-    }).catch(() => {
-      unsubStart();
-      setInput(content);
-      setTimeout(() => textareaRef.current?.focus(), 30);
     });
-  }, [canSend, input, activeConvId, pendingAttachments, setStreaming, replyTarget]);
+
+    if (res.error) {
+      // Remove optimistic, show error
+      setMessages((prev) => {
+        const filtered = prev.filter((m) => m.id !== optimisticId);
+        return [...filtered, {
+          id: randomId(), conversationId: convId, role: "error" as const,
+          content: res.error!, createdAt: Date.now(), isError: true,
+        }];
+      });
+      return;
+    }
+
+    // Replace optimistic with persisted user message
+    if (res.userMessage) {
+      const persisted = res.userMessage;
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === optimisticId
+            ? {
+                ...persisted,
+                ...(pendingAttsSnapshot.length > 0 && { attachments: pendingAttsSnapshot }),
+                ...(reply && { replyToMessageId: reply.messageId }),
+              }
+            : m
+        )
+      );
+    }
+
+    // Update conversation in sidebar
+    if (res.conversation) {
+      setConversations((prev) => {
+        const exists = prev.find((c) => c.id === res.conversation!.id);
+        if (!exists) return [res.conversation!, ...prev];
+        return prev.map((c) => (c.id === res.conversation!.id ? res.conversation! : c));
+      });
+    }
+  }, [
+    editingQueueItemId,
+    handleEditQueueItemSubmit,
+    canSend,
+    input,
+    activeConvId,
+    pendingAttachments,
+    replyTarget,
+  ]);
 
   const handleCancel = useCallback(async () => {
-    const sid = activeStreamId.current;
-    if (!sid) return;
-    const convId = activeStreamConvId.current;
-    activeStreamId.current = null;
-    activeStreamConvId.current = null;
-    if (convId) setStreamingMap((prev) => { const n = { ...prev }; delete n[convId]; return n; });
-    await window.forgeApi.cancelStream(sid);
+    if (!activeConvId) return;
+    await window.forgeApi.cancelStream(activeConvId);
     setTimeout(() => textareaRef.current?.focus(), 50);
-  }, []);
+  }, [activeConvId]);
 
   const handleRetry = useCallback(async (_msg: ChatMessage) => {
     const lastUser = [...messages].reverse().find((m) => m.role === "user");
@@ -636,12 +885,19 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleSend(); }
-    if (e.key === "Escape" && replyTarget) { e.preventDefault(); setReplyTarget(null); }
+    if (e.key === "Escape") {
+      if (editingQueueItemId) { setEditingQueueItemId(null); setInput(""); return; }
+      if (replyTarget) { e.preventDefault(); setReplyTarget(null); }
+    }
   };
 
   const deleteConvTitle = deleteConfirmId
     ? (conversations.find((c) => c.id === deleteConfirmId)?.title ?? "")
     : "";
+
+  // Send button label
+  const sendLabel = editingQueueItemId ? "Update" : "Send";
+  const sendDisabled = editingQueueItemId ? !input.trim() : !canSend;
 
   // ══════════════════════════════════════════════════════════════════════
   // Render
@@ -831,11 +1087,41 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           </button>
         )}
 
-        {/* ── Composer ─────────────────────────────────────────────── */}
-        <div className="flex-shrink-0 px-4 pb-4 pt-2">
+        {/* ── Queue Panel ───────────────────────────────────────────── */}
+        <div className="flex-shrink-0 px-4 pt-1">
           <div className="max-w-[800px] mx-auto">
+            <QueuePanel
+              convId={activeConvId ?? ""}
+              queueState={activeQueueState}
+              isStreaming={!!streaming}
+              onResume={handleQueueResume}
+              onRetry={handleQueueRetry}
+              onSkip={handleQueueSkip}
+              onRemove={handleQueueRemove}
+              onEdit={handleQueueEdit}
+            />
+          </div>
+        </div>
+
+        {/* ── Composer ─────────────────────────────────────────────── */}
+        <div className="flex-shrink-0 px-4 pb-4 pt-1">
+          <div className="max-w-[800px] mx-auto">
+            {/* Edit queue item banner */}
+            {editingQueueItemId && (
+              <div className="flex items-center gap-2 mb-2 px-3 py-2 bg-amber-900/20 border border-amber-400/20 rounded-xl text-xs">
+                <PencilIcon size={11} />
+                <span className="text-amber-300/80 flex-1">Editing queued message</span>
+                <button
+                  onClick={() => { setEditingQueueItemId(null); setInput(""); }}
+                  className="text-amber-400/50 hover:text-amber-300 ml-1"
+                >
+                  Cancel
+                </button>
+              </div>
+            )}
+
             {/* Reply banner */}
-            {replyTarget && (
+            {replyTarget && !editingQueueItemId && (
               <div className="flex items-center gap-2 mb-2 px-3 py-2 bg-white/5 border border-white/8 rounded-xl text-xs">
                 <span className="text-white/40">↩ Replying to</span>
                 <span className={`font-medium ${replyTarget.role === "user" ? "text-blue-300" : "text-violet-300"}`}>
@@ -851,15 +1137,19 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             <div className="relative bg-[#1a1a27] border border-white/8 rounded-2xl focus-within:border-white/15 transition-colors">
               <div className="flex items-end px-3 pt-2.5 pb-1 gap-2">
                 {/* Attach */}
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={pendingAttachments.length >= 10}
-                  title="Attach file"
-                  className="flex-shrink-0 mb-1 w-7 h-7 flex items-center justify-center text-white/30 hover:text-white/70 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-20 disabled:pointer-events-none"
-                >
-                  <PaperclipIcon size={16} />
-                </button>
-                <input ref={fileInputRef} type="file" accept="*/*" multiple className="hidden" onChange={handleFileChange} />
+                {!editingQueueItemId && (
+                  <>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={pendingAttachments.length >= 10}
+                      title="Attach file"
+                      className="flex-shrink-0 mb-1 w-7 h-7 flex items-center justify-center text-white/30 hover:text-white/70 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-20 disabled:pointer-events-none"
+                    >
+                      <PaperclipIcon size={16} />
+                    </button>
+                    <input ref={fileInputRef} type="file" accept="*/*" multiple className="hidden" onChange={handleFileChange} />
+                  </>
+                )}
 
                 {/* Textarea */}
                 <textarea
@@ -868,30 +1158,47 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
                   onPaste={handlePaste}
-                  placeholder={streaming ? "Responding…" : "Message… (Enter to send, Shift+Enter for newline)"}
+                  placeholder={
+                    editingQueueItemId
+                      ? "Edit message… (Enter to save)"
+                      : streaming
+                      ? "Responding… (you can queue the next message)"
+                      : "Message… (Enter to send, Shift+Enter for newline)"
+                  }
                   rows={1}
                   autoFocus
                   className="flex-1 bg-transparent resize-none text-sm text-white placeholder-white/25 outline-none leading-relaxed min-h-[28px]"
                   style={{ maxHeight: "140px" }}
                 />
 
-                {/* Send / Stop */}
-                {streaming ? (
-                  <button
-                    onClick={handleCancel}
-                    className="flex-shrink-0 mb-1 flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-900/40 text-red-400 hover:bg-red-900/60 hover:text-red-300 transition-colors text-xs"
-                  >
-                    <StopIcon size={11} />
-                    Stop
-                  </button>
+                {/* Stop / Send / Update */}
+                {streaming && !editingQueueItemId ? (
+                  <div className="flex gap-1 flex-shrink-0 mb-1">
+                    <button
+                      onClick={handleCancel}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-900/40 text-red-400 hover:bg-red-900/60 hover:text-red-300 transition-colors text-xs"
+                    >
+                      <StopIcon size={11} />
+                      Stop
+                    </button>
+                    <button
+                      onClick={() => { void handleSend(); }}
+                      disabled={!canSend}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600/60 text-white hover:bg-blue-500/70 transition-colors text-xs disabled:opacity-30 disabled:pointer-events-none"
+                      title="Queue next message"
+                    >
+                      <SendIcon size={11} />
+                      Queue
+                    </button>
+                  </div>
                 ) : (
                   <button
                     onClick={() => { void handleSend(); }}
-                    disabled={!canSend}
+                    disabled={sendDisabled}
                     className="flex-shrink-0 mb-1 flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 text-white hover:bg-blue-500 transition-colors text-xs disabled:opacity-30 disabled:pointer-events-none"
                   >
                     <SendIcon size={11} />
-                    Send
+                    {sendLabel}
                   </button>
                 )}
               </div>

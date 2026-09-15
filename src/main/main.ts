@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, ipcMain, clipboard } from "electron";
+import { app, BrowserWindow, shell } from "electron";
 import path from "path";
 import { getDb } from "./database/db.js";
 import { SecretStore } from "./secret-store/secrets.js";
@@ -9,7 +9,7 @@ const dataDir =
 
 let mainWindow: BrowserWindow | null = null;
 
-function createWindow(): void {
+function createWindow(secrets: SecretStore, database: true): void {
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 740,
@@ -27,6 +27,9 @@ function createWindow(): void {
     },
     show: false,
   });
+
+  // Register IPC handlers now that we have webContents
+  registerHandlers({ secrets, database }, mainWindow.webContents);
 
   // Load renderer
   if (process.env["NODE_ENV"] === "development") {
@@ -57,17 +60,11 @@ app.whenReady().then(() => {
   const database = getDb(dataDir);
   const secrets = new SecretStore(dataDir);
 
-  // Clipboard write — renderer can't use navigator.clipboard reliably in Electron
-  ipcMain.handle("clipboard:write", (_event, text: string) => {
-    clipboard.writeText(text);
-  });
-
-  registerHandlers({ secrets, database });
-  createWindow();
+  createWindow(secrets, database);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+      createWindow(secrets, database);
     }
   });
 });

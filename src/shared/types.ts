@@ -98,6 +98,40 @@ export interface AppState {
   agentConfigId: string | null;
 }
 
+// ── Message Queue ──────────────────────────────────────────────────────────
+
+export type QueueItemStatus =
+  | "queued"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "paused";
+
+export interface QueueItem {
+  id: string;
+  conversationId: string;
+  /** The persisted user message ID (after insertion) */
+  messageId: string;
+  content: string;
+  attachmentIds: string[];
+  replyToMessageId?: string;
+  status: QueueItemStatus;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  attemptCount: number;
+  lastError?: string;
+}
+
+/** What the renderer receives about a conversation's queue */
+export interface ConvQueueState {
+  conversationId: string;
+  items: QueueItem[];
+  /** Whether the queue is paused (after stop or failure) */
+  paused: boolean;
+}
+
 /** IPC channel names */
 export const IPC = {
   // Agent config
@@ -113,13 +147,22 @@ export const IPC = {
   // Connection test
   TEST_CONNECTION: "agent:testConnection",
 
-  // Chat
+  // Chat (direct send path is now enqueue)
   CHAT_SEND: "chat:send",
   CHAT_STREAM_START: "chat:streamStart",
   CHAT_STREAM_CHUNK: "chat:streamChunk",
   CHAT_STREAM_END: "chat:streamEnd",
   CHAT_STREAM_ERROR: "chat:streamError",
   CHAT_CANCEL: "chat:cancel",
+
+  // Queue management
+  QUEUE_GET: "queue:get",
+  QUEUE_EDIT: "queue:edit",
+  QUEUE_REMOVE: "queue:remove",
+  QUEUE_REORDER: "queue:reorder",
+  QUEUE_RESUME: "queue:resume",
+  QUEUE_CLEAR: "queue:clear",
+  QUEUE_STATE: "queue:state", // push from main → renderer
 
   // Conversations
   CONV_LIST: "conv:list",
@@ -129,6 +172,7 @@ export const IPC = {
   CONV_DELETE: "conv:delete",
   CONV_SEARCH: "conv:search",
   CONV_EXPORT: "conv:export",
+  CONV_BRANCH: "conv:branch",
 
   // Messages per conversation
   CONV_MESSAGES: "conv:messages",

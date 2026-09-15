@@ -9,6 +9,8 @@ import type {
   AttachmentInput,
   ConnectionTestResult,
   SendMessageRequest,
+  QueueItem,
+  ConvQueueState,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -69,6 +71,9 @@ const forgeApi = {
   exportConversation: (id: string): Promise<string> =>
     ipcRenderer.invoke(IPC.CONV_EXPORT, id),
 
+  branchConversation: (sourceConvId: string, upToMessageId: string): Promise<Conversation | null> =>
+    ipcRenderer.invoke(IPC.CONV_BRANCH, sourceConvId, upToMessageId),
+
   searchMessages: (query: string): Promise<Array<{ message: ChatMessage; conversation: Conversation }>> =>
     ipcRenderer.invoke(IPC.MSG_SEARCH, query),
 
@@ -90,25 +95,51 @@ const forgeApi = {
   deleteAttachment: (id: string): Promise<void> =>
     ipcRenderer.invoke(IPC.ATTACH_DELETE, id),
 
-  // ── Chat ────────────────────────────────────────────────────────────────
+  // ── Chat (enqueue) ──────────────────────────────────────────────────────
   sendMessage: (
     req: SendMessageRequest
   ): Promise<{
-    streamId: string;
-    userMessage: ChatMessage;
+    queueItemId?: string;
+    userMessage?: ChatMessage;
+    conversation?: Conversation;
     error?: string;
-    cancelled?: boolean;
   }> => ipcRenderer.invoke(IPC.CHAT_SEND, req),
 
-  cancelStream: (streamId: string): Promise<void> =>
-    ipcRenderer.invoke(IPC.CHAT_CANCEL, streamId),
+  /** Cancel the active stream for a conversation (stops processing, pauses queue) */
+  cancelStream: (convId: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.CHAT_CANCEL, convId),
 
+  // ── Queue management ─────────────────────────────────────────────────────
+  getQueue: (convId: string): Promise<{ items: QueueItem[]; paused: boolean }> =>
+    ipcRenderer.invoke(IPC.QUEUE_GET, convId),
+
+  editQueueItem: (convId: string, itemId: string, content: string, attachmentIds?: string[]): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.QUEUE_EDIT, convId, itemId, content, attachmentIds),
+
+  removeQueueItem: (convId: string, itemId: string): Promise<boolean> =>
+    ipcRenderer.invoke(IPC.QUEUE_REMOVE, convId, itemId),
+
+  reorderQueue: (convId: string, orderedIds: string[]): Promise<void> =>
+    ipcRenderer.invoke(IPC.QUEUE_REORDER, convId, orderedIds),
+
+  resumeQueue: (convId: string, action?: "retry" | "skip", itemId?: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.QUEUE_RESUME, convId, action, itemId),
+
+  clearQueue: (convId: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.QUEUE_CLEAR, convId),
+
+  // ── Stream events ────────────────────────────────────────────────────────
   onStreamStart: (
-    cb: (data: { streamId: string; userMessage: ChatMessage; conversation: Conversation }) => void
+    cb: (data: {
+      streamId: string;
+      userMessage?: ChatMessage;
+      conversation?: Conversation;
+      queueItemId?: string;
+    }) => void
   ): UnsubFn => {
     const listener = (
       _event: Electron.IpcRendererEvent,
-      data: { streamId: string; userMessage: ChatMessage; conversation: Conversation }
+      data: { streamId: string; userMessage?: ChatMessage; conversation?: Conversation; queueItemId?: string }
     ) => cb(data);
     ipcRenderer.on(IPC.CHAT_STREAM_START, listener);
     return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_START, listener);
@@ -131,6 +162,7 @@ const forgeApi = {
       message?: ChatMessage;
       cancelled?: boolean;
       conversation?: Conversation;
+      queueItemId?: string;
     }) => void
   ): UnsubFn => {
     const listener = (
@@ -140,6 +172,7 @@ const forgeApi = {
         message?: ChatMessage;
         cancelled?: boolean;
         conversation?: Conversation;
+        queueItemId?: string;
       }
     ) => cb(data);
     ipcRenderer.on(IPC.CHAT_STREAM_END, listener);
@@ -147,14 +180,26 @@ const forgeApi = {
   },
 
   onStreamError: (
-    cb: (data: { streamId: string; message: ChatMessage }) => void
+    cb: (data: { streamId: string; message: ChatMessage; queueItemId?: string }) => void
   ): UnsubFn => {
     const listener = (
       _event: Electron.IpcRendererEvent,
-      data: { streamId: string; message: ChatMessage }
+      data: { streamId: string; message: ChatMessage; queueItemId?: string }
     ) => cb(data);
     ipcRenderer.on(IPC.CHAT_STREAM_ERROR, listener);
     return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_ERROR, listener);
+  },
+
+  /** Queue state push from main (paused, items changed) */
+  onQueueState: (
+    cb: (state: ConvQueueState) => void
+  ): UnsubFn => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      state: ConvQueueState
+    ) => cb(state);
+    ipcRenderer.on(IPC.QUEUE_STATE, listener);
+    return () => ipcRenderer.removeListener(IPC.QUEUE_STATE, listener);
   },
 
   // ── Clipboard ──────────────────────────────────────────────────────────────

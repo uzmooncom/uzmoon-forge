@@ -10,9 +10,15 @@ import type {
   AppState,
   Conversation,
   Attachment,
+  QueueItem,
 } from "../../shared/types.js";
 
 // ── Store shape ────────────────────────────────────────────────────────────
+
+interface ConvQueue {
+  items: QueueItem[];
+  paused: boolean;
+}
 
 interface Store {
   appState: AppState;
@@ -24,6 +30,8 @@ interface Store {
   messagesByConv: Record<string, ChatMessage[]>;
   /** Attachment metadata keyed by id */
   attachments: Record<string, Attachment>;
+  /** Per-conversation message queues */
+  queues: Record<string, ConvQueue>;
 }
 
 const DEFAULT_STORE: Store = {
@@ -32,6 +40,7 @@ const DEFAULT_STORE: Store = {
   conversations: [],
   messagesByConv: {},
   attachments: {},
+  queues: {},
 };
 
 // ── Singleton ──────────────────────────────────────────────────────────────
@@ -49,14 +58,15 @@ function load(): Store {
   if (!fs.existsSync(p)) return structuredClone(DEFAULT_STORE);
   try {
     const raw = JSON.parse(fs.readFileSync(p, "utf8")) as Partial<Store>;
-    // Migrate legacy flat messages into a default conversation
     const base: Store = {
       appState: raw.appState ?? DEFAULT_STORE.appState,
       agentConfig: raw.agentConfig ?? null,
       conversations: raw.conversations ?? [],
       messagesByConv: raw.messagesByConv ?? {},
       attachments: raw.attachments ?? {},
+      queues: raw.queues ?? {},
     };
+    // Migrate legacy flat messages into a default conversation
     if (raw.messages && raw.messages.length > 0 && base.conversations.length === 0) {
       const legacyConvId = "conv-legacy";
       const now = Date.now();
@@ -70,6 +80,19 @@ function load(): Store {
         ...m,
         conversationId: legacyConvId,
       }));
+    }
+    // On restart: any "processing" items become "paused" (interrupted)
+    for (const q of Object.values(base.queues)) {
+      for (const item of q.items) {
+        if (item.status === "processing") {
+          item.status = "paused";
+          item.lastError = "Interrupted by app restart";
+        }
+      }
+      // If any item is paused after restart, pause the queue too
+      if (q.items.some((i) => i.status === "paused")) {
+        q.paused = true;
+      }
     }
     return base;
   } catch {
@@ -148,7 +171,6 @@ export function listConversations(_db: true, includeArchived = false): Conversat
   );
   return structuredClone(
     convs.sort((a, b) => {
-      // Pinned first, then by updatedAt
       if (a.pinnedAt && !b.pinnedAt) return -1;
       if (!a.pinnedAt && b.pinnedAt) return 1;
       return b.updatedAt - a.updatedAt;
@@ -165,7 +187,10 @@ export function searchConversations(_db: true, query: string): Conversation[] {
   );
 }
 
-export function searchMessages(_db: true, query: string): Array<{ message: ChatMessage; conversation: Conversation }> {
+export function searchMessages(
+  _db: true,
+  query: string
+): Array<{ message: ChatMessage; conversation: Conversation }> {
   const q = query.toLowerCase();
   const s = store();
   const results: Array<{ message: ChatMessage; conversation: Conversation }> = [];
@@ -175,11 +200,13 @@ export function searchMessages(_db: true, query: string): Array<{ message: ChatM
     for (const msg of msgs) {
       if (msg.role !== "user" && msg.role !== "assistant") continue;
       if (msg.content.toLowerCase().includes(q)) {
-        results.push({ message: structuredClone(msg), conversation: structuredClone(conv) });
+        results.push({
+          message: structuredClone(msg),
+          conversation: structuredClone(conv),
+        });
       }
     }
   }
-  // Sort by message recency
   return results.sort((a, b) => b.message.createdAt - a.message.createdAt).slice(0, 50);
 }
 
@@ -233,7 +260,7 @@ export function exportConversationMarkdown(_db: true, id: string): string {
     if (msg.attachments && msg.attachments.length > 0) {
       lines.push(``);
       for (const att of msg.attachments) {
-        lines.push(`📎 ${att.filename} (${(att.size / 1024).toFixed(1)} KB)`);
+        lines.push(`— ${att.filename} (${(att.size / 1024).toFixed(1)} KB)`);
       }
     }
     lines.push(``, `---`, ``);
@@ -245,7 +272,7 @@ export function deleteConversation(_db: true, id: string): string[] {
   const s = store();
   s.conversations = s.conversations.filter((c) => c.id !== id);
   delete s.messagesByConv[id];
-  // Collect and remove attachments for this conversation
+  delete s.queues[id];
   const toDelete: string[] = [];
   for (const [attId, att] of Object.entries(s.attachments)) {
     if (att.conversationId === id) {
@@ -254,7 +281,46 @@ export function deleteConversation(_db: true, id: string): string[] {
     }
   }
   persist();
-  return toDelete; // caller deletes files
+  return toDelete;
+}
+
+export function branchConversation(
+  _db: true,
+  sourceConvId: string,
+  upToMessageId: string,
+  newConvId: string
+): Conversation | null {
+  const s = store();
+  const sourceConv = s.conversations.find((c) => c.id === sourceConvId);
+  if (!sourceConv) return null;
+  const sourceMsgs = s.messagesByConv[sourceConvId] ?? [];
+  const idx = sourceMsgs.findIndex((m) => m.id === upToMessageId);
+  if (idx === -1) return null;
+  const now = Date.now();
+  const newConv: Conversation = {
+    id: newConvId,
+    title: `Branch: ${sourceConv.title}`,
+    createdAt: now,
+    updatedAt: now,
+    parentConversationId: sourceConvId,
+    branchedFromMessageId: upToMessageId,
+  };
+  s.conversations.push(newConv);
+  // Copy messages up to and including the branch point
+  s.messagesByConv[newConvId] = sourceMsgs.slice(0, idx + 1).map((m) => ({
+    ...m,
+    conversationId: newConvId,
+  }));
+  // Copy attachment metadata for those messages
+  const copiedMsgIds = new Set(s.messagesByConv[newConvId]!.map((m) => m.id));
+  for (const att of Object.values(s.attachments)) {
+    if (att.conversationId === sourceConvId && copiedMsgIds.has(att.messageId)) {
+      const newAtt: Attachment = { ...att, conversationId: newConvId };
+      s.attachments[newAtt.id + "_branch_" + newConvId] = newAtt;
+    }
+  }
+  persist();
+  return structuredClone(newConv);
 }
 
 // ── Messages ───────────────────────────────────────────────────────────────
@@ -264,7 +330,6 @@ export function insertMessage(_db: true, msg: ChatMessage): void {
   if (!s.messagesByConv[msg.conversationId]) {
     s.messagesByConv[msg.conversationId] = [];
   }
-  // Strip attachments array — stored separately
   const { attachments: _att, ...msgToStore } = msg;
   void _att;
   s.messagesByConv[msg.conversationId]!.push(msgToStore as ChatMessage);
@@ -274,7 +339,6 @@ export function insertMessage(_db: true, msg: ChatMessage): void {
 export function getMessagesByConversation(_db: true, convId: string): ChatMessage[] {
   const msgs = store().messagesByConv[convId] ?? [];
   const attachments = store().attachments;
-  // Join attachments
   return structuredClone(msgs).map((m) => {
     const atts = Object.values(attachments).filter((a) => a.messageId === m.id);
     return atts.length > 0 ? { ...m, attachments: atts } : m;
@@ -288,12 +352,9 @@ export function deleteMessage(_db: true, convId: string, msgId: string): void {
   persist();
 }
 
-// Legacy — kept for backward compat / tests
 export function getAllMessages(_db: true): ChatMessage[] {
   const s = store();
-  return structuredClone(
-    Object.values(s.messagesByConv).flat()
-  );
+  return structuredClone(Object.values(s.messagesByConv).flat());
 }
 
 export function clearMessages(_db: true): void {
@@ -325,4 +386,84 @@ export function getAttachmentsByMessage(_db: true, msgId: string): Attachment[] 
   return structuredClone(
     Object.values(store().attachments).filter((a) => a.messageId === msgId)
   );
+}
+
+// ── Queue ──────────────────────────────────────────────────────────────────
+
+function getQueue(convId: string): ConvQueue {
+  const s = store();
+  if (!s.queues[convId]) s.queues[convId] = { items: [], paused: false };
+  return s.queues[convId]!;
+}
+
+export function getConvQueue(_db: true, convId: string): { items: QueueItem[]; paused: boolean } {
+  return structuredClone(getQueue(convId));
+}
+
+export function enqueueItem(_db: true, item: QueueItem): void {
+  getQueue(item.conversationId).items.push(item);
+  persist();
+}
+
+export function updateQueueItem(_db: true, convId: string, itemId: string, patch: Partial<QueueItem>): void {
+  const q = getQueue(convId);
+  const item = q.items.find((i) => i.id === itemId);
+  if (!item) return;
+  Object.assign(item, patch);
+  persist();
+}
+
+export function removeQueueItem(_db: true, convId: string, itemId: string): void {
+  const q = getQueue(convId);
+  q.items = q.items.filter((i) => i.id !== itemId);
+  persist();
+}
+
+export function setQueuePaused(_db: true, convId: string, paused: boolean): void {
+  getQueue(convId).paused = paused;
+  persist();
+}
+
+export function reorderQueueItems(_db: true, convId: string, orderedIds: string[]): void {
+  const q = getQueue(convId);
+  const map = new Map(q.items.map((i) => [i.id, i]));
+  const reordered: QueueItem[] = [];
+  for (const id of orderedIds) {
+    const item = map.get(id);
+    if (item) reordered.push(item);
+  }
+  // Append any items not in the reorder list (shouldn't happen, but safety)
+  for (const item of q.items) {
+    if (!orderedIds.includes(item.id)) reordered.push(item);
+  }
+  q.items = reordered;
+  persist();
+}
+
+/** Get next queued item (not paused, status=queued) */
+export function nextQueuedItem(_db: true, convId: string): QueueItem | null {
+  const q = getQueue(convId);
+  if (q.paused) return null;
+  const item = q.items.find((i) => i.status === "queued");
+  return item ? structuredClone(item) : null;
+}
+
+/** True if a processing item exists for this conversation */
+export function hasProcessingItem(_db: true, convId: string): boolean {
+  return getQueue(convId).items.some((i) => i.status === "processing");
+}
+
+/** Remove completed/cancelled items older than 1 hour to keep store tidy */
+export function pruneQueueHistory(_db: true, convId: string): void {
+  const q = getQueue(convId);
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  q.items = q.items.filter(
+    (i) =>
+      i.status === "queued" ||
+      i.status === "processing" ||
+      i.status === "paused" ||
+      (i.status === "failed" && (i.completedAt ?? 0) > cutoff) ||
+      (i.status === "completed" && (i.completedAt ?? 0) > cutoff)
+  );
+  persist();
 }
