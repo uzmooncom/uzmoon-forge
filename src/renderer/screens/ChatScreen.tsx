@@ -81,36 +81,58 @@ interface StreamingState {
   conversationId: string;
 }
 
-// ── Attachment thumbnail ───────────────────────────────────────────────────
+// ── File type helpers ─────────────────────────────────────────────────────
 
-function AttachThumb({
+function fileEmoji(mimeType: string): string {
+  if (mimeType.startsWith("image/")) return "🖼";
+  if (mimeType === "application/pdf") return "📄";
+  if (mimeType.includes("word")) return "📝";
+  if (mimeType.includes("excel") || mimeType.includes("spreadsheet")) return "📊";
+  if (mimeType.includes("powerpoint") || mimeType.includes("presentation")) return "📑";
+  if (mimeType === "application/json" || mimeType.includes("xml") || mimeType.includes("yaml")) return "🔧";
+  if (mimeType.startsWith("text/")) return "📃";
+  if (mimeType.includes("zip") || mimeType.includes("tar") || mimeType.includes("gzip")) return "🗜";
+  return "📎";
+}
+
+function truncFilename(name: string, max = 20): string {
+  if (name.length <= max) return name;
+  const ext = name.lastIndexOf(".") > 0 ? name.slice(name.lastIndexOf(".")) : "";
+  return name.slice(0, max - ext.length - 1) + "…" + ext;
+}
+
+// ── FileChip — compact chip shown in composer ──────────────────────────────
+
+function FileChip({
   att,
   onRemove,
 }: {
   att: PendingAttachment;
   onRemove: () => void;
 }) {
+  const isImage = att.mimeType.startsWith("image/");
   return (
-    <div className="relative flex-shrink-0 w-16 h-16 rounded-lg overflow-hidden border border-white/10 group">
-      <img
-        src={att.previewUrl}
-        alt={att.file.name}
-        className="w-full h-full object-cover"
-      />
-      {att.uploading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black/50">
-          <SpinnerIcon size={16} />
-        </div>
+    <div
+      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs border max-w-[180px] flex-shrink-0
+        ${
+          att.error
+            ? "bg-red-900/30 border-red-500/30 text-red-300"
+            : "bg-white/8 border-white/10 text-white/80"
+        }`}
+    >
+      {isImage && att.previewUrl ? (
+        <img src={att.previewUrl} alt="" className="w-5 h-5 rounded object-cover flex-shrink-0" />
+      ) : (
+        <span className="text-sm leading-none flex-shrink-0">{fileEmoji(att.mimeType)}</span>
       )}
-      {att.error && (
-        <div className="absolute inset-0 flex items-center justify-center bg-red-900/80 text-red-200 text-[9px] text-center p-1">
-          {att.error}
-        </div>
-      )}
-      {!att.uploading && !att.error && (
+      <span className="truncate flex-1">
+        {att.error ? att.error : truncFilename(att.file.name)}
+      </span>
+      {att.uploading && <SpinnerIcon size={10} />}
+      {!att.uploading && (
         <button
-          onClick={onRemove}
-          className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-black/70 text-white text-[10px] flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600"
+          onClick={(e) => { e.stopPropagation(); onRemove(); }}
+          className="flex-shrink-0 w-3.5 h-3.5 rounded-full flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 transition-colors"
         >
           ✕
         </button>
@@ -722,9 +744,29 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // Messages for active conversation
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
-  // Streaming state
-  const [streaming, setStreaming] = useState<StreamingState | null>(null);
+  // Streaming state — keyed by conversationId so switching chats preserves live streams
+  const [streamingMap, setStreamingMap] = useState<Record<string, StreamingState>>({});
+  // Helper: streaming for the *active* conversation
+  const streaming = activeConvId ? (streamingMap[activeConvId] ?? null) : null;
+  // Global ref tracks which streamId is active (regardless of visible conv)
   const activeStreamId = useRef<string | null>(null);
+  const activeStreamConvId = useRef<string | null>(null);
+
+  const setStreaming = useCallback((value: StreamingState | null) => {
+    if (value !== null) {
+      // Setting — use the conversationId from the value itself
+      setStreamingMap((prev) => ({ ...prev, [value.conversationId]: value }));
+    } else {
+      // Clearing — use activeStreamConvId ref (caller must have set it)
+      const convId = activeStreamConvId.current;
+      if (!convId) return;
+      setStreamingMap((prev) => {
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
+    }
+  }, []);
 
   // Scroll
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -826,32 +868,43 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   useEffect(() => {
     const unsubChunk = window.forgeApi.onStreamChunk(({ streamId, chunk }) => {
       if (activeStreamId.current !== streamId) return;
-      setStreaming((prev) =>
-        prev && prev.streamId === streamId
-          ? { ...prev, text: prev.text + chunk }
-          : prev
-      );
+      const convId = activeStreamConvId.current;
+      if (!convId) return;
+      setStreamingMap((prev) => {
+        const cur = prev[convId];
+        if (!cur || cur.streamId !== streamId) return prev;
+        return { ...prev, [convId]: { ...cur, text: cur.text + chunk } };
+      });
     });
 
     const unsubEnd = window.forgeApi.onStreamEnd(
       ({ streamId, message, cancelled, conversation }) => {
         if (activeStreamId.current !== streamId) return;
+        const convId = activeStreamConvId.current;
         activeStreamId.current = null;
-        setStreaming(null);
+        activeStreamConvId.current = null;
+        // Clear streaming state for this conversation
+        if (convId) {
+          setStreamingMap((prev) => { const n = { ...prev }; delete n[convId]; return n; });
+        }
         if (message) {
-          setMessages((prev) => [...prev, message]);
+          // Append to messages — works whether user is watching this conv or another
+          setMessages((prev) => {
+            // Only append if this message belongs to the currently viewed conversation
+            if (message.conversationId === activeConvId || convId === activeConvId) {
+              return [...prev, message];
+            }
+            return prev;
+          });
         }
         if (conversation) {
           setConversations((prev) => {
             const exists = prev.find((c) => c.id === conversation.id);
             if (!exists) return [conversation, ...prev];
-            return prev.map((c) =>
-              c.id === conversation.id ? conversation : c
-            );
+            return prev.map((c) => c.id === conversation.id ? conversation : c);
           });
         }
         if (!cancelled) {
-          // Refresh conversation list for updatedAt ordering
           loadConversations();
         }
       }
@@ -859,9 +912,18 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
     const unsubErr = window.forgeApi.onStreamError(({ streamId, message }) => {
       if (activeStreamId.current !== streamId) return;
+      const convId = activeStreamConvId.current;
       activeStreamId.current = null;
-      setStreaming(null);
-      setMessages((prev) => [...prev, message]);
+      activeStreamConvId.current = null;
+      if (convId) {
+        setStreamingMap((prev) => { const n = { ...prev }; delete n[convId]; return n; });
+      }
+      setMessages((prev) => {
+        if (message.conversationId === activeConvId || convId === activeConvId) {
+          return [...prev, message];
+        }
+        return prev;
+      });
     });
 
     return () => {
@@ -869,13 +931,11 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       unsubEnd();
       unsubErr();
     };
-  }, [loadConversations]);
+  }, [loadConversations, activeConvId]);
 
   // ── New conversation ─────────────────────────────────────────────────────
   const handleNewConversation = useCallback(() => {
-    // Stop any ongoing stream
-    activeStreamId.current = null;
-    setStreaming(null);
+    // Don't stop ongoing streams — they continue in background
     draftConvId.current = randomId();
     setActiveConvId(null);
     setMessages([]);
@@ -886,9 +946,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // ── Switch conversation ──────────────────────────────────────────────────
   const handleSelectConversation = useCallback((id: string) => {
-    // Allow switching even while streaming — just clear UI state
-    activeStreamId.current = null;
-    setStreaming(null);
+    // Do NOT stop streaming — it continues in background
     setActiveConvId(id);
     setInput("");
     setPendingAttachments([]);
@@ -921,12 +979,11 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // ── Attachment handling ──────────────────────────────────────────────────
   const addFiles = useCallback(
     async (files: File[]) => {
-      const allowed = files.filter((f) => f.type.startsWith("image/"));
-      if (allowed.length === 0) return;
+      if (files.length === 0) return;
 
       const convId = activeConvId ?? draftConvId.current;
 
-      for (const file of allowed.slice(0, 5 - pendingAttachments.length)) {
+      for (const file of files.slice(0, 10 - pendingAttachments.length)) {
         const previewUrl = URL.createObjectURL(file);
         const pending: PendingAttachment = {
           id: randomId(),
@@ -984,10 +1041,10 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   const handlePaste = useCallback(
     (e: React.ClipboardEvent) => {
       const items = Array.from(e.clipboardData.items);
-      const imageItems = items.filter((i) => i.type.startsWith("image/"));
-      if (imageItems.length > 0) {
+      const fileItems = items.filter((i) => i.kind === "file");
+      if (fileItems.length > 0) {
         e.preventDefault();
-        const files = imageItems
+        const files = fileItems
           .map((i) => i.getAsFile())
           .filter((f): f is File => f !== null);
         addFiles(files);
@@ -1065,6 +1122,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       unsubStart();
       // Wire up stream
       activeStreamId.current = streamId;
+      activeStreamConvId.current = convId;
       setStreaming({ streamId, text: "", conversationId: convId });
       // Replace optimistic with server-persisted user message
       const persistedUser: ChatMessage = {
@@ -1115,18 +1173,21 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     }).catch(() => {
       unsubStart();
     });
-  }, [canSend, input, activeConvId, pendingAttachments]);
+  }, [canSend, input, activeConvId, pendingAttachments, setStreaming]);
 
   // ── Cancel stream ────────────────────────────────────────────────────────
   const handleCancel = useCallback(async () => {
     const sid = activeStreamId.current;
     if (!sid) return;
-    // Clear UI immediately so user gets feedback
+    const convId = activeStreamConvId.current;
+    // Clear UI immediately
     activeStreamId.current = null;
-    setStreaming(null);
+    activeStreamConvId.current = null;
+    if (convId) {
+      setStreamingMap((prev) => { const n = { ...prev }; delete n[convId]; return n; });
+    }
     // Tell main process to abort
     await window.forgeApi.cancelStream(sid);
-    // Re-focus input
     setTimeout(() => textareaRef.current?.focus(), 50);
   }, []);
 
@@ -1222,7 +1283,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       key={conv.id}
                       conv={conv}
                       active={conv.id === activeConvId}
-                      isStreaming={streaming?.conversationId === conv.id}
+                      isStreaming={!!streamingMap[conv.id]}
                       onClick={() => handleSelectConversation(conv.id)}
                       onRename={handleRename}
                       onDelete={handleDelete}
@@ -1327,12 +1388,67 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
         {/* Composer */}
         <div className="flex-shrink-0 px-4 pb-4 pt-2">
-          <div className="relative bg-[#1a1a27] border border-white/8 rounded-2xl overflow-hidden focus-within:border-white/15 transition-colors">
-            {/* Attachment previews */}
+          <div className="relative bg-[#1a1a27] border border-white/8 rounded-2xl focus-within:border-white/15 transition-colors">
+
+            {/* Textarea row */}
+            <div className="flex items-end px-3 pt-2.5 pb-1 gap-2">
+              {/* Attach button */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={pendingAttachments.length >= 10}
+                title="Attach file (image, PDF, text, code…)"
+                className="flex-shrink-0 mb-1 flex items-center justify-center w-7 h-7 rounded-lg text-white/30 hover:text-white/70 hover:bg-white/5 transition-colors disabled:opacity-20 disabled:pointer-events-none"
+              >
+                <PaperclipIcon size={16} />
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="*/*"
+                multiple
+                className="hidden"
+                onChange={handleFileChange}
+              />
+
+              {/* Textarea */}
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
+                placeholder={"Message…"}
+                rows={1}
+                className={`flex-1 bg-transparent resize-none text-sm text-white placeholder-white/25 outline-none leading-relaxed transition-opacity min-h-[28px] ${streaming ? "opacity-50" : "opacity-100"}`}
+                style={{ maxHeight: "120px" }}
+              />
+
+              {/* Send / Stop */}
+              {streaming ? (
+                <button
+                  onClick={handleCancel}
+                  className="flex-shrink-0 mb-1 flex items-center gap-1 px-2.5 py-1 rounded-lg bg-red-900/40 text-red-400 hover:bg-red-900/60 hover:text-red-300 transition-colors text-xs"
+                >
+                  <StopIcon size={11} />
+                  Stop
+                </button>
+              ) : (
+                <button
+                  onClick={handleSend}
+                  disabled={!canSend}
+                  className="flex-shrink-0 mb-1 flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-600 text-white hover:bg-blue-500 transition-colors text-xs disabled:opacity-30 disabled:pointer-events-none"
+                >
+                  <SendIcon size={11} />
+                  Send
+                </button>
+              )}
+            </div>
+
+            {/* File chips row — only shown when there are pending attachments */}
             {pendingAttachments.length > 0 && (
-              <div className="flex gap-2 px-3 pt-3 flex-wrap">
+              <div className="flex flex-wrap gap-1.5 px-3 pb-2.5">
                 {pendingAttachments.map((att) => (
-                  <AttachThumb
+                  <FileChip
                     key={att.id}
                     att={att}
                     onRemove={() => removeAttachment(att.id)}
@@ -1340,77 +1456,11 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 ))}
               </div>
             )}
-
-            {/* Textarea — never disabled so focus is never lost */}
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onPaste={handlePaste}
-              placeholder={
-                streaming ? "Responding… (press Stop to cancel)" : "Message… (Shift+Enter for newline)"
-              }
-              rows={1}
-              className={`w-full bg-transparent resize-none px-4 pt-3 pb-2 text-sm text-white placeholder-white/20 outline-none leading-relaxed transition-opacity ${streaming ? "opacity-50" : "opacity-100"}`}
-              style={{ maxHeight: "160px" }}
-            />
-
-            {/* Composer toolbar */}
-            <div className="flex items-center justify-between px-3 pb-2.5">
-              {/* Attach button */}
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                disabled={!!streaming || pendingAttachments.length >= 5}
-                className="flex items-center gap-1.5 text-white/30 hover:text-white/70 transition-colors text-xs disabled:opacity-20 disabled:pointer-events-none"
-                title="Attach image"
-              >
-                <PaperclipIcon size={14} />
-                <span className="hidden sm:block">Image</span>
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                className="hidden"
-                onChange={handleFileChange}
-              />
-
-              <div className="flex items-center gap-2">
-                {/* Char count hint (only when long) */}
-                {input.length > 500 && (
-                  <span className="text-[10px] text-white/20">
-                    {input.length}
-                  </span>
-                )}
-
-                {/* Send / Stop */}
-                {streaming ? (
-                  <button
-                    onClick={handleCancel}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-900/40 text-red-400 hover:bg-red-900/60 hover:text-red-300 transition-colors text-xs"
-                  >
-                    <StopIcon size={12} />
-                    Stop
-                  </button>
-                ) : (
-                  <button
-                    onClick={handleSend}
-                    disabled={!canSend}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600 text-white hover:bg-blue-500 transition-colors text-xs disabled:opacity-30 disabled:pointer-events-none"
-                  >
-                    <SendIcon size={12} />
-                    Send
-                  </button>
-                )}
-              </div>
-            </div>
           </div>
 
           {/* Keyboard hint */}
-          <div className="text-center text-[10px] text-white/15 mt-1.5">
-            Enter to send · Shift+Enter for newline · Paste or drag images to attach
+          <div className="text-center text-[10px] text-white/15 mt-1">
+            Enter to send · Shift+Enter for newline · Paste or drag files to attach
           </div>
         </div>
       </div>

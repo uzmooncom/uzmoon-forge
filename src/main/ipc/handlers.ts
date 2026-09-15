@@ -26,26 +26,58 @@ interface Services {
 // Active streaming abort signals
 const activeStreams = new Map<string, { aborted: boolean }>();
 
-// Allowed image MIME types
+// Allowed MIME types
 const ALLOWED_MIME = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/jpg",
-  "image/webp",
-  "image/gif",
+  // Images
+  "image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif",
+  // Documents
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  // Text / code
+  "text/plain", "text/html", "text/css", "text/javascript", "text/csv",
+  "text/markdown", "text/x-markdown",
+  "application/json",
+  "application/xml", "text/xml",
+  "application/x-yaml", "text/yaml",
+  // Archives
+  "application/zip",
+  "application/x-tar",
+  "application/gzip",
 ]);
-const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024; // 10MB
-const MAX_ATTACHMENTS_PER_MSG = 5;
+const MAX_ATTACHMENT_SIZE = 20 * 1024 * 1024; // 20MB
+const MAX_ATTACHMENTS_PER_MSG = 10;
 
 function extForMime(mimeType: string): string {
   const map: Record<string, string> = {
-    "image/png": "png",
-    "image/jpeg": "jpg",
-    "image/jpg": "jpg",
-    "image/webp": "webp",
-    "image/gif": "gif",
+    "image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg",
+    "image/webp": "webp", "image/gif": "gif",
+    "application/pdf": "pdf",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.ms-powerpoint": "ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "text/plain": "txt", "text/html": "html", "text/css": "css",
+    "text/javascript": "js", "text/csv": "csv",
+    "text/markdown": "md", "text/x-markdown": "md",
+    "application/json": "json",
+    "application/xml": "xml", "text/xml": "xml",
+    "application/x-yaml": "yaml", "text/yaml": "yaml",
+    "application/zip": "zip",
+    "application/x-tar": "tar",
+    "application/gzip": "gz",
   };
   return map[mimeType] ?? "bin";
+}
+
+function isImageMime(mimeType: string): boolean {
+  return mimeType.startsWith("image/");
 }
 
 /** Generate a deterministic title from the first user message */
@@ -63,18 +95,38 @@ function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m): SimpleMessage => {
       if (m.attachments && m.attachments.length > 0 && m.role === "user") {
-        // Multimodal message — read attachment files
         const parts: Array<{ type: "text"; text: string } | ImageContent> = [];
         if (m.content.trim()) {
           parts.push({ type: "text", text: m.content });
         }
         for (const att of m.attachments) {
           try {
-            const data = fs.readFileSync(att.localPath).toString("base64");
-            parts.push({ type: "image", mimeType: att.mimeType, data });
+            if (isImageMime(att.mimeType)) {
+              // Images: send as base64 vision content
+              const data = fs.readFileSync(att.localPath).toString("base64");
+              parts.push({ type: "image", mimeType: att.mimeType, data });
+            } else {
+              // Non-image: read as text and inject as a labeled text block
+              const raw = fs.readFileSync(att.localPath);
+              const MAX_CHARS = 100_000;
+              let text: string;
+              try {
+                text = raw.toString("utf8");
+                if (text.length > MAX_CHARS) {
+                  text = text.slice(0, MAX_CHARS) + `\n... [truncated, ${raw.length} bytes total]`;
+                }
+              } catch {
+                text = `[binary file: ${att.filename}, ${raw.length} bytes]`;
+              }
+              parts.push({ type: "text", text: `<file name="${att.filename}" type="${att.mimeType}">\n${text}\n</file>` });
+            }
           } catch {
             // file missing — skip
           }
+        }
+        // If only non-text parts and original content already captured, collapse to string
+        if (parts.length === 1 && parts[0]!.type === "text") {
+          return { role: "user", content: (parts[0] as { type: "text"; text: string }).text };
         }
         return { role: "user", content: parts };
       }
