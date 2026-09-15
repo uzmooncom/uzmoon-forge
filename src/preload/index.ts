@@ -148,6 +148,10 @@ const forgeApi = {
     return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_ERROR, listener);
   },
 
+  // ── Clipboard ──────────────────────────────────────────────────────────────
+  copyText: (text: string): Promise<void> =>
+    ipcRenderer.invoke("clipboard:write", text),
+
   // ── Legacy ────────────────────────────────────────────────────────────────
   getHistory: (): Promise<ChatMessage[]> =>
     ipcRenderer.invoke(IPC.CONV_MESSAGES, ""),

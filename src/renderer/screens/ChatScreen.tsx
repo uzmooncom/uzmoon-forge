@@ -427,7 +427,7 @@ function CopyCodeBlock({ children }: { children: React.ReactNode }) {
   const preRef = useRef<HTMLPreElement>(null);
   const handle = () => {
     const text = preRef.current?.textContent ?? "";
-    navigator.clipboard.writeText(text).catch(() => {});
+    window.forgeApi.copyText(text).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
   };
@@ -1260,7 +1260,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // ── Copy ─────────────────────────────────────────────────────────────────
   const handleCopy = useCallback((text: string) => {
-    navigator.clipboard.writeText(text).catch(() => {});
+    window.forgeApi.copyText(text).catch(() => {});
   }, []);
 
   // ── Auto-resize textarea ─────────────────────────────────────────────────

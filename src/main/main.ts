@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, shell, ipcMain, clipboard } from "electron";
 import path from "path";
 import { getDb } from "./database/db.js";
 import { SecretStore } from "./secret-store/secrets.js";
@@ -56,6 +56,11 @@ function createWindow(): void {
 app.whenReady().then(() => {
   const database = getDb(dataDir);
   const secrets = new SecretStore(dataDir);
+
+  // Clipboard write — renderer can't use navigator.clipboard reliably in Electron
+  ipcMain.handle("clipboard:write", (_event, text: string) => {
+    clipboard.writeText(text);
+  });
 
   registerHandlers({ secrets, database });
   createWindow();
