@@ -4,6 +4,9 @@ import type {
   AgentConfig,
   AppState,
   ChatMessage,
+  Conversation,
+  Attachment,
+  AttachmentInput,
   ConnectionTestResult,
   SendMessageRequest,
 } from "../shared/types.js";
@@ -42,6 +45,42 @@ const forgeApi = {
   testConnection: (cfg: AgentConfig): Promise<ConnectionTestResult> =>
     ipcRenderer.invoke(IPC.TEST_CONNECTION, cfg),
 
+  // ── Conversations ────────────────────────────────────────────────────────
+  listConversations: (): Promise<Conversation[]> =>
+    ipcRenderer.invoke(IPC.CONV_LIST),
+
+  getConversation: (id: string): Promise<Conversation | null> =>
+    ipcRenderer.invoke(IPC.CONV_GET, id),
+
+  createConversation: (conv: Conversation): Promise<void> =>
+    ipcRenderer.invoke(IPC.CONV_CREATE, conv),
+
+  updateConversation: (
+    id: string,
+    patch: Partial<Pick<Conversation, "title" | "updatedAt">>
+  ): Promise<void> => ipcRenderer.invoke(IPC.CONV_UPDATE, id, patch),
+
+  deleteConversation: (id: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.CONV_DELETE, id),
+
+  getConversationMessages: (convId: string): Promise<ChatMessage[]> =>
+    ipcRenderer.invoke(IPC.CONV_MESSAGES, convId),
+
+  // ── Attachments ──────────────────────────────────────────────────────────
+  saveAttachment: (
+    convId: string,
+    input: AttachmentInput
+  ): Promise<{ ok: true; attachment: Attachment } | { ok: false; error: string }> =>
+    ipcRenderer.invoke(IPC.ATTACH_SAVE, convId, input),
+
+  readAttachment: (
+    id: string
+  ): Promise<{ ok: true; data: string; mimeType: string } | { ok: false; error: string }> =>
+    ipcRenderer.invoke(IPC.ATTACH_READ, id),
+
+  deleteAttachment: (id: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.ATTACH_DELETE, id),
+
   // ── Chat ────────────────────────────────────────────────────────────────
   sendMessage: (
     req: SendMessageRequest
@@ -71,11 +110,17 @@ const forgeApi = {
       streamId: string;
       message?: ChatMessage;
       cancelled?: boolean;
+      conversation?: Conversation;
     }) => void
   ): UnsubFn => {
     const listener = (
       _event: Electron.IpcRendererEvent,
-      data: { streamId: string; message?: ChatMessage; cancelled?: boolean }
+      data: {
+        streamId: string;
+        message?: ChatMessage;
+        cancelled?: boolean;
+        conversation?: Conversation;
+      }
     ) => cb(data);
     ipcRenderer.on(IPC.CHAT_STREAM_END, listener);
     return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_END, listener);
@@ -92,15 +137,14 @@ const forgeApi = {
     return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_ERROR, listener);
   },
 
-  // ── History ──────────────────────────────────────────────────────────────
+  // ── Legacy ────────────────────────────────────────────────────────────────
   getHistory: (): Promise<ChatMessage[]> =>
-    ipcRenderer.invoke(IPC.HISTORY_GET),
+    ipcRenderer.invoke(IPC.CONV_MESSAGES, ""),
 
   clearHistory: (): Promise<void> =>
-    ipcRenderer.invoke(IPC.HISTORY_CLEAR),
+    ipcRenderer.invoke(IPC.CONV_UPDATE, "", {}),
 };
 
 contextBridge.exposeInMainWorld("forgeApi", forgeApi);
 
-// Type augmentation for renderer TypeScript
 export type ForgeApi = typeof forgeApi;

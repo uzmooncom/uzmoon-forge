@@ -30,17 +30,55 @@ export interface ConnectionTestResult {
 
 export type MessageRole = "user" | "assistant" | "error";
 
+export interface Attachment {
+  id: string;
+  messageId: string;
+  conversationId: string;
+  mimeType: string;
+  filename: string;
+  localPath: string;
+  size: number;
+  width?: number;
+  height?: number;
+}
+
+/** Attachment data passed from renderer to main for saving */
+export interface AttachmentInput {
+  /** base64-encoded file data */
+  data: string;
+  mimeType: string;
+  filename: string;
+  size: number;
+  width?: number;
+  height?: number;
+}
+
 export interface ChatMessage {
   id: string;
+  conversationId: string;
   role: MessageRole;
   content: string;
   createdAt: number;
   model?: string;
   durationMs?: number;
+  /** true if this is an error message */
+  isError?: boolean;
+  /** attachment metadata (stored separately, joined on load) */
+  attachments?: Attachment[];
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface SendMessageRequest {
+  conversationId: string;
   content: string;
+  /** attachment IDs already saved to disk */
+  attachmentIds?: string[];
 }
 
 export interface SendMessageResponse {
@@ -74,9 +112,20 @@ export const IPC = {
   CHAT_STREAM_ERROR: "chat:streamError",
   CHAT_CANCEL: "chat:cancel",
 
-  // History
-  HISTORY_GET: "history:get",
-  HISTORY_CLEAR: "history:clear",
+  // Conversations
+  CONV_LIST: "conv:list",
+  CONV_GET: "conv:get",
+  CONV_CREATE: "conv:create",
+  CONV_UPDATE: "conv:update",
+  CONV_DELETE: "conv:delete",
+
+  // Messages per conversation
+  CONV_MESSAGES: "conv:messages",
+
+  // Attachments
+  ATTACH_SAVE: "attach:save",
+  ATTACH_READ: "attach:read",
+  ATTACH_DELETE: "attach:delete",
 
   // App state
   APP_STATE_GET: "appState:get",

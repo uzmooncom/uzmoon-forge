@@ -3,7 +3,23 @@ import http from "http";
 import { URL } from "url";
 import type { AgentConfig, ConnectionTestResult } from "../../shared/types.js";
 
-type SimpleMessage = { role: "user" | "assistant"; content: string };
+// ── Message types ──────────────────────────────────────────────────────────
+
+export interface ImageContent {
+  type: "image";
+  mimeType: string;
+  /** base64-encoded image data (no data URI prefix) */
+  data: string;
+}
+
+export type MessageContent = string | Array<{ type: "text"; text: string } | ImageContent>;
+
+export interface SimpleMessage {
+  role: "user" | "assistant";
+  content: MessageContent;
+}
+
+// ── Auth helpers ───────────────────────────────────────────────────────────
 
 function apiKeyHeader(cfg: AgentConfig): Record<string, string> {
   const headerName =
@@ -19,7 +35,6 @@ function apiKeyHeader(cfg: AgentConfig): Record<string, string> {
   return { [headerName]: "<SECRET>" };
 }
 
-/** Replace <SECRET> placeholder with the real key — only done inside main process */
 function resolveHeaders(
   cfg: AgentConfig,
   apiKey: string
@@ -32,12 +47,56 @@ function resolveHeaders(
   return resolved;
 }
 
+// ── Protocol serializers ───────────────────────────────────────────────────
+
+function serializeOpenAIContent(
+  content: MessageContent
+): string | Array<Record<string, unknown>> {
+  if (typeof content === "string") return content;
+  return content.map((part) => {
+    if (part.type === "text") {
+      return { type: "text", text: part.text };
+    }
+    // image
+    return {
+      type: "image_url",
+      image_url: {
+        url: `data:${part.mimeType};base64,${part.data}`,
+      },
+    };
+  });
+}
+
+function serializeAnthropicContent(
+  content: MessageContent
+): string | Array<Record<string, unknown>> {
+  if (typeof content === "string") return content;
+  return content.map((part) => {
+    if (part.type === "text") {
+      return { type: "text", text: part.text };
+    }
+    // image
+    return {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: part.mimeType,
+        data: part.data,
+      },
+    };
+  });
+}
+
 function buildOpenAIBody(
   messages: SimpleMessage[],
   model: string,
   stream: boolean
 ): string {
-  return JSON.stringify({ model, messages, stream, max_tokens: 4096 });
+  const serialized = messages.map((m) => ({
+    role: m.role,
+    content: serializeOpenAIContent(m.content),
+  }));
+  return JSON.stringify({ model, messages: serialized, stream, max_tokens: 4096 });
 }
 
 function buildAnthropicBody(
@@ -45,13 +104,19 @@ function buildAnthropicBody(
   model: string,
   stream: boolean
 ): string {
+  const serialized = messages.map((m) => ({
+    role: m.role,
+    content: serializeAnthropicContent(m.content),
+  }));
   return JSON.stringify({
     model,
-    messages,
+    messages: serialized,
     max_tokens: 4096,
     stream,
   });
 }
+
+// ── Request ────────────────────────────────────────────────────────────────
 
 interface RequestOptions {
   cfg: AgentConfig;
@@ -146,7 +211,17 @@ export function makeRequest(opts: RequestOptions): Promise<string> {
       }
       if (statusCode !== 200) {
         req.destroy();
-        reject(new Error(`unexpected_status:${statusCode}`));
+        // Drain body for error details
+        let errBody = "";
+        res.on("data", (c: Buffer) => { errBody += c.toString(); });
+        res.on("end", () => {
+          // Check for image unsupported error
+          if (errBody.includes("image") || errBody.includes("multimodal") || errBody.includes("vision")) {
+            reject(new Error("image_unsupported"));
+          } else {
+            reject(new Error(`unexpected_status:${statusCode}`));
+          }
+        });
         return;
       }
 
@@ -315,7 +390,7 @@ export async function testConnection(
   }
 }
 
-function classifyError(err: unknown): ConnectionTestResult {
+export function classifyError(err: unknown): ConnectionTestResult {
   if (!(err instanceof Error)) {
     return { status: "error", message: "Unknown error occurred." };
   }
@@ -361,5 +436,3 @@ function classifyError(err: unknown): ConnectionTestResult {
 
   return { status: "error", message: err.message };
 }
-
-export { classifyError, type SimpleMessage };

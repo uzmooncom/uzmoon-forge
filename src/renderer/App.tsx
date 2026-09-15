@@ -75,8 +75,7 @@ export default function App(): React.ReactElement {
 
   return (
     <ChatScreen
-      configId={appState?.agentConfigId ?? ""}
-      onReconfigure={handleReconfigure}
+      onOpenSettings={handleReconfigure}
     />
   );
 }

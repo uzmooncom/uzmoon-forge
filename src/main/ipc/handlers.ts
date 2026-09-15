@@ -1,16 +1,22 @@
 import { ipcMain, IpcMainInvokeEvent, WebContents } from "electron";
 import { randomUUID } from "crypto";
+import path from "path";
+import fs from "fs";
 import { IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   ChatMessage,
   AppState,
+  Conversation,
+  Attachment,
+  AttachmentInput,
   SendMessageRequest,
 } from "../../shared/types.js";
 import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
-import { testConnection, makeRequest } from "../agent-client/client.js";
-import type { SimpleMessage } from "../agent-client/client.js";
+import { makeRequest, classifyError } from "../agent-client/client.js";
+import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
+import { testConnection } from "../agent-client/client.js";
 
 interface Services {
   secrets: SecretStore;
@@ -19,6 +25,62 @@ interface Services {
 
 // Active streaming abort signals
 const activeStreams = new Map<string, { aborted: boolean }>();
+
+// Allowed image MIME types
+const ALLOWED_MIME = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/gif",
+]);
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024; // 10MB
+const MAX_ATTACHMENTS_PER_MSG = 5;
+
+function extForMime(mimeType: string): string {
+  const map: Record<string, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+  };
+  return map[mimeType] ?? "bin";
+}
+
+/** Generate a deterministic title from the first user message */
+function autoTitle(content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) return "New conversation";
+  // Take up to 6 words
+  const words = trimmed.split(/\s+/).slice(0, 6).join(" ");
+  return words.length < trimmed.length ? words : trimmed;
+}
+
+/** Build SimpleMessage array from stored messages (normalize for protocol) */
+function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
+  return msgs
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m): SimpleMessage => {
+      if (m.attachments && m.attachments.length > 0 && m.role === "user") {
+        // Multimodal message — read attachment files
+        const parts: Array<{ type: "text"; text: string } | ImageContent> = [];
+        if (m.content.trim()) {
+          parts.push({ type: "text", text: m.content });
+        }
+        for (const att of m.attachments) {
+          try {
+            const data = fs.readFileSync(att.localPath).toString("base64");
+            parts.push({ type: "image", mimeType: att.mimeType, data });
+          } catch {
+            // file missing — skip
+          }
+        }
+        return { role: "user", content: parts };
+      }
+      return { role: m.role as "user" | "assistant", content: m.content };
+    });
+}
 
 export function registerHandlers(services: Services): void {
   const { secrets, database } = services;
@@ -98,6 +160,146 @@ export function registerHandlers(services: Services): void {
     }
   );
 
+  // ── Conversations ─────────────────────────────────────────────────────────
+
+  ipcMain.handle(IPC.CONV_LIST, (): Conversation[] => {
+    return db.listConversations(database);
+  });
+
+  ipcMain.handle(
+    IPC.CONV_GET,
+    (_event: IpcMainInvokeEvent, id: string): Conversation | null => {
+      return db.getConversation(database, id);
+    }
+  );
+
+  ipcMain.handle(
+    IPC.CONV_CREATE,
+    (_event: IpcMainInvokeEvent, conv: Conversation): void => {
+      db.createConversation(database, conv);
+    }
+  );
+
+  ipcMain.handle(
+    IPC.CONV_UPDATE,
+    (
+      _event: IpcMainInvokeEvent,
+      id: string,
+      patch: Partial<Pick<Conversation, "title" | "updatedAt">>
+    ): void => {
+      db.updateConversation(database, id, patch);
+    }
+  );
+
+  ipcMain.handle(
+    IPC.CONV_DELETE,
+    (_event: IpcMainInvokeEvent, id: string): void => {
+      const filePaths = db.deleteConversation(database, id);
+      // Delete attachment files from disk
+      for (const fp of filePaths) {
+        try {
+          if (fs.existsSync(fp)) fs.unlinkSync(fp);
+        } catch {
+          // best effort
+        }
+      }
+      // Remove attachment directory if empty
+      const dataDir = db.getDataDir();
+      const attDir = path.join(dataDir, "attachments", id);
+      try {
+        if (fs.existsSync(attDir)) fs.rmdirSync(attDir);
+      } catch {
+        // not empty — ignore
+      }
+    }
+  );
+
+  ipcMain.handle(
+    IPC.CONV_MESSAGES,
+    (_event: IpcMainInvokeEvent, convId: string): ChatMessage[] => {
+      return db.getMessagesByConversation(database, convId);
+    }
+  );
+
+  // ── Attachments ───────────────────────────────────────────────────────────
+
+  ipcMain.handle(
+    IPC.ATTACH_SAVE,
+    (
+      _event: IpcMainInvokeEvent,
+      convId: string,
+      input: AttachmentInput
+    ): { ok: true; attachment: Attachment } | { ok: false; error: string } => {
+      // Validate
+      if (!ALLOWED_MIME.has(input.mimeType)) {
+        return { ok: false, error: "Unsupported file type." };
+      }
+      if (input.size > MAX_ATTACHMENT_SIZE) {
+        return { ok: false, error: "File too large (max 10 MB)." };
+      }
+
+      // Write to disk
+      const dataDir = db.getDataDir();
+      const attDir = path.join(dataDir, "attachments", convId);
+      if (!fs.existsSync(attDir)) fs.mkdirSync(attDir, { recursive: true });
+
+      const id = randomUUID();
+      const ext = extForMime(input.mimeType);
+      const localPath = path.join(attDir, `${id}.${ext}`);
+
+      try {
+        fs.writeFileSync(localPath, Buffer.from(input.data, "base64"));
+      } catch (e) {
+        return { ok: false, error: "Failed to save attachment." };
+      }
+
+      const att: Attachment = {
+        id,
+        messageId: "", // will be set when message is inserted
+        conversationId: convId,
+        mimeType: input.mimeType,
+        filename: input.filename,
+        localPath,
+        size: input.size,
+        ...(input.width !== undefined && { width: input.width }),
+        ...(input.height !== undefined && { height: input.height }),
+      };
+
+      return { ok: true, attachment: att };
+    }
+  );
+
+  ipcMain.handle(
+    IPC.ATTACH_READ,
+    (
+      _event: IpcMainInvokeEvent,
+      id: string
+    ): { ok: true; data: string; mimeType: string } | { ok: false; error: string } => {
+      const att = db.getAttachment(database, id);
+      if (!att) return { ok: false, error: "Attachment not found." };
+      try {
+        const data = fs.readFileSync(att.localPath).toString("base64");
+        return { ok: true, data, mimeType: att.mimeType };
+      } catch {
+        return { ok: false, error: "Failed to read attachment." };
+      }
+    }
+  );
+
+  ipcMain.handle(
+    IPC.ATTACH_DELETE,
+    (_event: IpcMainInvokeEvent, id: string): void => {
+      const localPath = db.deleteAttachment(database, id);
+      if (localPath) {
+        try {
+          if (fs.existsSync(localPath)) fs.unlinkSync(localPath);
+        } catch {
+          // best effort
+        }
+      }
+    }
+  );
+
   // ── Chat ──────────────────────────────────────────────────────────────────
 
   ipcMain.handle(
@@ -118,23 +320,55 @@ export function registerHandlers(services: Services): void {
         return { error: "No API key found. Please reconfigure the agent." };
       }
 
+      const { conversationId, content, attachmentIds = [] } = req;
+
+      // Validate attachment count
+      if (attachmentIds.length > MAX_ATTACHMENTS_PER_MSG) {
+        return { error: `Too many attachments (max ${MAX_ATTACHMENTS_PER_MSG}).` };
+      }
+
+      // Resolve attachment metadata (pre-saved to disk)
+      const attachments: Attachment[] = [];
+      for (const attId of attachmentIds) {
+        const att = db.getAttachment(database, attId);
+        if (att) attachments.push(att);
+      }
+
+      // Lazy conversation creation
+      let conv = db.getConversation(database, conversationId);
+      if (!conv) {
+        const now = Date.now();
+        const title = content.trim()
+          ? autoTitle(content)
+          : attachments.length > 0
+          ? "Image conversation"
+          : "New conversation";
+        conv = { id: conversationId, title, createdAt: now, updatedAt: now };
+        db.createConversation(database, conv);
+      }
+
       // Persist user message
       const userMsg: ChatMessage = {
         id: randomUUID(),
+        conversationId,
         role: "user",
-        content: req.content,
+        content,
         createdAt: Date.now(),
+        ...(attachments.length > 0 && { attachments }),
       };
+      // Update attachment metadata with the message ID
+      for (const att of attachments) {
+        att.messageId = userMsg.id;
+        db.saveAttachmentMeta(database, att);
+      }
       db.insertMessage(database, userMsg);
 
-      // Build conversation context from history
-      const history = db.getAllMessages(database).filter(
-        (m) => m.role === "user" || m.role === "assistant"
-      );
-      const contextMessages: SimpleMessage[] = history.map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-      }));
+      // Update conversation updatedAt
+      db.updateConversation(database, conversationId, { updatedAt: Date.now() });
+
+      // Build context from conversation history
+      const history = db.getMessagesByConversation(database, conversationId);
+      const contextMessages: SimpleMessage[] = buildContextMessages(history);
 
       // Set up abort signal
       const streamId = randomUUID();
@@ -162,6 +396,7 @@ export function registerHandlers(services: Services): void {
         const durationMs = Date.now() - startTime;
         const assistantMsg: ChatMessage = {
           id: randomUUID(),
+          conversationId,
           role: "assistant",
           content: fullText,
           createdAt: Date.now(),
@@ -169,9 +404,14 @@ export function registerHandlers(services: Services): void {
           durationMs,
         };
         db.insertMessage(database, assistantMsg);
+        db.updateConversation(database, conversationId, { updatedAt: Date.now() });
 
         if (!sender.isDestroyed()) {
-          sender.send(IPC.CHAT_STREAM_END, { streamId, message: assistantMsg });
+          sender.send(IPC.CHAT_STREAM_END, {
+            streamId,
+            message: assistantMsg,
+            conversation: db.getConversation(database, conversationId),
+          });
         }
 
         return { streamId, userMessage: userMsg };
@@ -185,13 +425,20 @@ export function registerHandlers(services: Services): void {
           return { streamId, userMessage: userMsg, cancelled: true };
         }
 
-        const errMsg =
-          err instanceof Error ? err.message : "Unknown error";
+        const result = classifyError(err);
+        let errorContent = result.message;
+
+        if (err instanceof Error && err.message === "image_unsupported") {
+          errorContent = "This model or endpoint does not appear to support image input.";
+        }
+
         const errorMessage: ChatMessage = {
           id: randomUUID(),
+          conversationId,
           role: "error",
-          content: `Request failed: ${errMsg}`,
+          content: errorContent,
           createdAt: Date.now(),
+          isError: true,
         };
         db.insertMessage(database, errorMessage);
 
@@ -202,7 +449,7 @@ export function registerHandlers(services: Services): void {
           });
         }
 
-        return { streamId, userMessage: userMsg, error: errMsg };
+        return { streamId, userMessage: userMsg, error: result.message };
       } finally {
         activeStreams.delete(streamId);
       }
@@ -216,13 +463,4 @@ export function registerHandlers(services: Services): void {
     }
   });
 
-  // ── History ───────────────────────────────────────────────────────────────
-
-  ipcMain.handle(IPC.HISTORY_GET, (): ChatMessage[] => {
-    return db.getAllMessages(database);
-  });
-
-  ipcMain.handle(IPC.HISTORY_CLEAR, () => {
-    db.clearMessages(database);
-  });
 }
