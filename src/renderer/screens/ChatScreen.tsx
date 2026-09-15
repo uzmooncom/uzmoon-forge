@@ -740,6 +740,9 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // Conversations
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
+  // Ref so stream callbacks always see the current value (no stale closure)
+  const activeConvIdRef = useRef<string | null>(null);
+  useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
 
   // Messages for active conversation
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -888,10 +891,9 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           setStreamingMap((prev) => { const n = { ...prev }; delete n[convId]; return n; });
         }
         if (message) {
-          // Append to messages — works whether user is watching this conv or another
+          // Append to messages — use ref so we don't capture stale activeConvId
           setMessages((prev) => {
-            // Only append if this message belongs to the currently viewed conversation
-            if (message.conversationId === activeConvId || convId === activeConvId) {
+            if (message.conversationId === activeConvIdRef.current || convId === activeConvIdRef.current) {
               return [...prev, message];
             }
             return prev;
@@ -919,7 +921,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         setStreamingMap((prev) => { const n = { ...prev }; delete n[convId]; return n; });
       }
       setMessages((prev) => {
-        if (message.conversationId === activeConvId || convId === activeConvId) {
+        if (message.conversationId === activeConvIdRef.current || convId === activeConvIdRef.current) {
           return [...prev, message];
         }
         return prev;
@@ -931,7 +933,8 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       unsubEnd();
       unsubErr();
     };
-  }, [loadConversations, activeConvId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadConversations]);
 
   // ── New conversation ─────────────────────────────────────────────────────
   const handleNewConversation = useCallback(() => {
@@ -950,6 +953,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     setActiveConvId(id);
     setInput("");
     setPendingAttachments([]);
+    setTimeout(() => textareaRef.current?.focus(), 50);
   }, []);
 
   // ── Rename ───────────────────────────────────────────────────────────────
@@ -1102,9 +1106,10 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
         size: a.file.size,
       }));
 
-    // Clear composer immediately
+    // Clear composer immediately and refocus
     setInput("");
     setPendingAttachments([]);
+    textareaRef.current?.focus();
 
     // Optimistic user message (with attachment previews)
     const optimisticUserMsg: ChatMessage = {
@@ -1252,17 +1257,14 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       >
         {sidebarOpen && (
           <>
-            {/* Sidebar header */}
-            <div className="flex items-center justify-between px-3 pt-4 pb-2">
-              <span className="text-xs font-semibold text-white/40 uppercase tracking-widest">
-                Chats
-              </span>
+            {/* Sidebar header — traffic light zone on macOS is ~70px from left */}
+            <div className="flex items-center justify-end px-2 pt-3 pb-1 h-[44px]">
               <button
                 onClick={handleNewConversation}
-                className="w-6 h-6 flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 rounded transition-colors"
-                title="New conversation (⌘N)"
+                className="w-7 h-7 flex items-center justify-center text-white/30 hover:text-white hover:bg-white/8 rounded-lg transition-colors"
+                title="New conversation"
               >
-                <PlusIcon size={14} />
+                <PlusIcon size={15} />
               </button>
             </div>
 
@@ -1270,12 +1272,12 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
             <div className="flex-1 overflow-y-auto px-2 pb-4 space-y-0.5">
               {conversations.length === 0 && (
                 <div className="text-center text-white/20 text-xs py-8 px-2">
-                  No conversations yet. Start chatting!
+                  No conversations yet
                 </div>
               )}
               {groups.map((group) => (
                 <div key={group.label}>
-                  <div className="px-2 py-2 text-[10px] font-semibold text-white/25 uppercase tracking-wider">
+                  <div className="px-2 pt-3 pb-1 text-[10px] font-medium text-white/20 tracking-wide">
                     {group.label}
                   </div>
                   {group.items.map((conv) => (
@@ -1298,8 +1300,8 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Top bar */}
-        <div className="flex items-center px-4 py-2.5 border-b border-white/5 gap-2 flex-shrink-0">
+        {/* Top bar — h-[44px] matches sidebar header for visual alignment */}
+        <div className="flex items-center px-3 border-b border-white/5 gap-2 flex-shrink-0 h-[44px]">
           {/* Sidebar toggle */}
           <button
             onClick={() => setSidebarOpen((v) => !v)}
