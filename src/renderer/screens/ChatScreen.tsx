@@ -72,6 +72,9 @@ interface PendingAttachment {
   savedId?: string; // returned by main after save
 }
 
+/** Blob URL cache: savedAttachmentId → objectURL for instant local display */
+const blobUrlCache = new Map<string, string>();
+
 interface StreamingState {
   streamId: string;
   text: string;
@@ -125,9 +128,13 @@ function MessageImage({
   att: Attachment;
   onExpand: (att: Attachment) => void;
 }) {
-  const [src, setSrc] = useState<string | null>(null);
+  // Check blob cache first (for freshly uploaded images — no IPC needed)
+  const cached = blobUrlCache.get(att.id);
+  const [src, setSrc] = useState<string | null>(cached ?? null);
 
   useEffect(() => {
+    // Already have it from cache
+    if (blobUrlCache.has(att.id)) return;
     let cancelled = false;
     window.forgeApi.readAttachment(att.id).then((res) => {
       if (!cancelled && res.ok) {
@@ -168,9 +175,10 @@ function Lightbox({
   att: Attachment;
   onClose: () => void;
 }) {
-  const [src, setSrc] = useState<string | null>(null);
+  const [src, setSrc] = useState<string | null>(blobUrlCache.get(att.id) ?? null);
 
   useEffect(() => {
+    if (blobUrlCache.has(att.id)) return;
     window.forgeApi.readAttachment(att.id).then((res) => {
       if (res.ok) setSrc(`data:${res.mimeType};base64,${res.data}`);
     });
@@ -747,13 +755,18 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     return convs;
   }, []);
 
+  // Run once on mount to set initial active conversation
+  const initializedRef = useRef(false);
   useEffect(() => {
+    if (initializedRef.current) return;
+    initializedRef.current = true;
     loadConversations().then((convs) => {
-      if (convs.length > 0 && !activeConvId) {
+      if (convs.length > 0) {
         setActiveConvId(convs[0]!.id);
       }
     });
-  }, [loadConversations, activeConvId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Load messages when conversation changes ──────────────────────────────
   useEffect(() => {
@@ -843,6 +856,9 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // ── New conversation ─────────────────────────────────────────────────────
   const handleNewConversation = useCallback(() => {
+    // Stop any ongoing stream
+    activeStreamId.current = null;
+    setStreaming(null);
     draftConvId.current = randomId();
     setActiveConvId(null);
     setMessages([]);
@@ -853,9 +869,10 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // ── Switch conversation ──────────────────────────────────────────────────
   const handleSelectConversation = useCallback((id: string) => {
-    if (activeStreamId.current) return; // don't switch while streaming
-    setActiveConvId(id);
+    // Allow switching even while streaming — just clear UI state
+    activeStreamId.current = null;
     setStreaming(null);
+    setActiveConvId(id);
     setInput("");
     setPendingAttachments([]);
   }, []);
@@ -915,6 +932,8 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           };
           const res = await window.forgeApi.saveAttachment(convId, input);
           if (res.ok) {
+            // Cache blob URL by the saved attachment ID for instant display in MessageImage
+            blobUrlCache.set(res.attachment.id, previewUrl);
             setPendingAttachments((prev) =>
               prev.map((p) =>
                 p.id === pending.id
@@ -983,7 +1002,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // ── Send message ─────────────────────────────────────────────────────────
   const canSend =
-    (input.trim() || pendingAttachments.some((a) => a.savedId)) &&
+    (input.trim() !== "" || pendingAttachments.some((a) => a.savedId)) &&
     !streaming &&
     !pendingAttachments.some((a) => a.uploading);
 
@@ -996,25 +1015,35 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       .filter((a) => a.savedId)
       .map((a) => a.savedId!);
 
+    // Snapshot pending attachments for optimistic display
+    const pendingAttsSnapshot = pendingAttachments
+      .filter((a) => a.savedId)
+      .map((a): Attachment => ({
+        id: a.savedId!,
+        messageId: "",
+        conversationId: convId,
+        mimeType: a.mimeType,
+        filename: a.file.name,
+        localPath: "",
+        size: a.file.size,
+      }));
+
     // Clear composer immediately
     setInput("");
     setPendingAttachments([]);
 
-    // Optimistic user message
+    // Optimistic user message (with attachment previews)
     const optimisticUserMsg: ChatMessage = {
       id: randomId(),
       conversationId: convId,
       role: "user",
       content,
       createdAt: Date.now(),
+      ...(pendingAttsSnapshot.length > 0 && { attachments: pendingAttsSnapshot }),
     };
     setMessages((prev) => [...prev, optimisticUserMsg]);
 
-    // Start streaming state
-    const tempStreamId = randomId();
-    activeStreamId.current = tempStreamId;
-    setStreaming({ streamId: tempStreamId, text: "", conversationId: convId });
-
+    // Send to main — IPC returns real streamId
     const res = await window.forgeApi.sendMessage({
       conversationId: convId,
       content,
@@ -1022,8 +1051,6 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     });
 
     if (res.error) {
-      activeStreamId.current = null;
-      setStreaming(null);
       // Remove optimistic message, add error
       setMessages((prev) => {
         const filtered = prev.filter((m) => m.id !== optimisticUserMsg.id);
@@ -1043,18 +1070,23 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       return;
     }
 
-    // Replace optimistic message with persisted one
+    // Wire up real streamId for stop/chunk filtering
     activeStreamId.current = res.streamId;
     setStreaming({ streamId: res.streamId, text: "", conversationId: convId });
+
+    // Replace optimistic with persisted userMessage (has real id)
+    const persistedUser: ChatMessage = {
+      ...res.userMessage,
+      conversationId: convId,
+      ...(pendingAttsSnapshot.length > 0 && { attachments: pendingAttsSnapshot }),
+    };
     setMessages((prev) =>
       prev.map((m) =>
-        m.id === optimisticUserMsg.id
-          ? { ...res.userMessage, conversationId: convId }
-          : m
+        m.id === optimisticUserMsg.id ? persistedUser : m
       )
     );
 
-    // If this was a draft, activate the conversation
+    // If this was a draft, activate the new conversation
     if (!activeConvId) {
       setActiveConvId(convId);
       draftConvId.current = randomId();
@@ -1065,9 +1097,14 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // ── Cancel stream ────────────────────────────────────────────────────────
   const handleCancel = useCallback(async () => {
     const sid = activeStreamId.current;
-    if (sid) {
-      await window.forgeApi.cancelStream(sid);
-    }
+    if (!sid) return;
+    // Clear UI immediately so user gets feedback
+    activeStreamId.current = null;
+    setStreaming(null);
+    // Tell main process to abort
+    await window.forgeApi.cancelStream(sid);
+    // Re-focus input
+    setTimeout(() => textareaRef.current?.focus(), 50);
   }, []);
 
   // ── Retry ────────────────────────────────────────────────────────────────
@@ -1280,7 +1317,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               </div>
             )}
 
-            {/* Textarea */}
+            {/* Textarea — never disabled so focus is never lost */}
             <textarea
               ref={textareaRef}
               value={input}
@@ -1288,11 +1325,10 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={
-                streaming ? "Responding…" : "Message… (Shift+Enter for newline)"
+                streaming ? "Responding… (press Stop to cancel)" : "Message… (Shift+Enter for newline)"
               }
-              disabled={!!streaming}
               rows={1}
-              className="w-full bg-transparent resize-none px-4 pt-3 pb-2 text-sm text-white placeholder-white/20 outline-none leading-relaxed disabled:opacity-40"
+              className={`w-full bg-transparent resize-none px-4 pt-3 pb-2 text-sm text-white placeholder-white/20 outline-none leading-relaxed transition-opacity ${streaming ? "opacity-50" : "opacity-100"}`}
               style={{ maxHeight: "160px" }}
             />
 
