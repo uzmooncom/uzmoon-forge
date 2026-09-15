@@ -91,13 +91,28 @@ function autoTitle(content: string): string {
 
 /** Build SimpleMessage array from stored messages (normalize for protocol) */
 function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
+  // Build lookup for reply-to threading
+  const msgById = new Map<string, ChatMessage>();
+  for (const m of msgs) msgById.set(m.id, m);
+
   return msgs
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m): SimpleMessage => {
+      // Compute effective content — prepend reply quote for threaded messages
+      let effectiveContent = m.content;
+      if (m.role === "user" && m.replyToMessageId) {
+        const parent = msgById.get(m.replyToMessageId);
+        if (parent) {
+          const roleLabel = parent.role === "user" ? "User" : "Assistant";
+          const snippet = parent.content.slice(0, 400) + (parent.content.length > 400 ? "..." : "");
+          effectiveContent = `[Replying to ${roleLabel}: "${snippet}"\n]\n${m.content}`;
+        }
+      }
+
       if (m.attachments && m.attachments.length > 0 && m.role === "user") {
         const parts: Array<{ type: "text"; text: string } | ImageContent> = [];
-        if (m.content.trim()) {
-          parts.push({ type: "text", text: m.content });
+        if (effectiveContent.trim()) {
+          parts.push({ type: "text", text: effectiveContent });
         }
         for (const att of m.attachments) {
           try {
@@ -124,13 +139,13 @@ function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
             // file missing — skip
           }
         }
-        // If only non-text parts and original content already captured, collapse to string
+        // Collapse single text part to string form
         if (parts.length === 1 && parts[0]!.type === "text") {
           return { role: "user", content: (parts[0] as { type: "text"; text: string }).text };
         }
         return { role: "user", content: parts };
       }
-      return { role: m.role as "user" | "assistant", content: m.content };
+      return { role: m.role as "user" | "assistant", content: effectiveContent };
     });
 }
 
@@ -396,7 +411,7 @@ export function registerHandlers(services: Services): void {
         return { error: "No API key found. Please reconfigure the agent." };
       }
 
-      const { conversationId, content, attachmentIds = [] } = req;
+      const { conversationId, content, attachmentIds = [], replyToMessageId } = req;
 
       // Validate attachment count
       if (attachmentIds.length > MAX_ATTACHMENTS_PER_MSG) {
@@ -431,6 +446,7 @@ export function registerHandlers(services: Services): void {
         content,
         createdAt: Date.now(),
         ...(attachments.length > 0 && { attachments }),
+        ...(replyToMessageId && { replyToMessageId }),
       };
       // Update attachment metadata with the message ID
       for (const att of attachments) {
