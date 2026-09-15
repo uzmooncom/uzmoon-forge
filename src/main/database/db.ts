@@ -142,10 +142,45 @@ export function deleteAgentConfig(_db: true, _id: string): void {
 
 // ── Conversations ──────────────────────────────────────────────────────────
 
-export function listConversations(_db: true): Conversation[] {
-  return structuredClone(
-    [...store().conversations].sort((a, b) => b.updatedAt - a.updatedAt)
+export function listConversations(_db: true, includeArchived = false): Conversation[] {
+  const convs = store().conversations.filter((c) =>
+    includeArchived ? true : !c.archivedAt
   );
+  return structuredClone(
+    convs.sort((a, b) => {
+      // Pinned first, then by updatedAt
+      if (a.pinnedAt && !b.pinnedAt) return -1;
+      if (!a.pinnedAt && b.pinnedAt) return 1;
+      return b.updatedAt - a.updatedAt;
+    })
+  );
+}
+
+export function searchConversations(_db: true, query: string): Conversation[] {
+  const q = query.toLowerCase();
+  return structuredClone(
+    store().conversations.filter((c) =>
+      !c.archivedAt && c.title.toLowerCase().includes(q)
+    ).sort((a, b) => b.updatedAt - a.updatedAt)
+  );
+}
+
+export function searchMessages(_db: true, query: string): Array<{ message: ChatMessage; conversation: Conversation }> {
+  const q = query.toLowerCase();
+  const s = store();
+  const results: Array<{ message: ChatMessage; conversation: Conversation }> = [];
+  for (const conv of s.conversations) {
+    if (conv.archivedAt) continue;
+    const msgs = s.messagesByConv[conv.id] ?? [];
+    for (const msg of msgs) {
+      if (msg.role !== "user" && msg.role !== "assistant") continue;
+      if (msg.content.toLowerCase().includes(q)) {
+        results.push({ message: structuredClone(msg), conversation: structuredClone(conv) });
+      }
+    }
+  }
+  // Sort by message recency
+  return results.sort((a, b) => b.message.createdAt - a.message.createdAt).slice(0, 50);
 }
 
 export function getConversation(_db: true, id: string): Conversation | null {
@@ -164,13 +199,46 @@ export function createConversation(_db: true, conv: Conversation): void {
 export function updateConversation(
   _db: true,
   id: string,
-  patch: Partial<Pick<Conversation, "title" | "updatedAt">>
+  patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt">>
 ): void {
   const conv = store().conversations.find((c) => c.id === id);
   if (!conv) return;
   if (patch.title !== undefined) conv.title = patch.title;
   if (patch.updatedAt !== undefined) conv.updatedAt = patch.updatedAt;
+  if ("pinnedAt" in patch) conv.pinnedAt = patch.pinnedAt;
+  if ("archivedAt" in patch) conv.archivedAt = patch.archivedAt;
   persist();
+}
+
+export function exportConversationMarkdown(_db: true, id: string): string {
+  const conv = store().conversations.find((c) => c.id === id);
+  if (!conv) return "";
+  const msgs = getMessagesByConversation(true, id);
+  const lines: string[] = [
+    `# ${conv.title}`,
+    ``,
+    `_Exported from Uzmoon Forge — ${new Date(conv.createdAt).toLocaleString()}_`,
+    ``,
+  ];
+  for (const msg of msgs) {
+    if (msg.role === "user") {
+      lines.push(`**You**  `);
+    } else if (msg.role === "assistant") {
+      lines.push(`**Agent**  `);
+    } else {
+      lines.push(`**Error**  `);
+    }
+    lines.push(`_${new Date(msg.createdAt).toLocaleString()}_`, ``);
+    lines.push(msg.content || "_(no text content)_");
+    if (msg.attachments && msg.attachments.length > 0) {
+      lines.push(``);
+      for (const att of msg.attachments) {
+        lines.push(`📎 ${att.filename} (${(att.size / 1024).toFixed(1)} KB)`);
+      }
+    }
+    lines.push(``, `---`, ``);
+  }
+  return lines.join("\n");
 }
 
 export function deleteConversation(_db: true, id: string): string[] {

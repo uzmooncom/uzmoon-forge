@@ -46,8 +46,8 @@ const forgeApi = {
     ipcRenderer.invoke(IPC.TEST_CONNECTION, cfg),
 
   // ── Conversations ────────────────────────────────────────────────────────
-  listConversations: (): Promise<Conversation[]> =>
-    ipcRenderer.invoke(IPC.CONV_LIST),
+  listConversations: (includeArchived?: boolean): Promise<Conversation[]> =>
+    ipcRenderer.invoke(IPC.CONV_LIST, includeArchived ?? false),
 
   getConversation: (id: string): Promise<Conversation | null> =>
     ipcRenderer.invoke(IPC.CONV_GET, id),
@@ -57,11 +57,20 @@ const forgeApi = {
 
   updateConversation: (
     id: string,
-    patch: Partial<Pick<Conversation, "title" | "updatedAt">>
+    patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt">>
   ): Promise<void> => ipcRenderer.invoke(IPC.CONV_UPDATE, id, patch),
 
   deleteConversation: (id: string): Promise<void> =>
     ipcRenderer.invoke(IPC.CONV_DELETE, id),
+
+  searchConversations: (query: string): Promise<Conversation[]> =>
+    ipcRenderer.invoke(IPC.CONV_SEARCH, query),
+
+  exportConversation: (id: string): Promise<string> =>
+    ipcRenderer.invoke(IPC.CONV_EXPORT, id),
+
+  searchMessages: (query: string): Promise<Array<{ message: ChatMessage; conversation: Conversation }>> =>
+    ipcRenderer.invoke(IPC.MSG_SEARCH, query),
 
   getConversationMessages: (convId: string): Promise<ChatMessage[]> =>
     ipcRenderer.invoke(IPC.CONV_MESSAGES, convId),

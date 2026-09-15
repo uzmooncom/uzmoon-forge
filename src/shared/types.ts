@@ -65,6 +65,8 @@ export interface ChatMessage {
   isError?: boolean;
   /** attachment metadata (stored separately, joined on load) */
   attachments?: Attachment[];
+  /** message being replied to */
+  replyToMessageId?: string;
 }
 
 export interface Conversation {
@@ -72,6 +74,10 @@ export interface Conversation {
   title: string;
   createdAt: number;
   updatedAt: number;
+  pinnedAt?: number;
+  archivedAt?: number;
+  parentConversationId?: string;
+  branchedFromMessageId?: string;
 }
 
 export interface SendMessageRequest {
@@ -79,6 +85,8 @@ export interface SendMessageRequest {
   content: string;
   /** attachment IDs already saved to disk */
   attachmentIds?: string[];
+  /** message being quoted/replied to */
+  replyToMessageId?: string;
 }
 
 export interface SendMessageResponse {
@@ -119,9 +127,12 @@ export const IPC = {
   CONV_CREATE: "conv:create",
   CONV_UPDATE: "conv:update",
   CONV_DELETE: "conv:delete",
+  CONV_SEARCH: "conv:search",
+  CONV_EXPORT: "conv:export",
 
   // Messages per conversation
   CONV_MESSAGES: "conv:messages",
+  MSG_SEARCH: "msg:search",
 
   // Attachments
   ATTACH_SAVE: "attach:save",

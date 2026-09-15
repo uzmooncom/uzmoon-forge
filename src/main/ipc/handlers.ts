@@ -214,8 +214,8 @@ export function registerHandlers(services: Services): void {
 
   // ── Conversations ─────────────────────────────────────────────────────────
 
-  ipcMain.handle(IPC.CONV_LIST, (): Conversation[] => {
-    return db.listConversations(database);
+  ipcMain.handle(IPC.CONV_LIST, (_event: IpcMainInvokeEvent, includeArchived?: boolean): Conversation[] => {
+    return db.listConversations(database, includeArchived ?? false);
   });
 
   ipcMain.handle(
@@ -237,9 +237,30 @@ export function registerHandlers(services: Services): void {
     (
       _event: IpcMainInvokeEvent,
       id: string,
-      patch: Partial<Pick<Conversation, "title" | "updatedAt">>
+      patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt">>
     ): void => {
       db.updateConversation(database, id, patch);
+    }
+  );
+
+  ipcMain.handle(
+    IPC.CONV_SEARCH,
+    (_event: IpcMainInvokeEvent, query: string): Conversation[] => {
+      return db.searchConversations(database, query);
+    }
+  );
+
+  ipcMain.handle(
+    IPC.CONV_EXPORT,
+    (_event: IpcMainInvokeEvent, id: string): string => {
+      return db.exportConversationMarkdown(database, id);
+    }
+  );
+
+  ipcMain.handle(
+    IPC.MSG_SEARCH,
+    (_event: IpcMainInvokeEvent, query: string): Array<{ message: ChatMessage; conversation: Conversation }> => {
+      return db.searchMessages(database, query);
     }
   );
 
