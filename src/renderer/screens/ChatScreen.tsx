@@ -30,6 +30,7 @@ import {
   ArrowDownIcon,
   SettingsIcon,
   SearchIcon,
+  InboxIcon,
 } from "../chat/icons.js";
 import type { PendingAttachment, StreamingState, ReplyTarget } from "../chat/types.js";
 import { blobUrlCache, draftStore } from "../chat/types.js";
@@ -56,6 +57,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   });
   const [searchQuery, setSearchQuery] = useState("");
   const [showSearch, setShowSearch] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
 
   // ── Conversations ──────────────────────────────────────────────────────
@@ -130,10 +132,15 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
 
   // Load conversations once
   const loadConversations = useCallback(async () => {
-    const convs = await window.forgeApi.listConversations();
+    const convs = await window.forgeApi.listConversations(showArchived);
     setConversations(convs);
     return convs;
-  }, []);
+  }, [showArchived]);
+
+  // Reload when showArchived toggles
+  useEffect(() => {
+    void loadConversations();
+  }, [showArchived, loadConversations]);
 
   const initializedRef = useRef(false);
   useEffect(() => {
@@ -473,11 +480,49 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     !streaming &&
     !pendingAttachments.some((a) => a.uploading);
 
+  const LONG_MSG_THRESHOLD = 4000; // chars
+
   const handleSend = useCallback(async () => {
     if (!canSend) return;
-    const content = input.trim();
+    let content = input.trim();
     const convId = activeConvId ?? draftConvId.current;
     const attachmentIds = pendingAttachments.filter((a) => a.savedId).map((a) => a.savedId!);
+
+    // Auto-file: if message exceeds threshold, upload excess as a .txt and shorten inline text
+    if (content.length > LONG_MSG_THRESHOLD) {
+      const fullText = content;
+      const preview = content.slice(0, 120).replace(/\n/g, " ");
+      content = `[Long message — see attached file for full text]\n\nPreview: ${preview}…`;
+      const blob = new Blob([fullText], { type: "text/plain" });
+      const file = new File([blob], "message.txt", { type: "text/plain" });
+      const previewUrl = URL.createObjectURL(blob);
+      const pending: PendingAttachment = {
+        id: randomId(), file, previewUrl, mimeType: "text/plain", uploading: true,
+      };
+      setPendingAttachments((prev) => [...prev, pending]);
+      // Upload synchronously before send
+      const b64 = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = (evt) => resolve(((evt.target?.result as string).split(",")[1]) ?? "");
+        reader.readAsDataURL(file);
+      });
+      const res = await window.forgeApi.saveAttachment(convId, {
+        data: b64, mimeType: "text/plain", filename: "message.txt", size: blob.size,
+      });
+      if (res.ok) {
+        blobUrlCache.set(res.attachment.id, previewUrl);
+        attachmentIds.push(res.attachment.id);
+        setPendingAttachments((prev) =>
+          prev.map((p) => p.id === pending.id ? { ...p, uploading: false, savedId: res.attachment.id } : p)
+        );
+      } else {
+        setPendingAttachments((prev) => prev.filter((p) => p.id !== pending.id));
+        URL.revokeObjectURL(previewUrl);
+        // Fall back: restore original content
+        content = fullText;
+      }
+    }
+
     const pendingAttsSnapshot = pendingAttachments
       .filter((a) => a.savedId)
       .map((a): Attachment => ({
@@ -634,6 +679,15 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 <SearchIcon size={14} />
               </button>
               <div className="flex-1" />
+              <button
+                onClick={() => setShowArchived((v) => !v)}
+                className={`flex-shrink-0 w-7 h-7 flex items-center justify-center rounded-lg transition-colors ${
+                  showArchived ? "text-amber-400 bg-amber-400/10" : "text-white/30 hover:text-white hover:bg-white/8"
+                }`}
+                title={showArchived ? "Hide archived" : "Show archived"}
+              >
+                <InboxIcon size={14} />
+              </button>
               <button
                 onClick={handleNewConversation}
                 className="flex-shrink-0 w-7 h-7 flex items-center justify-center text-white/30 hover:text-white hover:bg-white/8 rounded-lg transition-colors"

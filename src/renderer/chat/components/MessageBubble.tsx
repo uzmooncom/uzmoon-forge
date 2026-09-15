@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import type { ChatMessage, Attachment } from "../../../shared/types.js";
 import { fileEmoji, truncFilename, formatTime } from "../helpers.js";
-import { CopyIcon, CheckIcon } from "../icons.js";
+import { CopyIcon, CheckIcon, ReplyIcon, EditIcon, RetryIcon } from "../icons.js";
 import { MessageImage } from "./MessageImage.js";
 import { MarkdownContent } from "./MarkdownContent.js";
 
@@ -157,7 +157,7 @@ export function MessageBubble({
               onClick={() => onQuote(msg)}
               className="flex items-center gap-1 text-[11px] text-white/35 hover:text-white/80 transition-colors py-0.5 px-1.5 rounded hover:bg-white/5"
             >
-              ↩ Reply
+              <ReplyIcon size={11} /> Reply
             </button>
           )}
           {isUser && onEdit && (
@@ -165,7 +165,7 @@ export function MessageBubble({
               onClick={() => onEdit(msg)}
               className="flex items-center gap-1 text-[11px] text-white/35 hover:text-white/80 transition-colors py-0.5 px-1.5 rounded hover:bg-white/5"
             >
-              ✎ Edit
+              <EditIcon size={11} /> Edit
             </button>
           )}
           {isError && onRetry && (
@@ -173,7 +173,7 @@ export function MessageBubble({
               onClick={() => onRetry(msg)}
               className="flex items-center gap-1 text-[11px] text-red-400/60 hover:text-red-300 transition-colors py-0.5 px-1.5 rounded hover:bg-red-900/10"
             >
-              ↺ Retry
+              <RetryIcon size={11} /> Retry
             </button>
           )}
         </div>
