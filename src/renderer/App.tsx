@@ -70,61 +70,70 @@ function MainShell({ onOpenSettings }: MainShellProps) {
   };
 
   return (
-    <div className="flex h-full bg-[#0d0d0f]">
-      {/* Activity rail — only visible when NOT inside a project workspace */}
-      {!activeProject && (
-        <div className="flex-shrink-0 w-14 flex flex-col items-center py-3 gap-1 border-r border-white/5 bg-[#09090d]">
-          {/* Global Chat */}
-          <NavButton
-            active={view === "chat"}
-            label="Global Chat"
-            onClick={() => setView("chat")}
-          >
-            <ChatIcon size={18} />
-          </NavButton>
+    <div className="flex flex-col h-full bg-[#0d0d0f]">
+      {/* ── Title bar drag region (macOS hiddenInset, 38px) ── */}
+      <div
+        className="drag-region flex-shrink-0 w-full"
+        style={{ height: 38 }}
+      />
 
-          {/* Projects */}
-          <NavButton
-            active={view === "projects"}
-            label="Projects"
-            onClick={() => setView("projects")}
-          >
-            <FolderIcon size={18} />
-          </NavButton>
+      {/* ── Main area below title bar ── */}
+      <div className="flex flex-1 min-h-0">
+        {/* Activity rail — only visible when NOT inside a project workspace */}
+        {!activeProject && (
+          <div className="flex-shrink-0 w-14 flex flex-col items-center pb-3 gap-1 border-r border-white/5 bg-[#09090d]">
+            {/* Global Chat */}
+            <NavButton
+              active={view === "chat"}
+              label="Global Chat"
+              onClick={() => setView("chat")}
+            >
+              <ChatIcon size={18} />
+            </NavButton>
 
-          {/* Spacer */}
-          <div className="flex-1" />
+            {/* Projects */}
+            <NavButton
+              active={view === "projects"}
+              label="Projects"
+              onClick={() => setView("projects")}
+            >
+              <FolderIcon size={18} />
+            </NavButton>
 
-          {/* Settings */}
-          <NavButton
-            active={false}
-            label="Settings"
-            onClick={onOpenSettings}
-          >
-            <SettingsIcon size={16} />
-          </NavButton>
-        </div>
-      )}
+            {/* Spacer */}
+            <div className="flex-1" />
 
-      {/* Content */}
-      <div className="flex-1 min-w-0 h-full">
-        {activeProject ? (
-          <ProjectWorkspace
-            project={activeProject}
-            onBack={handleBackToProjects}
-            onOpenSettings={onOpenSettings}
-          />
-        ) : view === "chat" ? (
-          <ChatScreen
-            projectId={null}
-            onOpenSettings={onOpenSettings}
-          />
-        ) : (
-          <ProjectsScreen
-            onOpenProject={handleOpenProject}
-            onOpenSettings={onOpenSettings}
-          />
+            {/* Settings */}
+            <NavButton
+              active={false}
+              label="Settings"
+              onClick={onOpenSettings}
+            >
+              <SettingsIcon size={16} />
+            </NavButton>
+          </div>
         )}
+
+        {/* Content */}
+        <div className="flex-1 min-w-0 min-h-0">
+          {activeProject ? (
+            <ProjectWorkspace
+              project={activeProject}
+              onBack={handleBackToProjects}
+              onOpenSettings={onOpenSettings}
+            />
+          ) : view === "chat" ? (
+            <ChatScreen
+              projectId={null}
+              onOpenSettings={onOpenSettings}
+            />
+          ) : (
+            <ProjectsScreen
+              onOpenProject={handleOpenProject}
+              onOpenSettings={onOpenSettings}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
