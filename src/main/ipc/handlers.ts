@@ -1,4 +1,4 @@
-import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard } from "electron";
+import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } from "electron";
 import { randomUUID } from "crypto";
 import path from "path";
 import fs from "fs";
@@ -12,6 +12,8 @@ import type {
   AttachmentInput,
   SendMessageRequest,
   ConnectionStatus,
+  Project,
+  DirectoryStatus,
 } from "../../shared/types.js";
 import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
@@ -169,9 +171,16 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
 
   // ── Conversations ──────────────────────────────────────────────────────
 
-  ipcMain.handle(IPC.CONV_LIST, (_e: IpcMainInvokeEvent, includeArchived?: boolean): Conversation[] => {
-    return db.listConversations(database, includeArchived ?? false);
-  });
+  ipcMain.handle(
+    IPC.CONV_LIST,
+    (
+      _e: IpcMainInvokeEvent,
+      includeArchived?: boolean,
+      scopeProjectId?: string | null
+    ): Conversation[] => {
+      return db.listConversations(database, includeArchived ?? false, scopeProjectId);
+    }
+  );
 
   ipcMain.handle(IPC.CONV_GET, (_e: IpcMainInvokeEvent, id: string): Conversation | null => {
     return db.getConversation(database, id);
@@ -192,17 +201,23 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     }
   );
 
-  ipcMain.handle(IPC.CONV_SEARCH, (_e: IpcMainInvokeEvent, query: string): Conversation[] => {
-    return db.searchConversations(database, query);
-  });
+  ipcMain.handle(
+    IPC.CONV_SEARCH,
+    (_e: IpcMainInvokeEvent, query: string, scopeProjectId?: string | null): Conversation[] => {
+      return db.searchConversations(database, query, scopeProjectId);
+    }
+  );
 
   ipcMain.handle(IPC.CONV_EXPORT, (_e: IpcMainInvokeEvent, id: string): string => {
     return db.exportConversationMarkdown(database, id);
   });
 
-  ipcMain.handle(IPC.MSG_SEARCH, (_e: IpcMainInvokeEvent, query: string) => {
-    return db.searchMessages(database, query);
-  });
+  ipcMain.handle(
+    IPC.MSG_SEARCH,
+    (_e: IpcMainInvokeEvent, query: string, scopeProjectId?: string | null) => {
+      return db.searchMessages(database, query, scopeProjectId);
+    }
+  );
 
   ipcMain.handle(IPC.CONV_DELETE, (_e: IpcMainInvokeEvent, id: string): void => {
     const sid = getActiveStreamId(id);
@@ -302,16 +317,17 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       _e: IpcMainInvokeEvent,
       req: SendMessageRequest & { targetAgentProfileId?: string }
     ) => {
-      const { conversationId, content, attachmentIds = [], replyToMessageId, targetAgentProfileId } = req;
+      const { conversationId, content, attachmentIds = [], replyToMessageId, targetAgentProfileId, projectId: reqProjectId } = req;
 
       // Resolve which profile to use:
       // 1. Explicit targetAgentProfileId from renderer (per-message override)
       // 2. Conversation's defaultAgentProfileId
       // 3. Global default
       let profileId = targetAgentProfileId;
+      // Look up existing conv (may be null for a brand-new draft conversation)
+      const existingConv = db.getConversation(database, conversationId);
       if (!profileId) {
-        const conv = db.getConversation(database, conversationId);
-        profileId = conv?.defaultAgentProfileId ?? resolveDefaultProfileId() ?? undefined;
+        profileId = existingConv?.defaultAgentProfileId ?? resolveDefaultProfileId() ?? undefined;
       }
       if (!profileId) return { error: "No agent profile available. Please create one first." };
 
@@ -323,6 +339,10 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
         return { error: `Too many attachments (max ${MAX_ATTACHMENTS_PER_MSG}).` };
       }
 
+      // Carry projectId: existing conv's value takes priority (immutable after creation);
+      // for brand-new conversations fall back to the projectId from the request.
+      const enqueueProjectId = existingConv?.projectId ?? reqProjectId;
+
       try {
         const result = await queueManager.enqueue({
           conversationId,
@@ -330,6 +350,7 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
           attachmentIds,
           ...(replyToMessageId && { replyToMessageId }),
           targetAgentProfileId: profileId,
+          ...(enqueueProjectId !== undefined && { projectId: enqueueProjectId }),
         });
         return {
           queueItemId: result.queueItem.id,
@@ -396,6 +417,128 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   ipcMain.handle(IPC.QUEUE_CLEAR, (_e: IpcMainInvokeEvent, convId: string) => {
     queueManager.clearQueue(convId);
   });
+
+  // ── Projects ───────────────────────────────────────────────────────────
+
+  ipcMain.handle(IPC.PROJECT_LIST, (): Project[] => {
+    return db.listProjects(database);
+  });
+
+  ipcMain.handle(IPC.PROJECT_GET, (_e: IpcMainInvokeEvent, id: string): Project | null => {
+    return db.getProject(database, id);
+  });
+
+  ipcMain.handle(
+    IPC.PROJECT_CREATE,
+    (
+      _e: IpcMainInvokeEvent,
+      data: { name: string; workingDirectory: string; defaultAgentProfileId?: string; description?: string }
+    ): { ok: true; project: Project } | { ok: false; error: string } => {
+      const normalized = path.normalize(data.workingDirectory);
+      // Prevent duplicate directory
+      const existing = db.getProjectByDirectory(database, normalized);
+      if (existing) {
+        return { ok: false, error: `A project with this folder already exists: "${existing.name}"` };
+      }
+      // Directory must exist
+      if (!fs.existsSync(normalized)) {
+        return { ok: false, error: "The selected folder does not exist." };
+      }
+      const now = Date.now();
+      const project: Project = {
+        id: randomUUID(),
+        name: data.name.trim() || path.basename(normalized),
+        workingDirectory: normalized,
+        createdAt: now,
+        updatedAt: now,
+        lastOpenedAt: now,
+        ...(data.defaultAgentProfileId !== undefined && { defaultAgentProfileId: data.defaultAgentProfileId }),
+        ...(data.description !== undefined && data.description.trim() !== "" && { description: data.description.trim() }),
+      };
+      db.createProject(database, project);
+      return { ok: true, project };
+    }
+  );
+
+  ipcMain.handle(
+    IPC.PROJECT_UPDATE,
+    (
+      _e: IpcMainInvokeEvent,
+      id: string,
+      patch: Partial<Omit<Project, "id" | "createdAt">>
+    ): Project | null => {
+      // If workingDirectory is being changed, normalize and check duplicates
+      if (patch.workingDirectory !== undefined) {
+        const normalized = path.normalize(patch.workingDirectory);
+        const existing = db.getProjectByDirectory(database, normalized);
+        if (existing && existing.id !== id) {
+          return null; // caller should handle
+        }
+        patch = { ...patch, workingDirectory: normalized };
+      }
+      return db.updateProject(database, id, patch);
+    }
+  );
+
+  ipcMain.handle(
+    IPC.PROJECT_REMOVE,
+    (_e: IpcMainInvokeEvent, id: string): void => {
+      // Soft-archive — NEVER touches the filesystem folder
+      db.archiveProject(database, id);
+    }
+  );
+
+  /**
+   * Validate whether a directory path is accessible.
+   * Returns "ok" | "missing" | "unknown".
+   * The renderer can ONLY ask about paths it already knows (from projects it owns),
+   * not enumerate arbitrary filesystem locations.
+   */
+  ipcMain.handle(
+    IPC.PROJECT_VALIDATE_DIR,
+    (_e: IpcMainInvokeEvent, id: string): DirectoryStatus => {
+      const project = db.getProject(database, id);
+      if (!project) return "unknown";
+      try {
+        const stat = fs.statSync(project.workingDirectory);
+        return stat.isDirectory() ? "ok" : "missing";
+      } catch {
+        return "missing";
+      }
+    }
+  );
+
+  /**
+   * Open a native folder picker dialog.
+   * Returns the selected path or null (cancelled).
+   * The renderer never gets arbitrary filesystem access — it only receives
+   * the single path the user consciously chose via the native dialog.
+   */
+  ipcMain.handle(
+    IPC.PROJECT_PICK_DIR,
+    async (): Promise<string | null> => {
+      const result = await dialog.showOpenDialog({
+        properties: ["openDirectory", "createDirectory"],
+        title: "Select Project Folder",
+        buttonLabel: "Select Folder",
+      });
+      if (result.canceled || result.filePaths.length === 0) return null;
+      return path.normalize(result.filePaths[0]!);
+    }
+  );
+
+  /**
+   * Reveal the project folder in Finder/Explorer.
+   * Uses the stored path — renderer sends only the project id.
+   */
+  ipcMain.handle(
+    IPC.PROJECT_REVEAL_DIR,
+    (_e: IpcMainInvokeEvent, id: string): void => {
+      const project = db.getProject(database, id);
+      if (!project) return;
+      void shell.openPath(project.workingDirectory);
+    }
+  );
 
   // ── Clipboard ──────────────────────────────────────────────────────────
 

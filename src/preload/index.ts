@@ -12,6 +12,8 @@ import type {
   SendMessageRequest,
   QueueItem,
   ConvQueueState,
+  Project,
+  DirectoryStatus,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -64,9 +66,48 @@ const forgeApi = {
   testConnection: (cfg: AgentConfig): Promise<ConnectionTestResult> =>
     ipcRenderer.invoke(IPC.TEST_CONNECTION, cfg),
 
+  // ── Projects ─────────────────────────────────────────────────────────────
+  listProjects: (): Promise<Project[]> =>
+    ipcRenderer.invoke(IPC.PROJECT_LIST),
+
+  getProject: (id: string): Promise<Project | null> =>
+    ipcRenderer.invoke(IPC.PROJECT_GET, id),
+
+  createProject: (data: {
+    name: string;
+    workingDirectory: string;
+    defaultAgentProfileId?: string;
+    description?: string;
+  }): Promise<{ ok: true; project: Project } | { ok: false; error: string }> =>
+    ipcRenderer.invoke(IPC.PROJECT_CREATE, data),
+
+  updateProject: (
+    id: string,
+    patch: Partial<Omit<Project, "id" | "createdAt">>
+  ): Promise<Project | null> =>
+    ipcRenderer.invoke(IPC.PROJECT_UPDATE, id, patch),
+
+  removeProject: (id: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.PROJECT_REMOVE, id),
+
+  validateProjectDir: (id: string): Promise<DirectoryStatus> =>
+    ipcRenderer.invoke(IPC.PROJECT_VALIDATE_DIR, id),
+
+  pickDirectory: (): Promise<string | null> =>
+    ipcRenderer.invoke(IPC.PROJECT_PICK_DIR),
+
+  revealProjectDir: (id: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.PROJECT_REVEAL_DIR, id),
+
   // ── Conversations ────────────────────────────────────────────────────────
-  listConversations: (includeArchived?: boolean): Promise<Conversation[]> =>
-    ipcRenderer.invoke(IPC.CONV_LIST, includeArchived ?? false),
+  /**
+   * scopeProjectId:
+   *   undefined = all conversations (no scope filter)
+   *   null      = global conversations only (no projectId)
+   *   string    = conversations belonging to that project
+   */
+  listConversations: (includeArchived?: boolean, scopeProjectId?: string | null): Promise<Conversation[]> =>
+    ipcRenderer.invoke(IPC.CONV_LIST, includeArchived ?? false, scopeProjectId),
 
   getConversation: (id: string): Promise<Conversation | null> =>
     ipcRenderer.invoke(IPC.CONV_GET, id),
@@ -82,8 +123,8 @@ const forgeApi = {
   deleteConversation: (id: string): Promise<void> =>
     ipcRenderer.invoke(IPC.CONV_DELETE, id),
 
-  searchConversations: (query: string): Promise<Conversation[]> =>
-    ipcRenderer.invoke(IPC.CONV_SEARCH, query),
+  searchConversations: (query: string, scopeProjectId?: string | null): Promise<Conversation[]> =>
+    ipcRenderer.invoke(IPC.CONV_SEARCH, query, scopeProjectId),
 
   exportConversation: (id: string): Promise<string> =>
     ipcRenderer.invoke(IPC.CONV_EXPORT, id),
@@ -91,8 +132,8 @@ const forgeApi = {
   branchConversation: (sourceConvId: string, upToMessageId: string): Promise<Conversation | null> =>
     ipcRenderer.invoke(IPC.CONV_BRANCH, sourceConvId, upToMessageId),
 
-  searchMessages: (query: string): Promise<Array<{ message: ChatMessage; conversation: Conversation }>> =>
-    ipcRenderer.invoke(IPC.MSG_SEARCH, query),
+  searchMessages: (query: string, scopeProjectId?: string | null): Promise<Array<{ message: ChatMessage; conversation: Conversation }>> =>
+    ipcRenderer.invoke(IPC.MSG_SEARCH, query, scopeProjectId),
 
   getConversationMessages: (convId: string): Promise<ChatMessage[]> =>
     ipcRenderer.invoke(IPC.CONV_MESSAGES, convId),

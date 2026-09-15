@@ -14,16 +14,26 @@ import {
   getAllMessages,
   clearMessages,
   listConversations,
+  searchConversations,
+  searchMessages,
   getConversation,
   createConversation,
   updateConversation,
   deleteConversation,
+  branchConversation,
   getMessagesByConversation,
   saveAttachmentMeta,
   getAttachment,
   deleteAttachment,
+  listProjects,
+  getProject,
+  createProject,
+  updateProject,
+  archiveProject,
+  getProjectByDirectory,
+  touchProjectLastOpened,
 } from "./db.js";
-import type { AgentConfig, ChatMessage, Conversation, Attachment } from "../../shared/types.js";
+import type { AgentConfig, ChatMessage, Conversation, Attachment, Project } from "../../shared/types.js";
 
 let tmpDir: string;
 let db: true;
@@ -311,5 +321,245 @@ describe("Legacy getAllMessages", () => {
     insertMessage(db, makeMsg("m1", "c1"));
     insertMessage(db, makeMsg("m2", "c2"));
     expect(getAllMessages(db)).toHaveLength(2);
+  });
+});
+
+// ── Projects ──────────────────────────────────────────────────────────────
+
+function makeProject(id: string, name: string, workingDirectory: string): Project {
+  const now = Date.now();
+  return { id, name, workingDirectory, createdAt: now, updatedAt: now };
+}
+
+describe("Project creation", () => {
+  it("creates and retrieves a project", () => {
+    const p = makeProject("p1", "My App", "/tmp/myapp");
+    createProject(db, p);
+    const got = getProject(db, "p1");
+    expect(got).not.toBeNull();
+    expect(got?.name).toBe("My App");
+    expect(got?.workingDirectory).toBe("/tmp/myapp");
+  });
+
+  it("lists projects sorted by recency", () => {
+    const now = Date.now();
+    createProject(db, { ...makeProject("p1", "Older", "/tmp/a"), createdAt: now - 10000, updatedAt: now - 10000 });
+    createProject(db, { ...makeProject("p2", "Newer", "/tmp/b"), createdAt: now, updatedAt: now });
+    const list = listProjects(db);
+    expect(list[0]?.id).toBe("p2");
+    expect(list[1]?.id).toBe("p1");
+  });
+
+  it("returns null for unknown project", () => {
+    expect(getProject(db, "ghost")).toBeNull();
+  });
+});
+
+describe("Project persistence", () => {
+  it("persists project across store reload", () => {
+    createProject(db, makeProject("p1", "Persist Test", "/tmp/persist"));
+    // Simulate restart: reset and reload from same dir
+    resetDb();
+    const db2 = getDb(tmpDir);
+    const got = getProject(db2, "p1");
+    expect(got?.name).toBe("Persist Test");
+    expect(got?.workingDirectory).toBe("/tmp/persist");
+  });
+});
+
+describe("Project update and rename", () => {
+  it("renames display name without changing workingDirectory", () => {
+    createProject(db, makeProject("p1", "Old Name", "/tmp/mydir"));
+    const updated = updateProject(db, "p1", { name: "New Name" });
+    expect(updated?.name).toBe("New Name");
+    expect(updated?.workingDirectory).toBe("/tmp/mydir");
+  });
+
+  it("returns null when updating unknown project", () => {
+    expect(updateProject(db, "ghost", { name: "X" })).toBeNull();
+  });
+
+  it("updates lastOpenedAt via touchProjectLastOpened", () => {
+    createProject(db, makeProject("p1", "App", "/tmp/app"));
+    const before = getProject(db, "p1");
+    touchProjectLastOpened(db, "p1");
+    const after = getProject(db, "p1");
+    expect(after?.lastOpenedAt).toBeGreaterThanOrEqual(before?.createdAt ?? 0);
+  });
+});
+
+describe("Duplicate directory prevention", () => {
+  it("getProjectByDirectory finds existing project by path", () => {
+    createProject(db, makeProject("p1", "App", "/tmp/mydir"));
+    const found = getProjectByDirectory(db, "/tmp/mydir");
+    expect(found?.id).toBe("p1");
+  });
+
+  it("getProjectByDirectory returns null for different path", () => {
+    createProject(db, makeProject("p1", "App", "/tmp/mydir"));
+    expect(getProjectByDirectory(db, "/tmp/other")).toBeNull();
+  });
+
+  it("getProjectByDirectory ignores archived projects", () => {
+    createProject(db, makeProject("p1", "App", "/tmp/mydir"));
+    archiveProject(db, "p1");
+    expect(getProjectByDirectory(db, "/tmp/mydir")).toBeNull();
+  });
+});
+
+describe("Project removal (archive)", () => {
+  it("archives project — no longer in list", () => {
+    createProject(db, makeProject("p1", "App", "/tmp/app"));
+    archiveProject(db, "p1");
+    expect(listProjects(db)).toHaveLength(0);
+  });
+
+  it("archived project is still retrievable by id", () => {
+    createProject(db, makeProject("p1", "App", "/tmp/app"));
+    archiveProject(db, "p1");
+    const got = getProject(db, "p1");
+    expect(got?.archived).toBe(true);
+  });
+
+  it("archiving does NOT remove conversations", () => {
+    createProject(db, makeProject("p1", "App", "/tmp/app"));
+    createConversation(db, { ...makeConv("c1"), projectId: "p1" });
+    archiveProject(db, "p1");
+    // Conversations with that projectId remain
+    const conv = getConversation(db, "c1");
+    expect(conv).not.toBeNull();
+    expect(conv?.projectId).toBe("p1");
+  });
+});
+
+describe("Conversation scope filtering", () => {
+  beforeEach(() => {
+    createConversation(db, makeConv("global1"));
+    createConversation(db, makeConv("global2"));
+    createConversation(db, { ...makeConv("proj1"), projectId: "pA" });
+    createConversation(db, { ...makeConv("proj2"), projectId: "pA" });
+    createConversation(db, { ...makeConv("proj3"), projectId: "pB" });
+  });
+
+  it("null scopeProjectId returns only global conversations", () => {
+    const convs = listConversations(db, false, null);
+    const ids = convs.map((c) => c.id);
+    expect(ids).toContain("global1");
+    expect(ids).toContain("global2");
+    expect(ids).not.toContain("proj1");
+    expect(ids).not.toContain("proj3");
+  });
+
+  it("string scopeProjectId returns only that project's conversations", () => {
+    const convs = listConversations(db, false, "pA");
+    const ids = convs.map((c) => c.id);
+    expect(ids).toContain("proj1");
+    expect(ids).toContain("proj2");
+    expect(ids).not.toContain("proj3");
+    expect(ids).not.toContain("global1");
+  });
+
+  it("undefined scopeProjectId returns all conversations", () => {
+    const convs = listConversations(db, false, undefined);
+    expect(convs).toHaveLength(5);
+  });
+
+  it("no cross-scope leakage between projectA and projectB", () => {
+    const aConvs = listConversations(db, false, "pA");
+    const bConvs = listConversations(db, false, "pB");
+    const aIds = new Set(aConvs.map((c) => c.id));
+    const bIds = new Set(bConvs.map((c) => c.id));
+    for (const id of aIds) expect(bIds.has(id)).toBe(false);
+  });
+});
+
+describe("Scoped search", () => {
+  beforeEach(() => {
+    createConversation(db, { ...makeConv("g1"), title: "Global alpha" });
+    createConversation(db, { ...makeConv("p1"), title: "Project alpha", projectId: "pA" });
+    insertMessage(db, { ...makeMsg("m1", "g1"), content: "hello world" });
+    insertMessage(db, { ...makeMsg("m2", "p1"), content: "hello project" });
+  });
+
+  it("searchConversations with null scope finds only global", () => {
+    const results = searchConversations(db, "alpha", null);
+    expect(results.map((c) => c.id)).toContain("g1");
+    expect(results.map((c) => c.id)).not.toContain("p1");
+  });
+
+  it("searchConversations with projectId scope finds only that project", () => {
+    const results = searchConversations(db, "alpha", "pA");
+    expect(results.map((c) => c.id)).toContain("p1");
+    expect(results.map((c) => c.id)).not.toContain("g1");
+  });
+
+  it("searchMessages with null scope finds only global messages", () => {
+    const results = searchMessages(db, "hello", null);
+    expect(results.map((r) => r.message.id)).toContain("m1");
+    expect(results.map((r) => r.message.id)).not.toContain("m2");
+  });
+
+  it("searchMessages with projectId scope finds only project messages", () => {
+    const results = searchMessages(db, "hello", "pA");
+    expect(results.map((r) => r.message.id)).toContain("m2");
+    expect(results.map((r) => r.message.id)).not.toContain("m1");
+  });
+});
+
+describe("Branch preserves projectId", () => {
+  it("branched conversation inherits projectId from source", () => {
+    createConversation(db, { ...makeConv("src"), projectId: "pA" });
+    insertMessage(db, makeMsg("m1", "src"));
+    const branch = branchConversation(db, "src", "m1", "branch1");
+    expect(branch?.projectId).toBe("pA");
+  });
+
+  it("branched global conversation has no projectId", () => {
+    createConversation(db, makeConv("src"));
+    insertMessage(db, makeMsg("m1", "src"));
+    const branch = branchConversation(db, "src", "m1", "branch2");
+    expect(branch?.projectId).toBeUndefined();
+  });
+});
+
+describe("Global conversation migration compatibility", () => {
+  it("existing conversations without projectId are treated as global", () => {
+    // Create a conversation without any projectId (legacy style)
+    createConversation(db, makeConv("legacy1"));
+    const globalConvs = listConversations(db, false, null);
+    expect(globalConvs.map((c) => c.id)).toContain("legacy1");
+  });
+
+  it("existing global conversations are not shown in project scope", () => {
+    createConversation(db, makeConv("legacy1"));
+    const projectConvs = listConversations(db, false, "someProject");
+    expect(projectConvs.map((c) => c.id)).not.toContain("legacy1");
+  });
+});
+
+describe("Project default agent", () => {
+  it("stores and retrieves defaultAgentProfileId on project", () => {
+    createProject(db, {
+      ...makeProject("p1", "App", "/tmp/app"),
+      defaultAgentProfileId: "profile-abc",
+    });
+    const got = getProject(db, "p1");
+    expect(got?.defaultAgentProfileId).toBe("profile-abc");
+  });
+
+  it("can update project default agent independently", () => {
+    createProject(db, { ...makeProject("p1", "App", "/tmp/app"), defaultAgentProfileId: "a" });
+    updateProject(db, "p1", { defaultAgentProfileId: "b" });
+    expect(getProject(db, "p1")?.defaultAgentProfileId).toBe("b");
+  });
+});
+
+describe("Conversation projectId is immutable by design", () => {
+  it("updateConversation does not expose projectId in patch type (by design)", () => {
+    createConversation(db, { ...makeConv("c1"), projectId: "pA" });
+    // The DB updateConversation patch only allows specific fields; projectId is not in the patch
+    // We confirm the original projectId remains after an unrelated update
+    updateConversation(db, "c1", { title: "renamed" });
+    expect(getConversation(db, "c1")?.projectId).toBe("pA");
   });
 });

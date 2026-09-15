@@ -12,6 +12,7 @@ import type {
   Conversation,
   Attachment,
   QueueItem,
+  Project,
 } from "../../shared/types.js";
 
 // ── Store shape ────────────────────────────────────────────────────────────
@@ -27,6 +28,8 @@ interface Store {
   agentConfig: AgentConfig | null;
   /** Canonical multi-profile store keyed by profile id */
   agentProfiles: Record<string, AgentProfile>;
+  /** Projects keyed by id */
+  projects: Record<string, Project>;
   /** Legacy flat messages (migrated to conversations on first load) */
   messages?: ChatMessage[];
   conversations: Conversation[];
@@ -42,6 +45,7 @@ const DEFAULT_STORE: Store = {
   appState: { onboardingComplete: false, agentConfigId: null, defaultAgentProfileId: null },
   agentConfig: null,
   agentProfiles: {},
+  projects: {},
   conversations: [],
   messagesByConv: {},
   attachments: {},
@@ -67,6 +71,7 @@ function load(): Store {
       appState: raw.appState ?? DEFAULT_STORE.appState,
       agentConfig: raw.agentConfig ?? null,
       agentProfiles: raw.agentProfiles ?? {},
+      projects: raw.projects ?? {},
       conversations: raw.conversations ?? [],
       messagesByConv: raw.messagesByConv ?? {},
       attachments: raw.attachments ?? {},
@@ -336,10 +341,18 @@ export function updateAgentProfileStatus(
 
 // ── Conversations ──────────────────────────────────────────────────────────
 
-export function listConversations(_db: true, includeArchived = false): Conversation[] {
-  const convs = store().conversations.filter((c) =>
-    includeArchived ? true : !c.archivedAt
-  );
+export function listConversations(
+  _db: true,
+  includeArchived = false,
+  scopeProjectId?: string | null
+): Conversation[] {
+  const convs = store().conversations.filter((c) => {
+    if (!includeArchived && c.archivedAt) return false;
+    // Scope filter: undefined = all, null = global only, string = that project
+    if (scopeProjectId === undefined) return true;
+    if (scopeProjectId === null) return !c.projectId;
+    return c.projectId === scopeProjectId;
+  });
   return structuredClone(
     convs.sort((a, b) => {
       if (a.pinnedAt && !b.pinnedAt) return -1;
@@ -349,24 +362,38 @@ export function listConversations(_db: true, includeArchived = false): Conversat
   );
 }
 
-export function searchConversations(_db: true, query: string): Conversation[] {
+export function searchConversations(
+  _db: true,
+  query: string,
+  scopeProjectId?: string | null
+): Conversation[] {
   const q = query.toLowerCase();
   return structuredClone(
-    store().conversations.filter((c) =>
-      !c.archivedAt && c.title.toLowerCase().includes(q)
-    ).sort((a, b) => b.updatedAt - a.updatedAt)
+    store().conversations.filter((c) => {
+      if (c.archivedAt) return false;
+      if (scopeProjectId !== undefined) {
+        if (scopeProjectId === null && c.projectId) return false;
+        if (typeof scopeProjectId === "string" && c.projectId !== scopeProjectId) return false;
+      }
+      return c.title.toLowerCase().includes(q);
+    }).sort((a, b) => b.updatedAt - a.updatedAt)
   );
 }
 
 export function searchMessages(
   _db: true,
-  query: string
+  query: string,
+  scopeProjectId?: string | null
 ): Array<{ message: ChatMessage; conversation: Conversation }> {
   const q = query.toLowerCase();
   const s = store();
   const results: Array<{ message: ChatMessage; conversation: Conversation }> = [];
   for (const conv of s.conversations) {
     if (conv.archivedAt) continue;
+    if (scopeProjectId !== undefined) {
+      if (scopeProjectId === null && conv.projectId) continue;
+      if (typeof scopeProjectId === "string" && conv.projectId !== scopeProjectId) continue;
+    }
     const msgs = s.messagesByConv[conv.id] ?? [];
     for (const msg of msgs) {
       if (msg.role !== "user" && msg.role !== "assistant") continue;
@@ -480,6 +507,8 @@ export function branchConversation(
     updatedAt: now,
     parentConversationId: sourceConvId,
     branchedFromMessageId: upToMessageId,
+    // Branch inherits projectId from source — preserves scope
+    ...(sourceConv.projectId !== undefined && { projectId: sourceConv.projectId }),
   };
   s.conversations.push(newConv);
   // Copy messages up to and including the branch point
@@ -641,5 +670,78 @@ export function pruneQueueHistory(_db: true, convId: string): void {
       (i.status === "failed" && (i.completedAt ?? 0) > cutoff) ||
       (i.status === "completed" && (i.completedAt ?? 0) > cutoff)
   );
+  persist();
+}
+
+// ── Projects ───────────────────────────────────────────────────────────────
+
+export function listProjects(_db: true): Project[] {
+  return structuredClone(
+    Object.values(store().projects)
+      .filter((p) => !p.archived)
+      .sort((a, b) => {
+        const aTime = a.lastOpenedAt ?? a.updatedAt;
+        const bTime = b.lastOpenedAt ?? b.updatedAt;
+        return bTime - aTime;
+      })
+  );
+}
+
+export function getProject(_db: true, id: string): Project | null {
+  const p = store().projects[id];
+  return p ? structuredClone(p) : null;
+}
+
+/**
+ * Returns the project whose workingDirectory matches the given normalized path.
+ * Used to prevent duplicate-directory projects.
+ */
+export function getProjectByDirectory(_db: true, normalizedPath: string): Project | null {
+  const found = Object.values(store().projects).find(
+    (p) => !p.archived && p.workingDirectory === normalizedPath
+  );
+  return found ? structuredClone(found) : null;
+}
+
+export function createProject(_db: true, project: Project): void {
+  store().projects[project.id] = project;
+  persist();
+}
+
+export function updateProject(
+  _db: true,
+  id: string,
+  patch: Partial<Omit<Project, "id" | "createdAt">>
+): Project | null {
+  const s = store();
+  const p = s.projects[id];
+  if (!p) return null;
+  Object.assign(p, patch);
+  p.updatedAt = Date.now();
+  persist();
+  return structuredClone(p);
+}
+
+/**
+ * Archive (soft-remove) a project.
+ * - Project record is marked archived: true.
+ * - Conversations that belong to this project are NOT deleted — they remain
+ *   queryable by projectId for history integrity.
+ * - The actual filesystem folder is NEVER touched.
+ */
+export function archiveProject(_db: true, id: string): void {
+  const s = store();
+  const p = s.projects[id];
+  if (!p) return;
+  p.archived = true;
+  p.updatedAt = Date.now();
+  persist();
+}
+
+/** Touch lastOpenedAt on the project so recency sort is accurate */
+export function touchProjectLastOpened(_db: true, id: string): void {
+  const p = store().projects[id];
+  if (!p) return;
+  p.lastOpenedAt = Date.now();
   persist();
 }

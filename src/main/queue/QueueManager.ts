@@ -147,12 +147,14 @@ export class QueueManager {
     attachmentIds: string[];
     replyToMessageId?: string;
     targetAgentProfileId: string;
+    /** If set, the new conversation will be scoped to this project */
+    projectId?: string;
   }): Promise<{
     queueItem: QueueItem;
     userMessage: ChatMessage;
     conversation: Conversation;
   }> {
-    const { conversationId, content, attachmentIds, replyToMessageId, targetAgentProfileId } = opts;
+    const { conversationId, content, attachmentIds, replyToMessageId, targetAgentProfileId, projectId } = opts;
 
     // Ensure conversation exists
     let conv = db.getConversation(true, conversationId);
@@ -165,6 +167,8 @@ export class QueueManager {
         createdAt: now,
         updatedAt: now,
         defaultAgentProfileId: targetAgentProfileId,
+        // Scope to project if provided; undefined means Global Chat
+        ...(projectId !== undefined && { projectId }),
       };
       db.createConversation(true, conv);
     } else if (!conv.defaultAgentProfileId) {

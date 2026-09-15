@@ -189,9 +189,16 @@ function QueuePanel({
 
 interface ChatScreenProps {
   onOpenSettings: () => void;
+  /**
+   * When provided: scopes the sidebar and all conversation operations to this project.
+   * When undefined/null: Global Chat mode (conversations with no projectId).
+   */
+  projectId?: string | null;
 }
 
-export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
+export default function ChatScreen({ onOpenSettings, projectId = null }: ChatScreenProps) {
+  // projectId=null → Global Chat (conversations where projectId is null/undefined)
+  // projectId=string → Project Chat (conversations scoped to that project)
   // ── Sidebar ────────────────────────────────────────────────────────────
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     try { return localStorage.getItem("forge:sidebarOpen") !== "false"; } catch { return true; }
@@ -320,14 +327,14 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConvId]);
 
-  // Load conversations
+  // Load conversations — scoped by projectId (null = global, string = project)
   const loadConversations = useCallback(async () => {
-    const convs = await window.forgeApi.listConversations(showArchived);
+    const convs = await window.forgeApi.listConversations(showArchived, projectId);
     setConversations(convs);
     return convs;
-  }, [showArchived]);
+  }, [showArchived, projectId]);
 
-  useEffect(() => { void loadConversations(); }, [showArchived, loadConversations]);
+  useEffect(() => { void loadConversations(); }, [showArchived, loadConversations, projectId]);
 
   const initializedRef = useRef(false);
   useEffect(() => {
@@ -846,6 +853,9 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       ...(attachmentIds.length > 0 && { attachmentIds }),
       ...(reply && { replyToMessageId: reply.messageId }),
       ...(selectedProfileId && { targetAgentProfileId: selectedProfileId }),
+      // For new conversations in project context: stamp the projectId
+      // Ignored by main if conv already exists (its own projectId wins)
+      ...(projectId != null && { projectId }),
     });
 
     if (res.error) {
@@ -893,6 +903,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     pendingAttachments,
     replyTarget,
     selectedProfileId,
+    projectId,
   ]);
 
   const handleCancel = useCallback(async () => {

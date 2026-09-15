@@ -1,3 +1,24 @@
+// ── Project ───────────────────────────────────────────────────────────────
+
+/** Directory availability status checked at open time */
+export type DirectoryStatus = "ok" | "missing" | "unknown";
+
+/** Canonical project domain model */
+export interface Project {
+  id: string;
+  name: string;
+  description?: string;
+  /** Absolute normalized path to the working directory */
+  workingDirectory: string;
+  /** AgentProfile id to default for new conversations in this project */
+  defaultAgentProfileId?: string;
+  createdAt: number;
+  updatedAt: number;
+  lastOpenedAt?: number;
+  /** true = removed from Forge UI but kept for history integrity */
+  archived?: boolean;
+}
+
 export type Protocol = "openai" | "anthropic";
 
 /** @deprecated Use AgentProfile. Kept for one-time migration only. */
@@ -108,6 +129,11 @@ export interface Conversation {
   branchedFromMessageId?: string;
   /** The AgentProfile selected as default for this conversation */
   defaultAgentProfileId?: string;
+  /**
+   * If set: this conversation belongs to a Project.
+   * If null/undefined: this is a Global Chat conversation.
+   */
+  projectId?: string;
 }
 
 export interface SendMessageRequest {
@@ -117,6 +143,11 @@ export interface SendMessageRequest {
   attachmentIds?: string[];
   /** message being quoted/replied to */
   replyToMessageId?: string;
+  /**
+   * If set: new conversations created for this message will be scoped to this project.
+   * Ignored if the conversation already exists (its existing projectId is used instead).
+   */
+  projectId?: string;
 }
 
 export interface SendMessageResponse {
@@ -230,6 +261,16 @@ export const IPC = {
   // App state
   APP_STATE_GET: "appState:get",
   APP_STATE_SET: "appState:set",
+
+  // Projects
+  PROJECT_LIST: "project:list",
+  PROJECT_GET: "project:get",
+  PROJECT_CREATE: "project:create",
+  PROJECT_UPDATE: "project:update",
+  PROJECT_REMOVE: "project:remove",
+  PROJECT_VALIDATE_DIR: "project:validateDir",
+  PROJECT_PICK_DIR: "project:pickDir",
+  PROJECT_REVEAL_DIR: "project:revealDir",
 } as const;
 
 /** Extended send request including per-message agent target */

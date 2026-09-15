@@ -1,15 +1,166 @@
 import React, { useEffect, useState } from "react";
-import type { AppState } from "@shared/types.js";
+import type { AppState, Project } from "@shared/types.js";
 import WelcomeScreen from "./screens/WelcomeScreen.js";
 import ConnectAgentScreen from "./screens/ConnectAgentScreen.js";
 import ChatScreen from "./screens/ChatScreen.js";
+import ProjectsScreen from "./screens/ProjectsScreen.js";
+import ProjectWorkspace from "./screens/ProjectWorkspace.js";
 import AgentProfilesModal from "./components/AgentProfilesModal.js";
 
-type Screen = "loading" | "welcome" | "connect" | "chat";
+// ── Nav icons ──────────────────────────────────────────────────────────────
+
+function ChatIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" fill="none">
+      <path
+        d="M3 4a1 1 0 011-1h12a1 1 0 011 1v9a1 1 0 01-1 1H7l-4 3V4z"
+        stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function FolderIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" fill="none">
+      <path
+        d="M2 5a1 1 0 011-1h5l2 2h7a1 1 0 011 1v8a1 1 0 01-1 1H3a1 1 0 01-1-1V5z"
+        stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function SettingsIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" fill="none">
+      <circle cx="10" cy="10" r="3" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M10 2v2M10 16v2M2 10h2M16 10h2M4.22 4.22l1.42 1.42M14.36 14.36l1.42 1.42M4.22 15.78l1.42-1.42M14.36 5.64l1.42-1.42"
+        stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+type Screen = "loading" | "welcome" | "connect" | "app";
+type AppView = "chat" | "projects";
+
+// ── MainShell ──────────────────────────────────────────────────────────────
+
+interface MainShellProps {
+  onOpenSettings: () => void;
+}
+
+function MainShell({ onOpenSettings }: MainShellProps) {
+  const [view, setView] = useState<AppView>("chat");
+  const [activeProject, setActiveProject] = useState<Project | null>(null);
+
+  const handleOpenProject = (project: Project) => {
+    setActiveProject(project);
+    // Touch lastOpenedAt via update (fire-and-forget)
+    void window.forgeApi.updateProject(project.id, { lastOpenedAt: Date.now() });
+  };
+
+  const handleBackToProjects = () => {
+    setActiveProject(null);
+    setView("projects");
+  };
+
+  return (
+    <div className="flex h-full bg-[#0d0d0f]">
+      {/* Activity rail — only visible when NOT inside a project workspace */}
+      {!activeProject && (
+        <div className="flex-shrink-0 w-14 flex flex-col items-center py-3 gap-1 border-r border-white/5 bg-[#09090d]">
+          {/* Global Chat */}
+          <NavButton
+            active={view === "chat"}
+            label="Global Chat"
+            onClick={() => setView("chat")}
+          >
+            <ChatIcon size={18} />
+          </NavButton>
+
+          {/* Projects */}
+          <NavButton
+            active={view === "projects"}
+            label="Projects"
+            onClick={() => setView("projects")}
+          >
+            <FolderIcon size={18} />
+          </NavButton>
+
+          {/* Spacer */}
+          <div className="flex-1" />
+
+          {/* Settings */}
+          <NavButton
+            active={false}
+            label="Settings"
+            onClick={onOpenSettings}
+          >
+            <SettingsIcon size={16} />
+          </NavButton>
+        </div>
+      )}
+
+      {/* Content */}
+      <div className="flex-1 min-w-0 h-full">
+        {activeProject ? (
+          <ProjectWorkspace
+            project={activeProject}
+            onBack={handleBackToProjects}
+            onOpenSettings={onOpenSettings}
+          />
+        ) : view === "chat" ? (
+          <ChatScreen
+            projectId={null}
+            onOpenSettings={onOpenSettings}
+          />
+        ) : (
+          <ProjectsScreen
+            onOpenProject={handleOpenProject}
+            onOpenSettings={onOpenSettings}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface NavButtonProps {
+  active: boolean;
+  label: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}
+
+function NavButton({ active, label, onClick, children }: NavButtonProps) {
+  return (
+    <button
+      onClick={onClick}
+      title={label}
+      className={`
+        w-10 h-10 rounded-xl flex items-center justify-center transition-all
+        ${active
+          ? "bg-[#6366f1]/15 text-[#6366f1]"
+          : "text-white/30 hover:text-white/60 hover:bg-white/5"
+        }
+      `}
+    >
+      {children}
+    </button>
+  );
+}
+
+// ── App ─────────────────────────────────────────────────────────────────────
 
 export default function App(): React.ReactElement {
   const [screen, setScreen] = useState<Screen>("loading");
   const [appState, setAppState] = useState<AppState | null>(null);
+  const [showProfilesModal, setShowProfilesModal] = useState(false);
 
   useEffect(() => {
     void (async () => {
@@ -17,37 +168,16 @@ export default function App(): React.ReactElement {
       setAppState(state);
 
       if (state.onboardingComplete && state.agentConfigId) {
-        // Verify config still exists
         const cfg = await window.forgeApi.getConfig(state.agentConfigId);
         const hasKey = await window.forgeApi.hasSecret(state.agentConfigId);
-        if (cfg && hasKey) {
-          setScreen("chat");
-          return;
-        }
-        // Config missing or corrupted — go back to connect
-        setScreen("connect");
-        return;
+        if (cfg && hasKey) { setScreen("app"); return; }
+        setScreen("connect"); return;
       }
 
-      if (!state.onboardingComplete) {
-        setScreen("welcome");
-        return;
-      }
-
+      if (!state.onboardingComplete) { setScreen("welcome"); return; }
       setScreen("connect");
     })();
   }, []);
-
-  const handleWelcomeContinue = (): void => {
-    setScreen("connect");
-  };
-
-  const handleConnectComplete = (newState: AppState): void => {
-    setAppState(newState);
-    setScreen("chat");
-  };
-
-  const [showProfilesModal, setShowProfilesModal] = useState(false);
 
   if (screen === "loading") {
     return (
@@ -60,27 +190,23 @@ export default function App(): React.ReactElement {
   }
 
   if (screen === "welcome") {
-    return <WelcomeScreen onContinue={handleWelcomeContinue} />;
+    return <WelcomeScreen onContinue={() => setScreen("connect")} />;
   }
 
   if (screen === "connect") {
     return (
       <ConnectAgentScreen
         initialConfigId={appState?.agentConfigId ?? null}
-        onComplete={handleConnectComplete}
+        onComplete={(newState) => { setAppState(newState); setScreen("app"); }}
       />
     );
   }
 
   return (
     <>
-      <ChatScreen
-        onOpenSettings={() => setShowProfilesModal(true)}
-      />
+      <MainShell onOpenSettings={() => setShowProfilesModal(true)} />
       {showProfilesModal && (
-        <AgentProfilesModal
-          onClose={() => setShowProfilesModal(false)}
-        />
+        <AgentProfilesModal onClose={() => setShowProfilesModal(false)} />
       )}
     </>
   );
