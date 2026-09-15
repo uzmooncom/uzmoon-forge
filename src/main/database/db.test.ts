@@ -81,19 +81,19 @@ describe("JSON file store — init", () => {
 
 describe("AppState", () => {
   it("persists AppState", () => {
-    setAppState(db, { onboardingComplete: true, agentConfigId: "abc" });
+    setAppState(db, { onboardingComplete: true, agentConfigId: "abc", defaultAgentProfileId: "abc" });
     const state = getAppState(db);
     expect(state.onboardingComplete).toBe(true);
-    expect(state.agentConfigId).toBe("abc");
+    expect(state.defaultAgentProfileId).toBe("abc");
   });
 
   it("returns default state when nothing is saved", () => {
     const state = getAppState(db);
-    expect(state).toEqual({ onboardingComplete: false, agentConfigId: null });
+    expect(state).toEqual({ onboardingComplete: false, agentConfigId: null, defaultAgentProfileId: null });
   });
 
   it("persists data to disk", () => {
-    setAppState(db, { onboardingComplete: true, agentConfigId: "x" });
+    setAppState(db, { onboardingComplete: true, agentConfigId: "x", defaultAgentProfileId: "x" });
     const jsonPath = path.join(tmpDir, "forge.json");
     expect(fs.existsSync(jsonPath)).toBe(true);
     const raw = JSON.parse(fs.readFileSync(jsonPath, "utf8"));

@@ -3,6 +3,7 @@ import type { AppState } from "@shared/types.js";
 import WelcomeScreen from "./screens/WelcomeScreen.js";
 import ConnectAgentScreen from "./screens/ConnectAgentScreen.js";
 import ChatScreen from "./screens/ChatScreen.js";
+import AgentProfilesModal from "./components/AgentProfilesModal.js";
 
 type Screen = "loading" | "welcome" | "connect" | "chat";
 
@@ -46,9 +47,7 @@ export default function App(): React.ReactElement {
     setScreen("chat");
   };
 
-  const handleReconfigure = (): void => {
-    setScreen("connect");
-  };
+  const [showProfilesModal, setShowProfilesModal] = useState(false);
 
   if (screen === "loading") {
     return (
@@ -74,8 +73,15 @@ export default function App(): React.ReactElement {
   }
 
   return (
-    <ChatScreen
-      onOpenSettings={handleReconfigure}
-    />
+    <>
+      <ChatScreen
+        onOpenSettings={() => setShowProfilesModal(true)}
+      />
+      {showProfilesModal && (
+        <AgentProfilesModal
+          onClose={() => setShowProfilesModal(false)}
+        />
+      )}
+    </>
   );
 }

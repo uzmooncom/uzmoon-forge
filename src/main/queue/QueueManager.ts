@@ -4,19 +4,21 @@
  * Rules:
  * - One active generation per conversation at most.
  * - Context is rebuilt fresh from DB when each item begins processing.
+ * - targetAgentProfileId is captured AT ENQUEUE TIME and never changed.
+ * - Profile + secret are resolved from DB AT PROCESS TIME (not from enqueue args).
  * - On stop/failure, queue is paused — user must explicitly resume.
  * - On restart, any "processing" items were already recovered to "paused" by db.load().
  */
 import { randomUUID } from "crypto";
 import { WebContents } from "electron";
 import { IPC } from "../../shared/types.js";
-import type { QueueItem, ChatMessage, Conversation, AgentConfig } from "../../shared/types.js";
+import type { QueueItem, ChatMessage, Conversation } from "../../shared/types.js";
 import * as db from "../database/db.js";
 import { makeRequest, classifyError } from "../agent-client/client.js";
 import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
 import fs from "fs";
 
-// ── Context builder (shared with handlers) ────────────────────────────────
+// ── Context builder ────────────────────────────────────────────────────────
 
 function isImageMime(mimeType: string): boolean {
   return mimeType.startsWith("image/");
@@ -85,6 +87,16 @@ export function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
     });
 }
 
+// ── Secret resolver (injected by handlers.ts) ──────────────────────────────
+
+/** Injectable secret getter — set by registerHandlers so QueueManager
+ *  doesn't need to import SecretStore directly. */
+type SecretGetter = (profileId: string) => string | null;
+let _secretGetter: SecretGetter = () => null;
+export function setSecretGetter(fn: SecretGetter): void {
+  _secretGetter = fn;
+}
+
 // ── Active stream signals ──────────────────────────────────────────────────
 
 /** streamId → abort signal, keyed by conversationId */
@@ -101,7 +113,7 @@ export function cancelStream(streamId: string): void {
   if (sig) sig.aborted = true;
 }
 
-// ── Dispatch lock (prevents double-processing same conv) ──────────────────
+// ── Dispatch lock ──────────────────────────────────────────────────────────
 
 const processing = new Set<string>();
 
@@ -120,37 +132,44 @@ export class QueueManager {
     }
   }
 
-  /** Push queue state update to renderer */
   private pushQueueState(convId: string): void {
     const state = db.getConvQueue(true, convId);
     this.send(IPC.QUEUE_STATE, { conversationId: convId, ...state });
   }
 
   /**
-   * Enqueue a new message request. Saves the user message to DB first,
-   * then adds a QueueItem, then tries to process immediately if free.
+   * Enqueue a new message request.
+   * targetAgentProfileId is captured HERE and never changes.
    */
   async enqueue(opts: {
     conversationId: string;
     content: string;
     attachmentIds: string[];
     replyToMessageId?: string;
-    cfg: AgentConfig;
-    apiKey: string;
+    targetAgentProfileId: string;
   }): Promise<{
     queueItem: QueueItem;
     userMessage: ChatMessage;
     conversation: Conversation;
   }> {
-    const { conversationId, content, attachmentIds, replyToMessageId, cfg, apiKey } = opts;
+    const { conversationId, content, attachmentIds, replyToMessageId, targetAgentProfileId } = opts;
 
     // Ensure conversation exists
     let conv = db.getConversation(true, conversationId);
     if (!conv) {
       const now = Date.now();
       const title = content.trim() ? autoTitle(content) : "New conversation";
-      conv = { id: conversationId, title, createdAt: now, updatedAt: now };
+      conv = {
+        id: conversationId,
+        title,
+        createdAt: now,
+        updatedAt: now,
+        defaultAgentProfileId: targetAgentProfileId,
+      };
       db.createConversation(true, conv);
+    } else if (!conv.defaultAgentProfileId) {
+      // Set conversation default if not yet set
+      db.updateConversation(true, conversationId, { defaultAgentProfileId: targetAgentProfileId });
     }
 
     // Resolve attachments
@@ -175,7 +194,7 @@ export class QueueManager {
     db.insertMessage(true, userMsg);
     db.updateConversation(true, conversationId, { updatedAt: Date.now() });
 
-    // Create queue item
+    // Create queue item — targetAgentProfileId locked here
     const queueItem: QueueItem = {
       id: randomUUID(),
       conversationId,
@@ -185,6 +204,7 @@ export class QueueManager {
       status: "queued",
       createdAt: Date.now(),
       attemptCount: 0,
+      targetAgentProfileId,
       ...(replyToMessageId && { replyToMessageId }),
     };
     db.enqueueItem(true, queueItem);
@@ -192,47 +212,67 @@ export class QueueManager {
     const updatedConv = db.getConversation(true, conversationId)!;
     this.pushQueueState(conversationId);
 
-    // Try to process immediately
-    void this.processNext(conversationId, cfg, apiKey);
+    // Try to process immediately (resolves profile from DB)
+    void this.processNext(conversationId);
 
     return { queueItem, userMessage: userMsg, conversation: updatedConv };
   }
 
   /** Process the next queued item for a conversation if free */
-  async processNext(
-    convId: string,
-    cfg: AgentConfig,
-    apiKey: string
-  ): Promise<void> {
+  async processNext(convId: string): Promise<void> {
     if (processing.has(convId)) return;
     if (db.hasProcessingItem(true, convId)) return;
 
     const item = db.nextQueuedItem(true, convId);
     if (!item) return;
 
-    processing.add(convId);
+    // Resolve agent profile from DB at process time
+    const profile = db.getAgentProfile(true, item.targetAgentProfileId);
+    if (!profile) {
+      // Profile removed — mark item as failed
+      db.updateQueueItem(true, convId, item.id, {
+        status: "failed",
+        completedAt: Date.now(),
+        lastError: "Target agent profile is no longer available.",
+      });
+      db.setQueuePaused(true, convId, true);
+      this.pushQueueState(convId);
+      return;
+    }
 
+    const apiKey = _secretGetter(item.targetAgentProfileId);
+    if (!apiKey) {
+      db.updateQueueItem(true, convId, item.id, {
+        status: "failed",
+        completedAt: Date.now(),
+        lastError: "No API key for target agent profile.",
+      });
+      db.setQueuePaused(true, convId, true);
+      this.pushQueueState(convId);
+      return;
+    }
+
+    processing.add(convId);
     try {
-      await this.processItem(item, cfg, apiKey);
+      await this.processItem(item, profile, apiKey);
     } finally {
       processing.delete(convId);
     }
 
-    // After completion, try next
+    // After completion, try next (profile resolved fresh for next item)
     const next = db.nextQueuedItem(true, convId);
     if (next) {
-      void this.processNext(convId, cfg, apiKey);
+      void this.processNext(convId);
     }
   }
 
   private async processItem(
     item: QueueItem,
-    cfg: AgentConfig,
+    profile: import("../../shared/types.js").AgentProfile,
     apiKey: string
   ): Promise<void> {
     const { conversationId } = item;
 
-    // Mark processing
     db.updateQueueItem(true, conversationId, item.id, {
       status: "processing",
       startedAt: Date.now(),
@@ -240,7 +280,7 @@ export class QueueManager {
     });
     this.pushQueueState(conversationId);
 
-    // Build fresh context from current persisted messages
+    // Build fresh context
     const history = db.getMessagesByConversation(true, conversationId);
     const contextMessages = buildContextMessages(history);
 
@@ -252,13 +292,26 @@ export class QueueManager {
     const startTime = Date.now();
     let fullText = "";
 
-    // Emit stream start so renderer shows typing indicator
+    // Immutable request config — profile snapshot in memory only
+    const cfg = {
+      id: profile.id,
+      name: profile.name,
+      endpoint: profile.endpoint,
+      protocol: profile.protocol,
+      model: profile.model,
+      ...(profile.apiKeyHeader !== undefined && { apiKeyHeader: profile.apiKeyHeader }),
+      ...(profile.timeoutMs !== undefined && { timeoutMs: profile.timeoutMs }),
+    };
+
     this.send(IPC.CHAT_STREAM_START, {
       streamId,
       userMessage: db.getMessagesByConversation(true, conversationId)
         .find((m) => m.id === item.messageId),
       conversation: db.getConversation(true, conversationId),
       queueItemId: item.id,
+      agentProfileId: profile.id,
+      agentNameSnapshot: profile.name,
+      modelSnapshot: profile.model,
     });
 
     try {
@@ -283,11 +336,16 @@ export class QueueManager {
         role: "assistant",
         content: fullText,
         createdAt: Date.now(),
-        model: cfg.model,
+        model: profile.model,
         durationMs,
+        agentProfileId: profile.id,
+        agentNameSnapshot: profile.name,
+        modelSnapshot: profile.model,
       };
       db.insertMessage(true, assistantMsg);
       db.updateConversation(true, conversationId, { updatedAt: Date.now() });
+      db.touchAgentProfileLastUsed(true, profile.id);
+      db.updateAgentProfileStatus(true, profile.id, "connected");
 
       db.updateQueueItem(true, conversationId, item.id, {
         status: "completed",
@@ -308,7 +366,6 @@ export class QueueManager {
       convToStream.delete(conversationId);
 
       if (err instanceof Error && err.message === "cancelled") {
-        // Partial content — keep if meaningful
         if (fullText.trim()) {
           const partialMsg: ChatMessage = {
             id: randomUUID(),
@@ -316,8 +373,11 @@ export class QueueManager {
             role: "assistant",
             content: fullText,
             createdAt: Date.now(),
-            model: cfg.model,
+            model: profile.model,
             durationMs: Date.now() - startTime,
+            agentProfileId: profile.id,
+            agentNameSnapshot: profile.name,
+            modelSnapshot: profile.model,
           };
           db.insertMessage(true, partialMsg);
           db.updateConversation(true, conversationId, { updatedAt: Date.now() });
@@ -337,7 +397,6 @@ export class QueueManager {
           });
         }
 
-        // Stop + pause queue
         db.updateQueueItem(true, conversationId, item.id, {
           status: "cancelled",
           completedAt: Date.now(),
@@ -347,12 +406,15 @@ export class QueueManager {
         return;
       }
 
-      // Real error — pause queue
+      // Real error
       const result = classifyError(err);
       let errorContent = result.message;
       if (err instanceof Error && err.message === "image_unsupported") {
         errorContent = "This model or endpoint does not support image input.";
       }
+
+      // Update profile status
+      db.updateAgentProfileStatus(true, profile.id, result.status);
 
       const errorMsg: ChatMessage = {
         id: randomUUID(),
@@ -361,6 +423,7 @@ export class QueueManager {
         content: errorContent,
         createdAt: Date.now(),
         isError: true,
+        agentProfileId: profile.id,
       };
       db.insertMessage(true, errorMsg);
 
@@ -376,43 +439,45 @@ export class QueueManager {
     }
   }
 
-  /** Resume a paused queue (after user stops/failure) */
-  async resume(convId: string, cfg: AgentConfig, apiKey: string): Promise<void> {
+  /** Resume a paused queue — profile resolved fresh for each item */
+  async resume(convId: string): Promise<void> {
     db.setQueuePaused(true, convId, false);
     this.pushQueueState(convId);
-    void this.processNext(convId, cfg, apiKey);
+    void this.processNext(convId);
   }
 
-  /** Retry failed item (reset status to queued) */
-  async retry(convId: string, itemId: string, cfg: AgentConfig, apiKey: string): Promise<void> {
-    const { lastError: _le, startedAt: _sa, completedAt: _ca, ...rest } = db.getConvQueue(true, convId).items.find((i) => i.id === itemId) ?? {} as QueueItem;
+  /** Retry failed item */
+  async retry(convId: string, itemId: string): Promise<void> {
+    const q = db.getConvQueue(true, convId);
+    const item = q.items.find((i) => i.id === itemId);
+    if (!item) return;
+    const { lastError: _le, startedAt: _sa, completedAt: _ca, ...rest } = item;
     void _le; void _sa; void _ca;
     db.updateQueueItem(true, convId, itemId, { ...rest, status: "queued" });
     db.setQueuePaused(true, convId, false);
     this.pushQueueState(convId);
-    void this.processNext(convId, cfg, apiKey);
+    void this.processNext(convId);
   }
 
-  /** Skip failed item — mark cancelled and resume */
-  async skip(convId: string, itemId: string, cfg: AgentConfig, apiKey: string): Promise<void> {
+  /** Skip failed item */
+  async skip(convId: string, itemId: string): Promise<void> {
     db.updateQueueItem(true, convId, itemId, {
       status: "cancelled",
       completedAt: Date.now(),
     });
     db.setQueuePaused(true, convId, false);
     this.pushQueueState(convId);
-    void this.processNext(convId, cfg, apiKey);
+    void this.processNext(convId);
   }
 
-  /** Edit a queued (not processing) item's content */
   editItem(convId: string, itemId: string, content: string, attachmentIds?: string[]): boolean {
     const q = db.getConvQueue(true, convId);
     const item = q.items.find((i) => i.id === itemId);
     if (!item || item.status === "processing") return false;
     const patch: Partial<QueueItem> = { content };
     if (attachmentIds !== undefined) patch.attachmentIds = attachmentIds;
+    // targetAgentProfileId is preserved — never changed by edit
     db.updateQueueItem(true, convId, itemId, patch);
-    // Also update the persisted user message content
     this.updateMessageContent(convId, item.messageId, content);
     this.pushQueueState(convId);
     return true;
@@ -422,21 +487,17 @@ export class QueueManager {
     const msgs = db.getMessagesByConversation(true, convId);
     const msg = msgs.find((m) => m.id === msgId);
     if (!msg) return;
-    // Re-insert with updated content (delete + re-add)
     db.deleteMessage(true, convId, msgId);
     const { attachments: _atts, ...msgWithoutAtts } = msg;
     void _atts;
     db.insertMessage(true, { ...msgWithoutAtts, content });
   }
 
-  /** Remove a queued item before processing */
   removeItem(convId: string, itemId: string): boolean {
     const q = db.getConvQueue(true, convId);
     const item = q.items.find((i) => i.id === itemId);
     if (!item || item.status === "processing") return false;
-    // Delete the persisted user message too
     db.deleteMessage(true, convId, item.messageId);
-    // Clean orphaned attachments
     for (const attId of item.attachmentIds) {
       const localPath = db.deleteAttachment(true, attId);
       if (localPath) {
@@ -448,13 +509,11 @@ export class QueueManager {
     return true;
   }
 
-  /** Reorder queued items (only non-processing items can be reordered) */
   reorder(convId: string, orderedIds: string[]): void {
     db.reorderQueueItems(true, convId, orderedIds);
     this.pushQueueState(convId);
   }
 
-  /** Clear all queued items (not processing) from a conversation */
   clearQueue(convId: string): void {
     const q = db.getConvQueue(true, convId);
     for (const item of q.items) {
@@ -484,5 +543,4 @@ function autoTitle(content: string): string {
   return words.length < trimmed.length ? words : trimmed;
 }
 
-// Singleton
 export const queueManager = new QueueManager();

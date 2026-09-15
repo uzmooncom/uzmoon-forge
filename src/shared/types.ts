@@ -1,15 +1,37 @@
 export type Protocol = "openai" | "anthropic";
 
+/** @deprecated Use AgentProfile. Kept for one-time migration only. */
 export interface AgentConfig {
   id: string;
   name: string;
   endpoint: string;
   protocol: Protocol;
   model: string;
-  /** custom header name for API key (optional) */
   apiKeyHeader?: string;
-  /** timeout in milliseconds */
   timeoutMs?: number;
+}
+
+/** Canonical per-agent connection profile. */
+export interface AgentProfile {
+  id: string;
+  name: string;
+  description?: string;
+  endpoint: string;
+  protocol: Protocol;
+  model: string;
+  /** Custom API key header (overrides protocol default) */
+  apiKeyHeader?: string;
+  /** Timeout in milliseconds */
+  timeoutMs?: number;
+  /** Whether this is the global default profile */
+  isDefault: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt?: number;
+  lastConnectionStatus?: ConnectionStatus;
+  lastConnectionTestAt?: number;
+  /** true if removed but history references remain */
+  archived?: boolean;
 }
 
 export type ConnectionStatus =
@@ -67,6 +89,12 @@ export interface ChatMessage {
   attachments?: Attachment[];
   /** message being replied to */
   replyToMessageId?: string;
+  /** Which AgentProfile produced this assistant message */
+  agentProfileId?: string;
+  /** Snapshot of agent name at time of generation (survives rename/delete) */
+  agentNameSnapshot?: string;
+  /** Snapshot of model at time of generation */
+  modelSnapshot?: string;
 }
 
 export interface Conversation {
@@ -78,6 +106,8 @@ export interface Conversation {
   archivedAt?: number;
   parentConversationId?: string;
   branchedFromMessageId?: string;
+  /** The AgentProfile selected as default for this conversation */
+  defaultAgentProfileId?: string;
 }
 
 export interface SendMessageRequest {
@@ -95,7 +125,10 @@ export interface SendMessageResponse {
 
 export interface AppState {
   onboardingComplete: boolean;
-  agentConfigId: string | null;
+  /** @deprecated use defaultAgentProfileId */
+  agentConfigId?: string | null;
+  /** Global default AgentProfile id */
+  defaultAgentProfileId: string | null;
 }
 
 // ── Message Queue ──────────────────────────────────────────────────────────
@@ -122,6 +155,8 @@ export interface QueueItem {
   completedAt?: number;
   attemptCount: number;
   lastError?: string;
+  /** Agent profile captured at enqueue time — immutable after enqueue */
+  targetAgentProfileId: string;
 }
 
 /** What the renderer receives about a conversation's queue */
@@ -134,7 +169,15 @@ export interface ConvQueueState {
 
 /** IPC channel names */
 export const IPC = {
-  // Agent config
+  // Agent profiles (multi-profile)
+  PROFILE_LIST: "profile:list",
+  PROFILE_SAVE: "profile:save",
+  PROFILE_GET: "profile:get",
+  PROFILE_DELETE: "profile:delete",
+  PROFILE_SET_DEFAULT: "profile:setDefault",
+  PROFILE_UPDATE_STATUS: "profile:updateStatus",
+
+  // Legacy single-agent config (kept for migration path only)
   CONFIG_SAVE: "config:save",
   CONFIG_GET: "config:get",
   CONFIG_DELETE: "config:delete",
@@ -148,6 +191,7 @@ export const IPC = {
   TEST_CONNECTION: "agent:testConnection",
 
   // Chat (direct send path is now enqueue)
+  // sendMessage req now includes targetAgentProfileId
   CHAT_SEND: "chat:send",
   CHAT_STREAM_START: "chat:streamStart",
   CHAT_STREAM_CHUNK: "chat:streamChunk",
@@ -187,3 +231,13 @@ export const IPC = {
   APP_STATE_GET: "appState:get",
   APP_STATE_SET: "appState:set",
 } as const;
+
+/** Extended send request including per-message agent target */
+export interface SendMessageWithProfileRequest {
+  conversationId: string;
+  content: string;
+  attachmentIds?: string[];
+  replyToMessageId?: string;
+  /** Profile to use for this message. Defaults to conversation/global default. */
+  targetAgentProfileId?: string;
+}

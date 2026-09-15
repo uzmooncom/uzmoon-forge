@@ -5,16 +5,18 @@ import fs from "fs";
 import { IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
+  AgentProfile,
   AppState,
   Conversation,
   Attachment,
   AttachmentInput,
   SendMessageRequest,
+  ConnectionStatus,
 } from "../../shared/types.js";
 import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
 import { testConnection } from "../agent-client/client.js";
-import { queueManager, cancelStream, getActiveStreamId } from "../queue/QueueManager.js";
+import { queueManager, cancelStream, getActiveStreamId, setSecretGetter } from "../queue/QueueManager.js";
 
 interface Services {
   secrets: SecretStore;
@@ -71,15 +73,14 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   // Wire queue manager sender so it can push events to renderer
   queueManager.setSender(mainSender);
 
-  // Helper to get current agent config + apiKey
-  function resolveAgent(): { cfg: AgentConfig; apiKey: string } | { error: string } {
+  // Inject secret getter into QueueManager so it can resolve apiKey by profileId
+  setSecretGetter((profileId: string) => secrets.get(profileId));
+
+  // ── Resolve default agent profile ──────────────────────────────────────
+
+  function resolveDefaultProfileId(): string | null {
     const state = db.getAppState(database);
-    if (!state.agentConfigId) return { error: "No agent configured." };
-    const cfg = db.getAgentConfig(database, state.agentConfigId);
-    if (!cfg) return { error: "Agent configuration not found." };
-    const apiKey = secrets.get(cfg.id);
-    if (!apiKey) return { error: "No API key found. Please reconfigure the agent." };
-    return { cfg, apiKey };
+    return state.defaultAgentProfileId ?? null;
   }
 
   // ── App State ──────────────────────────────────────────────────────────
@@ -90,7 +91,44 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     db.setAppState(database, state);
   });
 
-  // ── Agent Config ───────────────────────────────────────────────────────
+  // ── Agent Profiles (multi-profile) ─────────────────────────────────────
+
+  ipcMain.handle(IPC.PROFILE_LIST, (): AgentProfile[] => {
+    return db.listAgentProfiles(database);
+  });
+
+  ipcMain.handle(IPC.PROFILE_GET, (_e: IpcMainInvokeEvent, id: string): AgentProfile | null => {
+    return db.getAgentProfile(database, id);
+  });
+
+  ipcMain.handle(IPC.PROFILE_SAVE, (_e: IpcMainInvokeEvent, profile: AgentProfile): AgentProfile => {
+    db.saveAgentProfile(database, profile);
+    return db.getAgentProfile(database, profile.id)!;
+  });
+
+  ipcMain.handle(
+    IPC.PROFILE_DELETE,
+    (_e: IpcMainInvokeEvent, id: string): void => {
+      secrets.delete(id);
+      db.archiveAgentProfile(database, id);
+    }
+  );
+
+  ipcMain.handle(
+    IPC.PROFILE_SET_DEFAULT,
+    (_e: IpcMainInvokeEvent, id: string): void => {
+      db.setDefaultAgentProfile(database, id);
+    }
+  );
+
+  ipcMain.handle(
+    IPC.PROFILE_UPDATE_STATUS,
+    (_e: IpcMainInvokeEvent, id: string, status: ConnectionStatus): void => {
+      db.updateAgentProfileStatus(database, id, status);
+    }
+  );
+
+  // ── Agent Config (legacy shim — kept for ConnectAgentScreen v1) ────────
 
   ipcMain.handle(IPC.CONFIG_SAVE, (_e: IpcMainInvokeEvent, cfg: AgentConfig) => {
     db.saveAgentConfig(database, cfg);
@@ -123,7 +161,10 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   ipcMain.handle(IPC.TEST_CONNECTION, async (_e: IpcMainInvokeEvent, cfg: AgentConfig) => {
     const apiKey = secrets.get(cfg.id);
     if (!apiKey) return { status: "auth_failed", message: "No API key stored for this agent." };
-    return testConnection(cfg, apiKey);
+    const result = await testConnection(cfg, apiKey);
+    // Persist status back to profile if it exists
+    db.updateAgentProfileStatus(database, cfg.id, result.status);
+    return result;
   });
 
   // ── Conversations ──────────────────────────────────────────────────────
@@ -145,7 +186,7 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     (
       _e: IpcMainInvokeEvent,
       id: string,
-      patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt">>
+      patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt" | "defaultAgentProfileId">>
     ): void => {
       db.updateConversation(database, id, patch);
     }
@@ -164,7 +205,6 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   });
 
   ipcMain.handle(IPC.CONV_DELETE, (_e: IpcMainInvokeEvent, id: string): void => {
-    // Cancel any active stream for this conversation
     const sid = getActiveStreamId(id);
     if (sid) cancelStream(sid);
     const filePaths = db.deleteConversation(database, id);
@@ -258,11 +298,26 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
 
   ipcMain.handle(
     IPC.CHAT_SEND,
-    async (_e: IpcMainInvokeEvent, req: SendMessageRequest) => {
-      const agent = resolveAgent();
-      if ("error" in agent) return { error: agent.error };
+    async (
+      _e: IpcMainInvokeEvent,
+      req: SendMessageRequest & { targetAgentProfileId?: string }
+    ) => {
+      const { conversationId, content, attachmentIds = [], replyToMessageId, targetAgentProfileId } = req;
 
-      const { conversationId, content, attachmentIds = [], replyToMessageId } = req;
+      // Resolve which profile to use:
+      // 1. Explicit targetAgentProfileId from renderer (per-message override)
+      // 2. Conversation's defaultAgentProfileId
+      // 3. Global default
+      let profileId = targetAgentProfileId;
+      if (!profileId) {
+        const conv = db.getConversation(database, conversationId);
+        profileId = conv?.defaultAgentProfileId ?? resolveDefaultProfileId() ?? undefined;
+      }
+      if (!profileId) return { error: "No agent profile available. Please create one first." };
+
+      // Quick validation — profile existence (apiKey resolved at process time in QueueManager)
+      const profile = db.getAgentProfile(database, profileId);
+      if (!profile) return { error: "Selected agent profile not found." };
 
       if (attachmentIds.length > MAX_ATTACHMENTS_PER_MSG) {
         return { error: `Too many attachments (max ${MAX_ATTACHMENTS_PER_MSG}).` };
@@ -274,8 +329,7 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
           content,
           attachmentIds,
           ...(replyToMessageId && { replyToMessageId }),
-          cfg: agent.cfg,
-          apiKey: agent.apiKey,
+          targetAgentProfileId: profileId,
         });
         return {
           queueItemId: result.queueItem.id,
@@ -288,13 +342,12 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     }
   );
 
-  // Cancel current active stream for a conversation
   ipcMain.handle(IPC.CHAT_CANCEL, (_e: IpcMainInvokeEvent, convId: string) => {
     const sid = getActiveStreamId(convId);
     if (sid) cancelStream(sid);
   });
 
-  // ── Queue management IPC ───────────────────────────────────────────────
+  // ── Queue management ───────────────────────────────────────────────────
 
   ipcMain.handle(IPC.QUEUE_GET, (_e: IpcMainInvokeEvent, convId: string) => {
     return queueManager.getQueue(convId);
@@ -323,15 +376,19 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
 
   ipcMain.handle(
     IPC.QUEUE_RESUME,
-    async (_e: IpcMainInvokeEvent, convId: string, action?: "retry" | "skip", itemId?: string): Promise<{ error: string } | void> => {
-      const agent = resolveAgent();
-      if ("error" in agent) return { error: agent.error };
+    async (
+      _e: IpcMainInvokeEvent,
+      convId: string,
+      action?: "retry" | "skip",
+      itemId?: string
+    ): Promise<{ error: string } | void> => {
+      // No longer need to resolve agent here — QueueManager resolves per item
       if (action === "retry" && itemId) {
-        await queueManager.retry(convId, itemId, agent.cfg, agent.apiKey);
+        await queueManager.retry(convId, itemId);
       } else if (action === "skip" && itemId) {
-        await queueManager.skip(convId, itemId, agent.cfg, agent.apiKey);
+        await queueManager.skip(convId, itemId);
       } else {
-        await queueManager.resume(convId, agent.cfg, agent.apiKey);
+        await queueManager.resume(convId);
       }
     }
   );

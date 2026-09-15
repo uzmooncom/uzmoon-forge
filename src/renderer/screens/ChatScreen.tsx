@@ -12,6 +12,7 @@ import type {
   AttachmentInput,
   QueueItem,
   ConvQueueState,
+  AgentProfile,
 } from "../../shared/types.js";
 
 // Chat sub-components
@@ -255,9 +256,18 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // ── Draft conversation id ──────────────────────────────────────────────
   const draftConvId = useRef<string>(randomId());
 
-  // ── Agent info ─────────────────────────────────────────────────────────
-  const [agentName, setAgentName] = useState("AI Agent");
-  const [modelName, setModelName] = useState("");
+  // ── Agent profiles ─────────────────────────────────────────────────────
+  const [profiles, setProfiles] = useState<AgentProfile[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+  const [showProfileDropdown, setShowProfileDropdown] = useState(false);
+  const profileDropdownRef = useRef<HTMLDivElement>(null);
+
+  const activeProfile = useMemo(
+    () => profiles.find((p) => p.id === selectedProfileId) ?? profiles[0] ?? null,
+    [profiles, selectedProfileId]
+  );
+  const agentName = activeProfile?.name ?? "AI Agent";
+  const modelName = activeProfile?.model ?? "";
 
   // ── Sidebar resize ─────────────────────────────────────────────────────
   const resizingRef = useRef(false);
@@ -268,15 +278,47 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
   // Effects
   // ══════════════════════════════════════════════════════════════════════
 
-  // Load agent info
+  // Load profiles
+  const loadProfiles = useCallback(async () => {
+    const ps = await window.forgeApi.listProfiles();
+    setProfiles(ps);
+    return ps;
+  }, []);
+
   useEffect(() => {
-    window.forgeApi.getAppState().then(async (state) => {
-      if (state.agentConfigId) {
-        const cfg = await window.forgeApi.getConfig(state.agentConfigId);
-        if (cfg) { setAgentName(cfg.name); setModelName(cfg.model); }
+    loadProfiles().then((ps) => {
+      const defaultP = ps.find((p) => p.isDefault) ?? ps[0];
+      if (defaultP) setSelectedProfileId(defaultP.id);
+    });
+  }, [loadProfiles]);
+
+  // Close profile dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (profileDropdownRef.current && !profileDropdownRef.current.contains(e.target as Node)) {
+        setShowProfileDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  // When active conversation changes, sync its preferred profile
+  useEffect(() => {
+    if (!activeConvId) return;
+    window.forgeApi.getConversation(activeConvId).then((conv) => {
+      if (conv?.defaultAgentProfileId) {
+        setSelectedProfileId(conv.defaultAgentProfileId);
+      } else {
+        setProfiles((ps) => {
+          const defaultP = ps.find((p) => p.isDefault) ?? ps[0];
+          if (defaultP) setSelectedProfileId(defaultP.id);
+          return ps;
+        });
       }
     });
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConvId]);
 
   // Load conversations
   const loadConversations = useCallback(async () => {
@@ -803,6 +845,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       content,
       ...(attachmentIds.length > 0 && { attachmentIds }),
       ...(reply && { replyToMessageId: reply.messageId }),
+      ...(selectedProfileId && { targetAgentProfileId: selectedProfileId }),
     });
 
     if (res.error) {
@@ -849,6 +892,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     activeConvId,
     pendingAttachments,
     replyTarget,
+    selectedProfileId,
   ]);
 
   const handleCancel = useCallback(async () => {
@@ -1026,11 +1070,91 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
           >
             {sidebarOpen ? <ChevronLeftIcon size={15} /> : <ChevronRightIcon size={15} />}
           </button>
-          <div className="flex items-center gap-2 flex-1 min-w-0">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 flex-shrink-0" />
-            <span className="text-sm font-medium text-white/80 truncate">{agentName}</span>
-            {modelName && <span className="text-xs text-white/25 truncate hidden sm:block">{modelName}</span>}
+
+          {/* Agent profile selector */}
+          <div className="flex items-center gap-2 flex-1 min-w-0" ref={profileDropdownRef}>
+            {profiles.length <= 1 ? (
+              <div className="flex items-center gap-2 min-w-0">
+                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                  activeProfile?.lastConnectionStatus === "connected" ? "bg-emerald-500" :
+                  activeProfile?.lastConnectionStatus === "error" ? "bg-red-500" :
+                  "bg-white/20"
+                }`} />
+                <span className="text-sm font-medium text-white/80 truncate">{agentName}</span>
+                {modelName && <span className="text-xs text-white/25 truncate hidden sm:block">{modelName}</span>}
+              </div>
+            ) : (
+              <div className="relative">
+                <button
+                  onClick={() => setShowProfileDropdown((v) => !v)}
+                  className="flex items-center gap-2 px-2 py-1 rounded-lg hover:bg-white/8 transition-colors group"
+                >
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                    activeProfile?.lastConnectionStatus === "connected" ? "bg-emerald-500" :
+                    activeProfile?.lastConnectionStatus === "error" ? "bg-red-500" :
+                    "bg-white/20"
+                  }`} />
+                  <span className="text-sm font-medium text-white/80">{agentName}</span>
+                  {modelName && <span className="text-xs text-white/25 hidden sm:block">{modelName}</span>}
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-white/25 group-hover:text-white/50 flex-shrink-0 ml-0.5">
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+
+                {showProfileDropdown && (
+                  <div className="absolute top-full left-0 mt-1 z-50 min-w-[220px] bg-[#1a1a27] border border-white/10 rounded-xl shadow-2xl overflow-hidden">
+                    <div className="px-3 pt-2.5 pb-1">
+                      <p className="text-[10px] font-medium uppercase tracking-wide text-white/30">Switch Agent</p>
+                    </div>
+                    {profiles.map((p) => (
+                      <button
+                        key={p.id}
+                        onClick={() => {
+                          setSelectedProfileId(p.id);
+                          setShowProfileDropdown(false);
+                          if (activeConvId) {
+                            void window.forgeApi.updateConversation(activeConvId, { defaultAgentProfileId: p.id });
+                          }
+                        }}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-white/8 transition-colors ${
+                          p.id === selectedProfileId ? "bg-white/5" : ""
+                        }`}
+                      >
+                        <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-0.5 ${
+                          p.lastConnectionStatus === "connected" ? "bg-emerald-500" :
+                          p.lastConnectionStatus === "error" ? "bg-red-500" :
+                          "bg-white/15"
+                        }`} />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-xs font-medium text-white/80 truncate">{p.name}</span>
+                            {p.isDefault && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-400 font-medium flex-shrink-0">default</span>
+                            )}
+                          </div>
+                          <span className="text-[11px] text-white/30 truncate block">{p.model}</span>
+                        </div>
+                        {p.id === selectedProfileId && (
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-violet-400 flex-shrink-0">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        )}
+                      </button>
+                    ))}
+                    <div className="border-t border-white/5 px-3 py-2">
+                      <button
+                        onClick={() => { setShowProfileDropdown(false); onOpenSettings(); }}
+                        className="text-xs text-white/30 hover:text-white/60 transition-colors"
+                      >
+                        Manage agents…
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
+
           <button
             onClick={onOpenSettings}
             className="w-7 h-7 flex items-center justify-center text-white/30 hover:text-white/70 hover:bg-white/8 rounded-lg transition-colors"

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import { IPC } from "../shared/types.js";
 import type {
   AgentConfig,
+  AgentProfile,
   AppState,
   ChatMessage,
   Conversation,
@@ -23,7 +24,23 @@ const forgeApi = {
   setAppState: (state: AppState): Promise<void> =>
     ipcRenderer.invoke(IPC.APP_STATE_SET, state),
 
-  // ── Agent Config ────────────────────────────────────────────────────────
+  // ── Agent Profiles (multi-profile) ──────────────────────────────────────
+  listProfiles: (): Promise<AgentProfile[]> =>
+    ipcRenderer.invoke(IPC.PROFILE_LIST),
+
+  getProfile: (id: string): Promise<AgentProfile | null> =>
+    ipcRenderer.invoke(IPC.PROFILE_GET, id),
+
+  saveProfile: (profile: AgentProfile): Promise<AgentProfile> =>
+    ipcRenderer.invoke(IPC.PROFILE_SAVE, profile),
+
+  deleteProfile: (id: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.PROFILE_DELETE, id),
+
+  setDefaultProfile: (id: string): Promise<void> =>
+    ipcRenderer.invoke(IPC.PROFILE_SET_DEFAULT, id),
+
+  // ── Agent Config (legacy shim) ─────────────────────────────────────────
   saveConfig: (cfg: AgentConfig): Promise<void> =>
     ipcRenderer.invoke(IPC.CONFIG_SAVE, cfg),
 
@@ -59,7 +76,7 @@ const forgeApi = {
 
   updateConversation: (
     id: string,
-    patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt">>
+    patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt" | "defaultAgentProfileId">>
   ): Promise<void> => ipcRenderer.invoke(IPC.CONV_UPDATE, id, patch),
 
   deleteConversation: (id: string): Promise<void> =>
@@ -97,7 +114,7 @@ const forgeApi = {
 
   // ── Chat (enqueue) ──────────────────────────────────────────────────────
   sendMessage: (
-    req: SendMessageRequest
+    req: SendMessageRequest & { targetAgentProfileId?: string }
   ): Promise<{
     queueItemId?: string;
     userMessage?: ChatMessage;
@@ -135,11 +152,22 @@ const forgeApi = {
       userMessage?: ChatMessage;
       conversation?: Conversation;
       queueItemId?: string;
+      agentProfileId?: string;
+      agentNameSnapshot?: string;
+      modelSnapshot?: string;
     }) => void
   ): UnsubFn => {
     const listener = (
       _event: Electron.IpcRendererEvent,
-      data: { streamId: string; userMessage?: ChatMessage; conversation?: Conversation; queueItemId?: string }
+      data: {
+        streamId: string;
+        userMessage?: ChatMessage;
+        conversation?: Conversation;
+        queueItemId?: string;
+        agentProfileId?: string;
+        agentNameSnapshot?: string;
+        modelSnapshot?: string;
+      }
     ) => cb(data);
     ipcRenderer.on(IPC.CHAT_STREAM_START, listener);
     return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_START, listener);

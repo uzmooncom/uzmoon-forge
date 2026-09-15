@@ -7,6 +7,7 @@ import fs from "fs";
 import type {
   ChatMessage,
   AgentConfig,
+  AgentProfile,
   AppState,
   Conversation,
   Attachment,
@@ -22,7 +23,10 @@ interface ConvQueue {
 
 interface Store {
   appState: AppState;
+  /** @deprecated kept only so migration can read it once */
   agentConfig: AgentConfig | null;
+  /** Canonical multi-profile store keyed by profile id */
+  agentProfiles: Record<string, AgentProfile>;
   /** Legacy flat messages (migrated to conversations on first load) */
   messages?: ChatMessage[];
   conversations: Conversation[];
@@ -35,8 +39,9 @@ interface Store {
 }
 
 const DEFAULT_STORE: Store = {
-  appState: { onboardingComplete: false, agentConfigId: null },
+  appState: { onboardingComplete: false, agentConfigId: null, defaultAgentProfileId: null },
   agentConfig: null,
+  agentProfiles: {},
   conversations: [],
   messagesByConv: {},
   attachments: {},
@@ -61,11 +66,47 @@ function load(): Store {
     const base: Store = {
       appState: raw.appState ?? DEFAULT_STORE.appState,
       agentConfig: raw.agentConfig ?? null,
+      agentProfiles: raw.agentProfiles ?? {},
       conversations: raw.conversations ?? [],
       messagesByConv: raw.messagesByConv ?? {},
       attachments: raw.attachments ?? {},
       queues: raw.queues ?? {},
     };
+
+    // ── One-time migration: AgentConfig → AgentProfile ─────────────────
+    // If there is a legacy agentConfig and it has not been migrated yet,
+    // create an AgentProfile from it and update AppState.
+    if (base.agentConfig && Object.keys(base.agentProfiles).length === 0) {
+      const legacy = base.agentConfig;
+      const profile: AgentProfile = {
+        id: legacy.id,
+        name: legacy.name,
+        endpoint: legacy.endpoint,
+        protocol: legacy.protocol,
+        model: legacy.model,
+        ...(legacy.apiKeyHeader !== undefined && { apiKeyHeader: legacy.apiKeyHeader }),
+        ...(legacy.timeoutMs !== undefined && { timeoutMs: legacy.timeoutMs }),
+        isDefault: true,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      base.agentProfiles[profile.id] = profile;
+      // Update AppState to point to new canonical field
+      base.appState = {
+        ...base.appState,
+        defaultAgentProfileId: profile.id,
+      };
+      // Null out legacy record so migration does not run again
+      base.agentConfig = null;
+    }
+
+    // Ensure defaultAgentProfileId is present on appState
+    if (!('defaultAgentProfileId' in base.appState)) {
+      // Access legacy agentConfigId from the raw parsed object before it was typed
+      const rawState = base.appState as Record<string, unknown>;
+      const legacyId = typeof rawState['agentConfigId'] === 'string' ? rawState['agentConfigId'] : null;
+      (base.appState as AppState).defaultAgentProfileId = legacyId;
+    }
     // Migrate legacy flat messages into a default conversation
     if (raw.messages && raw.messages.length > 0 && base.conversations.length === 0) {
       const legacyConvId = "conv-legacy";
@@ -146,20 +187,150 @@ export function setAppState(_db: true, state: AppState): void {
   persist();
 }
 
-// ── Agent Config ───────────────────────────────────────────────────────────
+// ── Agent Config (legacy shim — used only by old tests) ───────────────────
 
 export function saveAgentConfig(_db: true, cfg: AgentConfig): void {
-  store().agentConfig = cfg;
+  // Write-through to agentProfiles so both old and new code work
+  const existing = store().agentProfiles[cfg.id];
+  const now = Date.now();
+  const profile: AgentProfile = {
+    id: cfg.id,
+    name: cfg.name,
+    endpoint: cfg.endpoint,
+    protocol: cfg.protocol,
+    model: cfg.model,
+    ...(cfg.apiKeyHeader !== undefined && { apiKeyHeader: cfg.apiKeyHeader }),
+    ...(cfg.timeoutMs !== undefined && { timeoutMs: cfg.timeoutMs }),
+    isDefault: existing?.isDefault ?? (Object.keys(store().agentProfiles).length === 0),
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+  store().agentProfiles[profile.id] = profile;
+  // If becoming the only profile, make default
+  if (Object.keys(store().agentProfiles).length === 1) {
+    store().agentProfiles[profile.id]!.isDefault = true;
+    store().appState.defaultAgentProfileId = profile.id;
+  }
   persist();
 }
 
 export function getAgentConfig(_db: true, id: string): AgentConfig | null {
-  const cfg = store().agentConfig;
-  return cfg && cfg.id === id ? structuredClone(cfg) : null;
+  const p = store().agentProfiles[id];
+  if (!p) return null;
+  return {
+    id: p.id, name: p.name, endpoint: p.endpoint, protocol: p.protocol, model: p.model,
+    ...(p.apiKeyHeader !== undefined && { apiKeyHeader: p.apiKeyHeader }),
+    ...(p.timeoutMs !== undefined && { timeoutMs: p.timeoutMs }),
+  };
 }
 
-export function deleteAgentConfig(_db: true, _id: string): void {
-  store().agentConfig = null;
+export function deleteAgentConfig(_db: true, id: string): void {
+  delete store().agentProfiles[id];
+  persist();
+}
+
+// ── Agent Profiles ─────────────────────────────────────────────────────────
+
+export function listAgentProfiles(_db: true): AgentProfile[] {
+  return structuredClone(
+    Object.values(store().agentProfiles)
+      .filter((p) => !p.archived)
+      .sort((a, b) => {
+        // Default first, then by lastUsedAt desc, then createdAt desc
+        if (a.isDefault && !b.isDefault) return -1;
+        if (!a.isDefault && b.isDefault) return 1;
+        const aLast = a.lastUsedAt ?? a.createdAt;
+        const bLast = b.lastUsedAt ?? b.createdAt;
+        return bLast - aLast;
+      })
+  );
+}
+
+export function getAgentProfile(_db: true, id: string): AgentProfile | null {
+  const p = store().agentProfiles[id];
+  return p ? structuredClone(p) : null;
+}
+
+export function saveAgentProfile(_db: true, profile: AgentProfile): void {
+  const s = store();
+  // If this profile is being set as default, clear existing default
+  if (profile.isDefault) {
+    for (const p of Object.values(s.agentProfiles)) {
+      if (p.id !== profile.id) p.isDefault = false;
+    }
+    s.appState.defaultAgentProfileId = profile.id;
+  }
+  s.agentProfiles[profile.id] = profile;
+  persist();
+}
+
+export function updateAgentProfile(
+  _db: true,
+  id: string,
+  patch: Partial<Omit<AgentProfile, "id" | "createdAt">>
+): AgentProfile | null {
+  const s = store();
+  const p = s.agentProfiles[id];
+  if (!p) return null;
+  // If setting as default, clear others
+  if (patch.isDefault === true) {
+    for (const other of Object.values(s.agentProfiles)) {
+      if (other.id !== id) other.isDefault = false;
+    }
+    s.appState.defaultAgentProfileId = id;
+  }
+  Object.assign(p, patch);
+  p.updatedAt = Date.now();
+  persist();
+  return structuredClone(p);
+}
+
+export function archiveAgentProfile(_db: true, id: string): void {
+  const s = store();
+  const p = s.agentProfiles[id];
+  if (!p) return;
+  p.archived = true;
+  // If it was the default, pick another
+  if (p.isDefault) {
+    p.isDefault = false;
+    const next = Object.values(s.agentProfiles).find((x) => !x.archived);
+    if (next) {
+      next.isDefault = true;
+      s.appState.defaultAgentProfileId = next.id;
+    } else {
+      s.appState.defaultAgentProfileId = null;
+    }
+  }
+  persist();
+}
+
+export function setDefaultAgentProfile(_db: true, id: string): void {
+  const s = store();
+  for (const p of Object.values(s.agentProfiles)) {
+    p.isDefault = p.id === id;
+  }
+  s.appState.defaultAgentProfileId = id;
+  persist();
+}
+
+export function touchAgentProfileLastUsed(_db: true, id: string): void {
+  const p = store().agentProfiles[id];
+  if (!p) return;
+  p.lastUsedAt = Date.now();
+  persist();
+}
+
+export function updateAgentProfileStatus(
+  _db: true,
+  id: string,
+  status: AgentProfile["lastConnectionStatus"]
+): void {
+  const p = store().agentProfiles[id];
+  if (!p) return;
+  if (status !== undefined) {
+    p.lastConnectionStatus = status;
+  }
+  p.lastConnectionTestAt = Date.now();
   persist();
 }
 
@@ -226,7 +397,7 @@ export function createConversation(_db: true, conv: Conversation): void {
 export function updateConversation(
   _db: true,
   id: string,
-  patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt">>
+  patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt" | "defaultAgentProfileId">>
 ): void {
   const conv = store().conversations.find((c) => c.id === id);
   if (!conv) return;
@@ -234,6 +405,7 @@ export function updateConversation(
   if (patch.updatedAt !== undefined) conv.updatedAt = patch.updatedAt;
   if ("pinnedAt" in patch) conv.pinnedAt = patch.pinnedAt;
   if ("archivedAt" in patch) conv.archivedAt = patch.archivedAt;
+  if ("defaultAgentProfileId" in patch) conv.defaultAgentProfileId = patch.defaultAgentProfileId;
   persist();
 }
 
@@ -251,7 +423,11 @@ export function exportConversationMarkdown(_db: true, id: string): string {
     if (msg.role === "user") {
       lines.push(`**You**  `);
     } else if (msg.role === "assistant") {
-      lines.push(`**Agent**  `);
+      // Show agent name snapshot if available
+      const label = msg.agentNameSnapshot
+        ? `**${msg.agentNameSnapshot}${msg.modelSnapshot ? ` — ${msg.modelSnapshot}` : ""}**`
+        : "**Agent**";
+      lines.push(`${label}  `);
     } else {
       lines.push(`**Error**  `);
     }

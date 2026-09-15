@@ -164,6 +164,7 @@ export default function ConnectAgentScreen({
     const newState: AppState = {
       onboardingComplete: true,
       agentConfigId: id,
+      defaultAgentProfileId: id,
     };
     await window.forgeApi.setAppState(newState);
 
