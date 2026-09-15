@@ -265,6 +265,9 @@ export function registerHandlers(services: Services): void {
         ...(input.height !== undefined && { height: input.height }),
       };
 
+      // Persist to DB so CHAT_SEND can look up by ID
+      db.saveAttachmentMeta(database, att);
+
       return { ok: true, attachment: att };
     }
   );
@@ -378,6 +381,11 @@ export function registerHandlers(services: Services): void {
       const sender: WebContents = event.sender;
       const startTime = Date.now();
       let fullText = "";
+
+      // Emit start event immediately so renderer shows dots before API responds
+      if (!sender.isDestroyed()) {
+        sender.send(IPC.CHAT_STREAM_START, { streamId, userMessage: userMsg, conversation: conv });
+      }
 
       try {
         fullText = await makeRequest({

@@ -107,6 +107,7 @@ export const IPC = {
 
   // Chat
   CHAT_SEND: "chat:send",
+  CHAT_STREAM_START: "chat:streamStart",
   CHAT_STREAM_CHUNK: "chat:streamChunk",
   CHAT_STREAM_END: "chat:streamEnd",
   CHAT_STREAM_ERROR: "chat:streamError",

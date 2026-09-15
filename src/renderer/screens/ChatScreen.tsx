@@ -449,12 +449,14 @@ function TypingDots() {
 function ConversationItem({
   conv,
   active,
+  isStreaming,
   onClick,
   onRename,
   onDelete,
 }: {
   conv: Conversation;
   active: boolean;
+  isStreaming?: boolean;
   onClick: () => void;
   onRename: (id: string, title: string) => void;
   onDelete: (id: string) => void;
@@ -515,7 +517,20 @@ function ConversationItem({
           className="flex-1 bg-transparent outline-none border-b border-white/30 text-white text-sm"
         />
       ) : (
-        <span className="flex-1 truncate">{conv.title}</span>
+        <span className="flex-1 truncate flex items-center gap-1.5">
+          {conv.title}
+          {isStreaming && (
+            <span className="inline-flex gap-0.5 items-center ml-1">
+              {[0,1,2].map((i) => (
+                <span
+                  key={i}
+                  className="w-1 h-1 rounded-full bg-blue-400/70 animate-bounce"
+                  style={{ animationDelay: `${i * 100}ms` }}
+                />
+              ))}
+            </span>
+          )}
+        </span>
       )}
 
       {!renaming && (
@@ -774,7 +789,9 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       setMessages([]);
       return;
     }
-    window.forgeApi.getConversationMessages(activeConvId).then(setMessages);
+    window.forgeApi.getConversationMessages(activeConvId).then((msgs) => {
+      setMessages(msgs);
+    });
   }, [activeConvId]);
 
   // ── Persist sidebar open state ───────────────────────────────────────────
@@ -1043,56 +1060,62 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     };
     setMessages((prev) => [...prev, optimisticUserMsg]);
 
-    // Send to main — IPC returns real streamId
-    const res = await window.forgeApi.sendMessage({
+    // Subscribe to stream start BEFORE sending — main fires it immediately
+    const unsubStart = window.forgeApi.onStreamStart(({ streamId, userMessage: serverUserMsg, conversation }) => {
+      unsubStart();
+      // Wire up stream
+      activeStreamId.current = streamId;
+      setStreaming({ streamId, text: "", conversationId: convId });
+      // Replace optimistic with server-persisted user message
+      const persistedUser: ChatMessage = {
+        ...serverUserMsg,
+        conversationId: convId,
+        ...(pendingAttsSnapshot.length > 0 && { attachments: pendingAttsSnapshot }),
+      };
+      setMessages((prev) =>
+        prev.map((m) => (m.id === optimisticUserMsg.id ? persistedUser : m))
+      );
+      // Add/update conversation in sidebar
+      setConversations((prev) => {
+        const exists = prev.find((c) => c.id === conversation.id);
+        if (!exists) return [conversation, ...prev];
+        return prev.map((c) => (c.id === conversation.id ? conversation : c));
+      });
+      // If draft, activate now
+      if (!activeConvId) {
+        setActiveConvId(convId);
+        draftConvId.current = randomId();
+      }
+    });
+
+    // Fire and forget — CHAT_SEND resolves after stream finishes
+    window.forgeApi.sendMessage({
       conversationId: convId,
       content,
       ...(attachmentIds.length > 0 && { attachmentIds }),
+    }).then((res) => {
+      // If error came back (no stream started), clean up
+      if (res.error && activeStreamId.current === null) {
+        unsubStart();
+        setMessages((prev) => {
+          const filtered = prev.filter((m) => m.id !== optimisticUserMsg.id);
+          return [
+            ...filtered,
+            {
+              id: randomId(),
+              conversationId: convId,
+              role: "error" as const,
+              content: res.error!,
+              createdAt: Date.now(),
+              isError: true,
+            },
+          ];
+        });
+      }
+    }).catch(() => {
+      unsubStart();
     });
-
-    if (res.error) {
-      // Remove optimistic message, add error
-      setMessages((prev) => {
-        const filtered = prev.filter((m) => m.id !== optimisticUserMsg.id);
-        return [
-          ...filtered,
-          { ...res.userMessage, conversationId: convId },
-          {
-            id: randomId(),
-            conversationId: convId,
-            role: "error" as const,
-            content: res.error!,
-            createdAt: Date.now(),
-            isError: true,
-          },
-        ];
-      });
-      return;
-    }
-
-    // Wire up real streamId for stop/chunk filtering
-    activeStreamId.current = res.streamId;
-    setStreaming({ streamId: res.streamId, text: "", conversationId: convId });
-
-    // Replace optimistic with persisted userMessage (has real id)
-    const persistedUser: ChatMessage = {
-      ...res.userMessage,
-      conversationId: convId,
-      ...(pendingAttsSnapshot.length > 0 && { attachments: pendingAttsSnapshot }),
-    };
-    setMessages((prev) =>
-      prev.map((m) =>
-        m.id === optimisticUserMsg.id ? persistedUser : m
-      )
-    );
-
-    // If this was a draft, activate the new conversation
-    if (!activeConvId) {
-      setActiveConvId(convId);
-      draftConvId.current = randomId();
-      await loadConversations();
-    }
-  }, [canSend, input, activeConvId, pendingAttachments, loadConversations]);
+  }, [canSend, input, activeConvId, pendingAttachments]);
 
   // ── Cancel stream ────────────────────────────────────────────────────────
   const handleCancel = useCallback(async () => {
@@ -1199,6 +1222,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                       key={conv.id}
                       conv={conv}
                       active={conv.id === activeConvId}
+                      isStreaming={streaming?.conversationId === conv.id}
                       onClick={() => handleSelectConversation(conv.id)}
                       onRename={handleRename}
                       onDelete={handleDelete}

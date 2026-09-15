@@ -94,6 +94,17 @@ const forgeApi = {
   cancelStream: (streamId: string): Promise<void> =>
     ipcRenderer.invoke(IPC.CHAT_CANCEL, streamId),
 
+  onStreamStart: (
+    cb: (data: { streamId: string; userMessage: ChatMessage; conversation: Conversation }) => void
+  ): UnsubFn => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      data: { streamId: string; userMessage: ChatMessage; conversation: Conversation }
+    ) => cb(data);
+    ipcRenderer.on(IPC.CHAT_STREAM_START, listener);
+    return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_START, listener);
+  },
+
   onStreamChunk: (
     cb: (data: { streamId: string; chunk: string }) => void
   ): UnsubFn => {
