@@ -116,6 +116,8 @@ export interface ChatMessage {
   agentNameSnapshot?: string;
   /** Snapshot of model at time of generation */
   modelSnapshot?: string;
+  /** Project file snapshots attached to this message as context */
+  contextRefs?: ContextRef[];
 }
 
 export interface Conversation {
@@ -188,6 +190,8 @@ export interface QueueItem {
   lastError?: string;
   /** Agent profile captured at enqueue time — immutable after enqueue */
   targetAgentProfileId: string;
+  /** Project file context refs captured at enqueue time — immutable */
+  contextRefs?: ContextRef[];
 }
 
 /** What the renderer receives about a conversation's queue */
@@ -281,4 +285,146 @@ export interface SendMessageWithProfileRequest {
   replyToMessageId?: string;
   /** Profile to use for this message. Defaults to conversation/global default. */
   targetAgentProfileId?: string;
+}
+
+// ── Project File System (V0.2) ─────────────────────────────────────────────
+
+/** A single entry returned from a directory listing */
+export interface ProjectFileEntry {
+  name: string;
+  /** Path relative to project workingDirectory, using forward slashes */
+  relativePath: string;
+  kind: "file" | "directory";
+  extension?: string;
+  size?: number;
+  modifiedAt?: number;
+  /** true if the entry is a symbolic link */
+  isSymlink?: boolean;
+  /** true if excluded by ignore rules */
+  isIgnored?: boolean;
+  /** true if likely contains secrets */
+  isSensitive?: boolean;
+}
+
+/** A captured snapshot of a project file or line range, stored at enqueue time */
+export interface ContextRef {
+  /** Unique id for this ref */
+  id: string;
+  projectId: string;
+  relativePath: string;
+  /** 1-based start line (undefined = whole file) */
+  lineStart?: number;
+  /** 1-based end line (undefined = whole file) */
+  lineEnd?: number;
+  capturedAt: number;
+  /** Byte size of the captured content */
+  size: number;
+  /** Detected language / mime */
+  language: string;
+  /** Absolute path inside app dataDir — NOT inside the project folder */
+  snapshotPath: string;
+}
+
+/** UI representation of a staged context item in the composer */
+export interface ContextChip {
+  id: string;
+  projectId: string;
+  relativePath: string;
+  displayName: string;
+  lineStart?: number;
+  lineEnd?: number;
+  /** Estimated byte size */
+  size: number;
+  language: string;
+  status: "ready" | "sensitive" | "too_large" | "missing" | "unsupported";
+}
+
+/** Result of a directory listing call */
+export interface DirListResult {
+  ok: true;
+  entries: ProjectFileEntry[];
+}
+export interface DirListError {
+  ok: false;
+  error: string;
+}
+
+/** Result of a file read call */
+export interface FileReadResult {
+  ok: true;
+  content: string;
+  language: string;
+  size: number;
+  modifiedAt?: number;
+  truncated?: boolean;
+  lineCount?: number;
+  /** true if file exceeded MAX_FILE_SIZE_BYTES but was still partially readable */
+  tooLarge?: boolean;
+}
+export interface FileReadError {
+  ok: false;
+  error: string;
+  /** true when file is binary */
+  isBinary?: boolean;
+  /** true when file is too large */
+  tooLarge?: boolean;
+  /** true when file is sensitive */
+  isSensitive?: boolean;
+}
+
+/** Result of a snapshot capture */
+export interface SnapshotResult {
+  ok: true;
+  ref: ContextRef;
+  /** true if a warning should be shown (sensitive) */
+  isSensitive?: boolean;
+}
+export interface SnapshotError {
+  ok: false;
+  error: string;
+  isSensitive?: boolean;
+}
+
+/** File metadata index status */
+export interface FileIndexStatus {
+  projectId: string;
+  state: "idle" | "indexing" | "ready" | "error";
+  fileCount?: number;
+  lastIndexedAt?: number;
+  error?: string;
+}
+
+// Extend IPC with project file channels
+export const PROJECT_FILE_IPC = {
+  PROJECT_DIR_LIST: "project:dirList",
+  PROJECT_FILE_READ: "project:fileRead",
+  PROJECT_FILE_SNAPSHOT: "project:fileSnapshot",
+  PROJECT_FILE_SEARCH: "project:fileSearch",
+  PROJECT_INDEX_STATUS: "project:indexStatus",
+  PROJECT_INDEX_BUILD: "project:indexBuild",
+  PROJECT_SNAPSHOT_READ: "project:snapshotRead",
+  PROJECT_FOLDER_CONTEXT_PREVIEW: "project:folderContextPreview",
+} as const;
+
+/** Extended send request that can carry project context refs */
+export interface SendMessageWithContextRequest extends SendMessageRequest {
+  /** Staged context refs to capture at enqueue time */
+  stagedContextRefs?: Array<{
+    projectId: string;
+    relativePath: string;
+    lineStart?: number;
+    lineEnd?: number;
+  }>;
+}
+
+/** Folder context preview result */
+export interface FolderContextPreview {
+  ok: true;
+  relativePath: string;
+  includedFiles: ProjectFileEntry[];
+  skippedIgnored: number;
+  skippedBinary: number;
+  skippedSensitive: number;
+  skippedTooLarge: number;
+  totalSize: number;
 }

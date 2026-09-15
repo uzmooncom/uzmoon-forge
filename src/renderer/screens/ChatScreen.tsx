@@ -17,6 +17,7 @@ import type {
 
 // Chat sub-components
 import { FileChip } from "../chat/components/FileChip.js";
+import { ContextChips } from "../project/ContextChips.js";
 import { Lightbox } from "../chat/components/Lightbox.js";
 import { DeleteConfirmDialog } from "../chat/components/DeleteConfirmDialog.js";
 import { MessageBubble } from "../chat/components/MessageBubble.js";
@@ -194,9 +195,29 @@ interface ChatScreenProps {
    * When undefined/null: Global Chat mode (conversations with no projectId).
    */
   projectId?: string | null;
+  /** Staged project-file context refs to attach with next message (V0.2) */
+  stagedContextRefs?: Array<{
+    projectId: string;
+    relativePath: string;
+    lineStart?: number;
+    lineEnd?: number;
+  }>;
+  /** Staged context chips for display in composer (V0.2) */
+  stagedContextChips?: import("../../shared/types.js").ContextChip[];
+  /** Remove one staged chip by id (V0.2) */
+  onRemoveContextChip?: (chipId: string) => void;
+  /** Called after message is sent so parent can clear staged context (V0.2) */
+  onClearContext?: () => void;
 }
 
-export default function ChatScreen({ onOpenSettings, projectId = null }: ChatScreenProps) {
+export default function ChatScreen({
+  onOpenSettings,
+  projectId = null,
+  stagedContextRefs,
+  stagedContextChips,
+  onRemoveContextChip,
+  onClearContext,
+}: ChatScreenProps) {
   // projectId=null → Global Chat (conversations where projectId is null/undefined)
   // projectId=string → Project Chat (conversations scoped to that project)
   // ── Sidebar ────────────────────────────────────────────────────────────
@@ -856,7 +877,14 @@ export default function ChatScreen({ onOpenSettings, projectId = null }: ChatScr
       // For new conversations in project context: stamp the projectId
       // Ignored by main if conv already exists (its own projectId wins)
       ...(projectId != null && { projectId }),
+      // V0.2: attach file context snapshots if any are staged
+      ...(stagedContextRefs && stagedContextRefs.length > 0 && { stagedContextRefs }),
     });
+
+    // Clear staged context after send
+    if (stagedContextRefs && stagedContextRefs.length > 0) {
+      onClearContext?.();
+    }
 
     if (res.error) {
       // Remove optimistic, show error
@@ -904,6 +932,8 @@ export default function ChatScreen({ onOpenSettings, projectId = null }: ChatScr
     replyTarget,
     selectedProfileId,
     projectId,
+    stagedContextRefs,
+    onClearContext,
   ]);
 
   const handleCancel = useCallback(async () => {
@@ -960,7 +990,7 @@ export default function ChatScreen({ onOpenSettings, projectId = null }: ChatScr
 
   return (
     <div
-      className="flex h-screen w-screen bg-[#0f0f17] text-white overflow-hidden"
+      className="flex h-full w-full bg-[#0f0f17] text-white overflow-hidden"
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
@@ -1345,6 +1375,14 @@ export default function ChatScreen({ onOpenSettings, projectId = null }: ChatScr
                     <FileChip key={att.id} att={att} onRemove={() => removeAttachment(att.id)} />
                   ))}
                 </div>
+              )}
+
+              {/* Context chips (V0.2 — project file context) */}
+              {stagedContextChips && stagedContextChips.length > 0 && (
+                <ContextChips
+                  chips={stagedContextChips}
+                  onRemove={onRemoveContextChip ?? (() => undefined)}
+                />
               )}
             </div>
           </div>

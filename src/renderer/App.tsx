@@ -70,18 +70,12 @@ function MainShell({ onOpenSettings }: MainShellProps) {
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#0d0d0f]">
-      {/* ── Title bar drag region (macOS hiddenInset, 38px) ── */}
-      <div
-        className="drag-region flex-shrink-0 w-full"
-        style={{ height: 38 }}
-      />
-
-      {/* ── Main area below title bar ── */}
-      <div className="flex flex-1 min-h-0">
+    <div className="flex h-full bg-[#0d0d0f]">
         {/* Activity rail — only visible when NOT inside a project workspace */}
         {!activeProject && (
-          <div className="flex-shrink-0 w-14 flex flex-col items-center pb-3 gap-1 border-r border-white/5 bg-[#09090d]">
+          <div className="drag-region flex-shrink-0 w-14 flex flex-col items-center gap-1 border-r border-white/5 bg-[#09090d]">
+            {/* Space for macOS traffic lights */}
+            <div className="no-drag flex-shrink-0" style={{ height: 50 }} />
             {/* Global Chat */}
             <NavButton
               active={view === "chat"}
@@ -115,7 +109,7 @@ function MainShell({ onOpenSettings }: MainShellProps) {
         )}
 
         {/* Content */}
-        <div className="flex-1 min-w-0 min-h-0">
+        <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
           {activeProject ? (
             <ProjectWorkspace
               project={activeProject}
@@ -134,7 +128,6 @@ function MainShell({ onOpenSettings }: MainShellProps) {
             />
           )}
         </div>
-      </div>
     </div>
   );
 }
@@ -152,7 +145,7 @@ function NavButton({ active, label, onClick, children }: NavButtonProps) {
       onClick={onClick}
       title={label}
       className={`
-        w-10 h-10 rounded-xl flex items-center justify-center transition-all
+        no-drag w-10 h-10 rounded-xl flex items-center justify-center transition-all
         ${active
           ? "bg-[#6366f1]/15 text-[#6366f1]"
           : "text-white/30 hover:text-white/60 hover:bg-white/5"

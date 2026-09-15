@@ -17,7 +17,7 @@ function createWindow(secrets: SecretStore, database: true): void {
     minHeight: 600,
     backgroundColor: "#0d0d0f",
     titleBarStyle: "hiddenInset",
-    trafficLightPosition: { x: 16, y: 16 },
+    trafficLightPosition: { x: 14, y: 12 },
     webPreferences: {
       preload: path.join(__dirname, "../../preload/preload/index.js"),
       contextIsolation: true,

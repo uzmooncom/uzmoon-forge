@@ -12,10 +12,11 @@
 import { randomUUID } from "crypto";
 import { WebContents } from "electron";
 import { IPC } from "../../shared/types.js";
-import type { QueueItem, ChatMessage, Conversation } from "../../shared/types.js";
+import type { QueueItem, ChatMessage, Conversation, ContextRef } from "../../shared/types.js";
 import * as db from "../database/db.js";
 import { makeRequest, classifyError } from "../agent-client/client.js";
 import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
+import { readSnapshot } from "../project-files/service.js";
 import fs from "fs";
 
 // ── Context builder ────────────────────────────────────────────────────────
@@ -31,6 +32,65 @@ export function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
   return msgs
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m): SimpleMessage => {
+      // Inject project context snapshots for user messages that have contextRefs
+      if (m.role === "user" && m.contextRefs && m.contextRefs.length > 0) {
+        const parts: Array<{ type: "text"; text: string } | ImageContent> = [];
+        // Build context block
+        const contextParts: string[] = [];
+        for (const ref of m.contextRefs) {
+          const content = readSnapshot(ref.snapshotPath);
+          if (!content) continue;
+          const lineRange = ref.lineStart !== undefined
+            ? ` lines="${ref.lineStart}-${ref.lineEnd ?? "end"}"`
+            : "";
+          contextParts.push(
+            `<project_file path="${ref.relativePath}" language="${ref.language}"${lineRange}>\n${content}\n</project_file>`
+          );
+        }
+        if (contextParts.length > 0) {
+          parts.push({
+            type: "text",
+            text: `<project_context>\n${contextParts.join("\n")}\n</project_context>`,
+          });
+        }
+        // Now handle the rest of the message normally (attachments, reply, content)
+        let effectiveContent = m.content;
+        if (m.replyToMessageId) {
+          const parent = msgById.get(m.replyToMessageId);
+          if (parent) {
+            const roleLabel = parent.role === "user" ? "User" : "Assistant";
+            const snippet = parent.content.slice(0, 400) + (parent.content.length > 400 ? "..." : "");
+            effectiveContent = `[Replying to ${roleLabel}: "${snippet}"\n]\n${m.content}`;
+          }
+        }
+        if (m.attachments && m.attachments.length > 0) {
+          if (effectiveContent.trim()) parts.push({ type: "text", text: effectiveContent });
+          for (const att of m.attachments) {
+            try {
+              if (isImageMime(att.mimeType)) {
+                const data = fs.readFileSync(att.localPath).toString("base64");
+                parts.push({ type: "image", mimeType: att.mimeType, data });
+              } else {
+                const raw = fs.readFileSync(att.localPath);
+                const MAX_CHARS = 100_000;
+                let text: string;
+                try {
+                  text = raw.toString("utf8");
+                  if (text.length > MAX_CHARS) text = text.slice(0, MAX_CHARS) + `\n... [truncated, ${raw.length} bytes total]`;
+                } catch { text = `[binary file: ${att.filename}, ${raw.length} bytes]`; }
+                parts.push({ type: "text", text: `<file name="${att.filename}" type="${att.mimeType}">\n${text}\n</file>` });
+              }
+            } catch { /* file missing */ }
+          }
+        } else {
+          if (effectiveContent.trim()) parts.push({ type: "text", text: effectiveContent });
+        }
+        if (parts.length === 0) return { role: "user", content: m.content };
+        if (parts.length === 1 && parts[0]!.type === "text") {
+          return { role: "user", content: (parts[0] as { type: "text"; text: string }).text };
+        }
+        return { role: "user", content: parts };
+      }
       let effectiveContent = m.content;
       if (m.role === "user" && m.replyToMessageId) {
         const parent = msgById.get(m.replyToMessageId);
@@ -149,12 +209,14 @@ export class QueueManager {
     targetAgentProfileId: string;
     /** If set, the new conversation will be scoped to this project */
     projectId?: string;
+    /** Captured context refs (snapshots) — immutable after enqueue */
+    contextRefs?: ContextRef[];
   }): Promise<{
     queueItem: QueueItem;
     userMessage: ChatMessage;
     conversation: Conversation;
   }> {
-    const { conversationId, content, attachmentIds, replyToMessageId, targetAgentProfileId, projectId } = opts;
+    const { conversationId, content, attachmentIds, replyToMessageId, targetAgentProfileId, projectId, contextRefs } = opts;
 
     // Ensure conversation exists
     let conv = db.getConversation(true, conversationId);
@@ -190,6 +252,7 @@ export class QueueManager {
       createdAt: Date.now(),
       ...(attachments.length > 0 && { attachments }),
       ...(replyToMessageId && { replyToMessageId }),
+      ...(contextRefs && contextRefs.length > 0 && { contextRefs }),
     };
     for (const att of attachments) {
       att.messageId = userMsg.id;
@@ -210,6 +273,7 @@ export class QueueManager {
       attemptCount: 0,
       targetAgentProfileId,
       ...(replyToMessageId && { replyToMessageId }),
+      ...(contextRefs && contextRefs.length > 0 && { contextRefs }),
     };
     db.enqueueItem(true, queueItem);
 

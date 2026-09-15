@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } fr
 import { randomUUID } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -11,10 +11,12 @@ import type {
   Attachment,
   AttachmentInput,
   SendMessageRequest,
+  SendMessageWithContextRequest,
   ConnectionStatus,
   Project,
   DirectoryStatus,
 } from "../../shared/types.js";
+import * as projectFiles from "../project-files/service.js";
 import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
 import { testConnection } from "../agent-client/client.js";
@@ -343,6 +345,25 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       // for brand-new conversations fall back to the projectId from the request.
       const enqueueProjectId = existingConv?.projectId ?? reqProjectId;
 
+      // Capture context ref snapshots at enqueue time (immutable)
+      const extReq = req as SendMessageWithContextRequest;
+      const stagedRefs = extReq.stagedContextRefs ?? [];
+      const capturedContextRefs: import("../../shared/types.js").ContextRef[] = [];
+
+      for (const staged of stagedRefs) {
+        const stagedProject = db.getProject(database, staged.projectId);
+        if (!stagedProject) continue;
+        const result = projectFiles.captureSnapshot(
+          stagedProject.workingDirectory,
+          staged.relativePath,
+          staged.lineStart,
+          staged.lineEnd
+        );
+        if (result.ok) {
+          capturedContextRefs.push({ ...result.ref, projectId: staged.projectId });
+        }
+      }
+
       try {
         const result = await queueManager.enqueue({
           conversationId,
@@ -351,6 +372,7 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
           ...(replyToMessageId && { replyToMessageId }),
           targetAgentProfileId: profileId,
           ...(enqueueProjectId !== undefined && { projectId: enqueueProjectId }),
+          ...(capturedContextRefs.length > 0 && { contextRefs: capturedContextRefs }),
         });
         return {
           queueItemId: result.queueItem.id,
@@ -537,6 +559,125 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       const project = db.getProject(database, id);
       if (!project) return;
       void shell.openPath(project.workingDirectory);
+    }
+  );
+
+  // ── Project file system (V0.2) ───────────────────────────────────────────
+
+  /** List one directory level inside the project. relativePath="" → root. */
+  ipcMain.handle(
+    PROJECT_FILE_IPC.PROJECT_DIR_LIST,
+    (
+      _e: IpcMainInvokeEvent,
+      projectId: string,
+      relativePath: string
+    ) => {
+      const project = db.getProject(database, projectId);
+      if (!project) return { ok: false, error: "Project not found" };
+      return projectFiles.listDirectory(projectId, project.workingDirectory, relativePath ?? "");
+    }
+  );
+
+  /** Read a file's text content. lineStart/lineEnd are 1-based. */
+  ipcMain.handle(
+    PROJECT_FILE_IPC.PROJECT_FILE_READ,
+    (
+      _e: IpcMainInvokeEvent,
+      projectId: string,
+      relativePath: string,
+      lineStart?: number,
+      lineEnd?: number
+    ) => {
+      const project = db.getProject(database, projectId);
+      if (!project) return { ok: false, error: "Project not found" };
+      return projectFiles.readFile(project.workingDirectory, relativePath, lineStart, lineEnd, false);
+    }
+  );
+
+  /** Capture a context snapshot (returns ContextRef). */
+  ipcMain.handle(
+    PROJECT_FILE_IPC.PROJECT_FILE_SNAPSHOT,
+    (
+      _e: IpcMainInvokeEvent,
+      projectId: string,
+      relativePath: string,
+      lineStart?: number,
+      lineEnd?: number
+    ) => {
+      const project = db.getProject(database, projectId);
+      if (!project) return { ok: false, error: "Project not found" };
+      const result = projectFiles.captureSnapshot(
+        project.workingDirectory, relativePath, lineStart, lineEnd
+      );
+      if (result.ok) {
+        return { ...result, ref: { ...result.ref, projectId } };
+      }
+      return result;
+    }
+  );
+
+  /** Search project files by name/path query. */
+  ipcMain.handle(
+    PROJECT_FILE_IPC.PROJECT_FILE_SEARCH,
+    (
+      _e: IpcMainInvokeEvent,
+      projectId: string,
+      query: string,
+      limit?: number
+    ) => {
+      const project = db.getProject(database, projectId);
+      if (!project) return [];
+      return projectFiles.searchFiles(projectId, project.workingDirectory, query, limit ?? 50);
+    }
+  );
+
+  /** Get index build status. */
+  ipcMain.handle(
+    PROJECT_FILE_IPC.PROJECT_INDEX_STATUS,
+    (_e: IpcMainInvokeEvent, projectId: string) => {
+      return projectFiles.getIndexStatus(projectId);
+    }
+  );
+
+  /** Trigger index build (non-blocking from renderer perspective). */
+  ipcMain.handle(
+    PROJECT_FILE_IPC.PROJECT_INDEX_BUILD,
+    (_e: IpcMainInvokeEvent, projectId: string) => {
+      const project = db.getProject(database, projectId);
+      if (!project) return;
+      // Build is synchronous but fast enough for initial call
+      projectFiles.buildIndex(projectId, project.workingDirectory);
+    }
+  );
+
+  /** Read snapshot content by path (for display in history). */
+  ipcMain.handle(
+    PROJECT_FILE_IPC.PROJECT_SNAPSHOT_READ,
+    (_e: IpcMainInvokeEvent, snapshotPath: string) => {
+      // Security: snapshotPath must be inside dataDir/snapshots/
+      const dataDir = db.getDataDir();
+      const snapshotsDir = path.resolve(path.join(dataDir, "snapshots"));
+      const resolved = path.resolve(snapshotPath);
+      if (!resolved.startsWith(snapshotsDir + path.sep)) {
+        return { ok: false, error: "Invalid snapshot path" };
+      }
+      const content = projectFiles.readSnapshot(resolved);
+      if (content === null) return { ok: false, error: "Snapshot not found" };
+      return { ok: true, content };
+    }
+  );
+
+  /** Preview which files would be included from a folder. */
+  ipcMain.handle(
+    PROJECT_FILE_IPC.PROJECT_FOLDER_CONTEXT_PREVIEW,
+    (
+      _e: IpcMainInvokeEvent,
+      projectId: string,
+      relativePath: string
+    ) => {
+      const project = db.getProject(database, projectId);
+      if (!project) return { ok: false, error: "Project not found" };
+      return projectFiles.folderContextPreview(project.workingDirectory, relativePath);
     }
   );
 

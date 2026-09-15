@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -10,10 +10,19 @@ import type {
   AttachmentInput,
   ConnectionTestResult,
   SendMessageRequest,
+  SendMessageWithContextRequest,
   QueueItem,
   ConvQueueState,
   Project,
   DirectoryStatus,
+  ProjectFileEntry,
+  DirListResult,
+  DirListError,
+  FileReadResult,
+  FileReadError,
+  SnapshotResult,
+  SnapshotError,
+  FolderContextPreview,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -153,9 +162,66 @@ const forgeApi = {
   deleteAttachment: (id: string): Promise<void> =>
     ipcRenderer.invoke(IPC.ATTACH_DELETE, id),
 
+  // ── Project file system (V0.2) ──────────────────────────────────────────
+  projectFiles: {
+    /** List a single directory level inside the project. relativePath="" → root. */
+    listDirectory: (
+      projectId: string,
+      relativePath: string
+    ): Promise<DirListResult | DirListError> =>
+      ipcRenderer.invoke(PROJECT_FILE_IPC.PROJECT_DIR_LIST, projectId, relativePath),
+
+    /** Read file content (text only, eligibility-checked). */
+    readFile: (
+      projectId: string,
+      relativePath: string,
+      lineStart?: number,
+      lineEnd?: number
+    ): Promise<FileReadResult | FileReadError> =>
+      ipcRenderer.invoke(PROJECT_FILE_IPC.PROJECT_FILE_READ, projectId, relativePath, lineStart, lineEnd),
+
+    /** Capture a snapshot of a file/range for context injection. */
+    captureSnapshot: (
+      projectId: string,
+      relativePath: string,
+      lineStart?: number,
+      lineEnd?: number
+    ): Promise<SnapshotResult | SnapshotError> =>
+      ipcRenderer.invoke(PROJECT_FILE_IPC.PROJECT_FILE_SNAPSHOT, projectId, relativePath, lineStart, lineEnd),
+
+    /** Search project files by name/path. */
+    searchFiles: (
+      projectId: string,
+      query: string,
+      limit?: number
+    ): Promise<ProjectFileEntry[]> =>
+      ipcRenderer.invoke(PROJECT_FILE_IPC.PROJECT_FILE_SEARCH, projectId, query, limit),
+
+    /** Get index build status. */
+    getIndexStatus: (
+      projectId: string
+    ): Promise<{ state: "idle" | "indexing" | "ready" | "error"; fileCount?: number; lastIndexedAt?: number; error?: string }> =>
+      ipcRenderer.invoke(PROJECT_FILE_IPC.PROJECT_INDEX_STATUS, projectId),
+
+    /** Trigger index build (fire and forget). */
+    buildIndex: (projectId: string): Promise<void> =>
+      ipcRenderer.invoke(PROJECT_FILE_IPC.PROJECT_INDEX_BUILD, projectId),
+
+    /** Read a previously captured snapshot (for history display). */
+    readSnapshot: (snapshotPath: string): Promise<{ ok: true; content: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(PROJECT_FILE_IPC.PROJECT_SNAPSHOT_READ, snapshotPath),
+
+    /** Preview what files would be included if a folder is added as context. */
+    folderContextPreview: (
+      projectId: string,
+      relativePath: string
+    ): Promise<FolderContextPreview | { ok: false; error: string }> =>
+      ipcRenderer.invoke(PROJECT_FILE_IPC.PROJECT_FOLDER_CONTEXT_PREVIEW, projectId, relativePath),
+  },
+
   // ── Chat (enqueue) ──────────────────────────────────────────────────────
   sendMessage: (
-    req: SendMessageRequest & { targetAgentProfileId?: string }
+    req: (SendMessageRequest | SendMessageWithContextRequest) & { targetAgentProfileId?: string }
   ): Promise<{
     queueItemId?: string;
     userMessage?: ChatMessage;
