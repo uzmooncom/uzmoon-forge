@@ -244,16 +244,82 @@ function Lightbox({
 
 // ── Message bubble ─────────────────────────────────────────────────────────
 
+const MD_COMPONENTS = {
+  pre: ({ children }: { children?: React.ReactNode }) => (
+    <CopyCodeBlock>{children}</CopyCodeBlock>
+  ),
+  code: ({ children, className }: { children?: React.ReactNode; className?: string }) =>
+    className ? (
+      <code className={className}>{children}</code>
+    ) : (
+      <code className="bg-white/10 rounded px-1 py-0.5 text-[11px] text-blue-300 font-mono">
+        {children}
+      </code>
+    ),
+  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer"
+      className="text-blue-400 hover:text-blue-300 underline underline-offset-2">
+      {children}
+    </a>
+  ),
+  table: ({ children }: { children?: React.ReactNode }) => (
+    <div className="overflow-x-auto my-2">
+      <table className="border-collapse w-full text-xs">{children}</table>
+    </div>
+  ),
+  th: ({ children }: { children?: React.ReactNode }) => (
+    <th className="border border-white/10 px-2 py-1.5 text-left font-semibold bg-white/5">{children}</th>
+  ),
+  td: ({ children }: { children?: React.ReactNode }) => (
+    <td className="border border-white/10 px-2 py-1">{children}</td>
+  ),
+  blockquote: ({ children }: { children?: React.ReactNode }) => (
+    <blockquote className="border-l-2 border-white/20 pl-3 my-2 text-white/60 italic">{children}</blockquote>
+  ),
+  ul: ({ children }: { children?: React.ReactNode }) => (
+    <ul className="list-disc list-inside space-y-0.5 my-1.5">{children}</ul>
+  ),
+  ol: ({ children }: { children?: React.ReactNode }) => (
+    <ol className="list-decimal list-inside space-y-0.5 my-1.5">{children}</ol>
+  ),
+  h1: ({ children }: { children?: React.ReactNode }) => (
+    <h1 className="text-base font-bold mt-3 mb-1">{children}</h1>
+  ),
+  h2: ({ children }: { children?: React.ReactNode }) => (
+    <h2 className="text-sm font-bold mt-2.5 mb-1 text-white/90">{children}</h2>
+  ),
+  h3: ({ children }: { children?: React.ReactNode }) => (
+    <h3 className="text-sm font-semibold mt-2 mb-0.5 text-white/80">{children}</h3>
+  ),
+  hr: () => <hr className="border-white/10 my-3" />,
+  p: ({ children }: { children?: React.ReactNode }) => (
+    <p className="my-1 leading-relaxed">{children}</p>
+  ),
+};
+
+function AttachmentBadge({ att }: { att: Attachment }) {
+  const isImage = att.mimeType.startsWith("image/");
+  if (isImage) return null; // images rendered separately
+  return (
+    <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white/8 border border-white/10 text-xs text-white/70 max-w-[200px]">
+      <span className="text-sm leading-none flex-shrink-0">{fileEmoji(att.mimeType)}</span>
+      <span className="truncate">{truncFilename(att.filename, 22)}</span>
+    </div>
+  );
+}
+
 function MessageBubble({
   msg,
   onExpand,
   onCopy,
   onRetry,
+  onEdit,
 }: {
   msg: ChatMessage;
   onExpand: (att: Attachment) => void;
   onCopy: (text: string) => void;
   onRetry?: ((msg: ChatMessage) => void) | undefined;
+  onEdit?: ((msg: ChatMessage) => void) | undefined;
 }) {
   const [copied, setCopied] = useState(false);
   const isUser = msg.role === "user";
@@ -263,144 +329,91 @@ function MessageBubble({
   const handleCopy = () => {
     onCopy(msg.content);
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    setTimeout(() => setCopied(false), 1800);
   };
 
+  const imageAtts = msg.attachments?.filter(a => a.mimeType.startsWith("image/")) ?? [];
+  const fileAtts = msg.attachments?.filter(a => !a.mimeType.startsWith("image/")) ?? [];
+
   return (
-    <div
-      className={`group flex gap-3 px-4 py-1 ${isUser ? "flex-row-reverse" : "flex-row"}`}
-    >
+    <div className={`group flex gap-3 px-4 py-1.5 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
       {/* Avatar */}
       {!isUser && (
-        <div
-          className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold mt-0.5 ${
-            isError
-              ? "bg-red-900/60 text-red-300"
-              : "bg-gradient-to-br from-blue-500 to-violet-600 text-white"
-          }`}
-        >
+        <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold mt-0.5 ${
+          isError ? "bg-red-900/60 text-red-300" : "bg-gradient-to-br from-blue-500 to-violet-600 text-white"
+        }`}>
           {isError ? "!" : "A"}
         </div>
       )}
 
-      <div
-        className={`flex flex-col gap-1 max-w-[72%] ${isUser ? "items-end" : "items-start"}`}
-      >
-        {/* Attachments (images) */}
-        {msg.attachments && msg.attachments.length > 0 && (
+      <div className={`flex flex-col gap-1 min-w-0 ${
+        isUser ? "items-end max-w-[75%]" : "items-start max-w-[82%]"
+      }`}>
+        {/* Image attachments */}
+        {imageAtts.length > 0 && (
           <div className="flex flex-wrap gap-2 mb-1">
-            {msg.attachments.map((att) => (
+            {imageAtts.map((att) => (
               <MessageImage key={att.id} att={att} onExpand={onExpand} />
             ))}
           </div>
         )}
 
+        {/* File attachments */}
+        {fileAtts.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1">
+            {fileAtts.map((att) => (
+              <AttachmentBadge key={att.id} att={att} />
+            ))}
+          </div>
+        )}
+
         {/* Bubble */}
-        {msg.content && (
-          <div
-            className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-              isUser
-                ? "bg-blue-600 text-white rounded-tr-sm"
-                : isError
-                ? "bg-red-950/60 border border-red-800/50 text-red-300 rounded-tl-sm"
-                : "bg-[#1e1e2a] border border-white/6 text-gray-100 rounded-tl-sm"
-            }`}
-          >
+        {(msg.content || (!msg.content && imageAtts.length === 0 && fileAtts.length === 0)) && (
+          <div className={`rounded-2xl text-sm leading-relaxed ${
+            isUser
+              ? "bg-blue-600 text-white rounded-tr-sm px-4 py-2.5"
+              : isError
+              ? "bg-red-950/60 border border-red-800/50 text-red-300 rounded-tl-sm px-4 py-2.5"
+              : "bg-[#1a1a26] border border-white/6 text-gray-100 rounded-tl-sm px-4 py-3"
+          }`}>
             {isAssistant ? (
-              <div className="markdown-body prose prose-invert prose-sm max-w-none">
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeHighlight]}
-                  components={{
-                    pre: ({ children }) => (
-                      <div className="relative group/code">
-                        <pre className="rounded-lg overflow-x-auto text-[12px] !bg-[#0d0d14] border border-white/8 p-3">
-                          {children}
-                        </pre>
-                        <CopyCodeButton
-                          onCopy={() => {
-                            const el = document.createElement("div");
-                            el.innerHTML = String(children);
-                            onCopy(el.textContent ?? "");
-                          }}
-                        />
-                      </div>
-                    ),
-                    code: ({ children, className }) =>
-                      className ? (
-                        <code className={className}>{children}</code>
-                      ) : (
-                        <code className="bg-white/10 rounded px-1 py-0.5 text-[11px] text-blue-300 font-mono">
-                          {children}
-                        </code>
-                      ),
-                    a: ({ href, children }) => (
-                      <a
-                        href={href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-blue-400 hover:text-blue-300 underline underline-offset-2"
-                      >
-                        {children}
-                      </a>
-                    ),
-                    table: ({ children }) => (
-                      <div className="overflow-x-auto">
-                        <table className="border-collapse w-full text-xs">
-                          {children}
-                        </table>
-                      </div>
-                    ),
-                    th: ({ children }) => (
-                      <th className="border border-white/10 px-2 py-1 text-left font-semibold bg-white/5">
-                        {children}
-                      </th>
-                    ),
-                    td: ({ children }) => (
-                      <td className="border border-white/10 px-2 py-1">
-                        {children}
-                      </td>
-                    ),
-                  }}
-                >
+              <div className="prose-custom">
+                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}
+                  components={MD_COMPONENTS as Record<string, unknown>}>
                   {msg.content}
                 </ReactMarkdown>
               </div>
             ) : (
-              <span className="whitespace-pre-wrap break-words">
-                {msg.content}
-              </span>
+              <span className="whitespace-pre-wrap break-words">{msg.content}</span>
             )}
           </div>
         )}
 
-        {/* Meta row */}
-        <div
-          className={`flex items-center gap-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity ${isUser ? "flex-row-reverse" : "flex-row"}`}
-        >
-          <span className="text-[10px] text-white/30">
-            {formatTime(msg.createdAt)}
-          </span>
+        {/* Action bar — visible on hover */}
+        <div className={`flex items-center gap-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150 ${
+          isUser ? "flex-row-reverse" : "flex-row"
+        }`}>
+          <span className="text-[10px] text-white/25">{formatTime(msg.createdAt)}</span>
           {isAssistant && msg.durationMs && (
-            <span className="text-[10px] text-white/20">
-              {(msg.durationMs / 1000).toFixed(1)}s
-            </span>
+            <span className="text-[10px] text-white/20">{(msg.durationMs / 1000).toFixed(1)}s</span>
           )}
           {msg.content && (
-            <button
-              onClick={handleCopy}
-              className="text-[10px] text-white/30 hover:text-white/70 transition-colors flex items-center gap-1"
-            >
-              {copied ? <CheckIcon size={10} /> : <CopyIcon size={10} />}
+            <button onClick={handleCopy}
+              className="flex items-center gap-1 text-[11px] text-white/35 hover:text-white/80 transition-colors py-0.5 px-1.5 rounded hover:bg-white/5">
+              {copied ? <CheckIcon size={11} /> : <CopyIcon size={11} />}
               {copied ? "Copied" : "Copy"}
             </button>
           )}
+          {isUser && onEdit && (
+            <button onClick={() => onEdit(msg)}
+              className="flex items-center gap-1 text-[11px] text-white/35 hover:text-white/80 transition-colors py-0.5 px-1.5 rounded hover:bg-white/5">
+              ✎ Edit
+            </button>
+          )}
           {isError && onRetry && (
-            <button
-              onClick={() => onRetry(msg)}
-              className="text-[10px] text-red-400/60 hover:text-red-300 transition-colors"
-            >
-              Retry
+            <button onClick={() => onRetry(msg)}
+              className="flex items-center gap-1 text-[11px] text-red-400/60 hover:text-red-300 transition-colors py-0.5 px-1.5 rounded hover:bg-red-900/10">
+              ↺ Retry
             </button>
           )}
         </div>
@@ -409,20 +422,31 @@ function MessageBubble({
   );
 }
 
-function CopyCodeButton({ onCopy }: { onCopy: () => void }) {
+function CopyCodeBlock({ children }: { children: React.ReactNode }) {
   const [copied, setCopied] = useState(false);
+  const preRef = useRef<HTMLPreElement>(null);
   const handle = () => {
-    onCopy();
+    const text = preRef.current?.textContent ?? "";
+    navigator.clipboard.writeText(text).catch(() => {});
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    setTimeout(() => setCopied(false), 1800);
   };
   return (
-    <button
-      onClick={handle}
-      className="absolute top-2 right-2 opacity-0 group-hover/code:opacity-100 transition-opacity text-[10px] text-white/40 hover:text-white/80 bg-white/5 hover:bg-white/10 px-2 py-1 rounded"
-    >
-      {copied ? "Copied!" : "Copy"}
-    </button>
+    <div className="relative group/code my-2">
+      <pre
+        ref={preRef}
+        className="rounded-xl overflow-x-auto text-[12px] !bg-[#0d0d14] border border-white/8 p-4 pr-16 leading-relaxed"
+      >
+        {children}
+      </pre>
+      <button
+        onClick={handle}
+        className="absolute top-2.5 right-2.5 flex items-center gap-1 text-[10px] text-white/35 hover:text-white/80 bg-white/5 hover:bg-white/12 border border-white/8 px-2 py-1 rounded-md transition-all"
+      >
+        {copied ? <CheckIcon size={10} /> : <CopyIcon size={10} />}
+        {copied ? "Copied!" : "Copy"}
+      </button>
+    </div>
   );
 }
 
@@ -430,17 +454,15 @@ function CopyCodeButton({ onCopy }: { onCopy: () => void }) {
 
 function StreamingBubble({ text }: { text: string }) {
   return (
-    <div className="flex gap-3 px-4 py-1">
+    <div className="flex gap-3 px-4 py-1.5">
       <div className="flex-shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center text-xs font-bold text-white mt-0.5">
         A
       </div>
-      <div className="max-w-[72%] rounded-2xl rounded-tl-sm bg-[#1e1e2a] border border-white/6 px-4 py-2.5 text-sm text-gray-100 leading-relaxed">
+      <div className="max-w-[82%] min-w-0 rounded-2xl rounded-tl-sm bg-[#1a1a26] border border-white/6 px-4 py-3 text-sm text-gray-100 leading-relaxed">
         {text ? (
-          <div className="markdown-body prose prose-invert prose-sm max-w-none">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm]}
-              rehypePlugins={[rehypeHighlight]}
-            >
+          <div className="prose-custom">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}
+              components={MD_COMPONENTS as Record<string, unknown>}>
               {text}
             </ReactMarkdown>
           </div>
@@ -1157,9 +1179,12 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       content,
       ...(attachmentIds.length > 0 && { attachmentIds }),
     }).then((res) => {
-      // If error came back (no stream started), clean up
+      // If error came back (no stream started), restore input and show error
       if (res.error && activeStreamId.current === null) {
         unsubStart();
+        // Restore composer content so user doesn't lose their message
+        setInput(content);
+        setTimeout(() => textareaRef.current?.focus(), 30);
         setMessages((prev) => {
           const filtered = prev.filter((m) => m.id !== optimisticUserMsg.id);
           return [
@@ -1177,6 +1202,9 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
       }
     }).catch(() => {
       unsubStart();
+      // Network/IPC failure — restore input
+      setInput(content);
+      setTimeout(() => textareaRef.current?.focus(), 30);
     });
   }, [canSend, input, activeConvId, pendingAttachments, setStreaming]);
 
@@ -1209,6 +1237,18 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
     },
     [messages, activeConvId]
   );
+
+  // ── Edit user message ──────────────────────────────────────────────────
+  const handleEdit = useCallback((msg: ChatMessage) => {
+    setInput(msg.content);
+    setTimeout(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      // Place cursor at end
+      el.setSelectionRange(el.value.length, el.value.length);
+    }, 30);
+  }, []);
 
   // ── Keyboard shortcuts ───────────────────────────────────────────────────
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1369,6 +1409,7 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
               onExpand={setLightboxAtt}
               onCopy={handleCopy}
               {...(msg.role === "error" ? { onRetry: handleRetry } : {})}
+              {...(msg.role === "user" ? { onEdit: handleEdit } : {})}
             />
           ))}
 
@@ -1419,10 +1460,11 @@ export default function ChatScreen({ onOpenSettings }: ChatScreenProps) {
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
-                placeholder={"Message…"}
+                placeholder={streaming ? "Responding…" : "Message…"}
                 rows={1}
-                className={`flex-1 bg-transparent resize-none text-sm text-white placeholder-white/25 outline-none leading-relaxed transition-opacity min-h-[28px] ${streaming ? "opacity-50" : "opacity-100"}`}
-                style={{ maxHeight: "120px" }}
+                autoFocus
+                className="flex-1 bg-transparent resize-none text-sm text-white placeholder-white/30 outline-none leading-relaxed min-h-[28px]"
+                style={{ maxHeight: "140px" }}
               />
 
               {/* Send / Stop */}
