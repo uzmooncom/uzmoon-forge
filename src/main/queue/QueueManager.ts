@@ -35,6 +35,22 @@ export class ContextIntegrityError extends Error {
   }
 }
 
+/**
+ * Thrown by buildContextMessages when a snapshot file is missing (was never
+ * written or has been deleted since capture). Signals that the request MUST
+ * be aborted — never silently continue with partial context.
+ */
+export class ContextMissingError extends Error {
+  constructor(
+    public readonly resourceId: string,
+    public readonly relativePath: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "ContextMissingError";
+  }
+}
+
 // ── Context builder ────────────────────────────────────────────────────────
 
 function isImageMime(mimeType: string): boolean {
@@ -55,7 +71,22 @@ export function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
         const contextParts: string[] = [];
         for (const ref of m.contextRefs) {
           const content = readSnapshot(ref.snapshotPath);
-          if (!content) continue;
+          if (!content) {
+            // Snapshot file is missing — abort the request rather than silently
+            // sending the message without its context.
+            if (process.env["NODE_ENV"] === "development" || process.env["NODE_ENV"] === "test") {
+              // eslint-disable-next-line no-console
+              console.error(
+                `[context:missing] resource=${ref.id} project=${ref.projectId}` +
+                ` path=${ref.relativePath} snapshotPath=${ref.snapshotPath}`
+              );
+            }
+            throw new ContextMissingError(
+              ref.id,
+              ref.relativePath,
+              `Context snapshot missing for "${ref.relativePath}": the captured file snapshot could not be found. It may have been cleaned up. Please re-add the file to context and try again.`
+            );
+          }
 
           // Integrity: verify snapshot content matches stored hash.
           // On mismatch, throw immediately — the request must be aborted, not
@@ -194,6 +225,81 @@ export function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
       }
       return { role: m.role as "user" | "assistant", content: effectiveContent };
     });
+}
+
+// ── Ownership validation ──────────────────────────────────────────────────
+
+/**
+ * Validate that a context ref's projectId matches the conversation's projectId.
+ * Returns an error message string if validation fails, or null if valid.
+ *
+ * Rules:
+ * - A ref with a projectId must match the conversation's projectId exactly.
+ * - Global Chat conversations (projectId undefined/null) must never have project refs.
+ * - Refs with empty projectId (legacy) are silently allowed through.
+ */
+function validateRefOwnership(
+  refProjectId: string,
+  convProjectId: string | undefined
+): string | null {
+  // Legacy refs with no projectId — skip check
+  if (!refProjectId) return null;
+
+  // Global Chat conversation has a project ref — mismatch
+  if (!convProjectId) {
+    return `Context integrity error: a project file context ref (project "${refProjectId}") was attached to a Global Chat conversation. Context refs can only be used in project conversations.`;
+  }
+
+  // Mismatched project IDs
+  if (refProjectId !== convProjectId) {
+    return `Context integrity error: a context ref from project "${refProjectId}" was attached to conversation in project "${convProjectId}". Context refs must belong to the same project as the conversation.`;
+  }
+
+  return null;
+}
+
+// ── Orphaned snapshot cleanup ─────────────────────────────────────────────
+
+/**
+ * Delete snapshot files that are no longer referenced by any message in the DB,
+ * excluding the message being removed (excludeMsgId).
+ *
+ * This is "best effort" — never throws. If a snapshot is still referenced by
+ * another message, it is left intact.
+ */
+function deleteOrphanedSnapshots(
+  refs: import("../../shared/types.js").ContextRef[],
+  _convId: string,
+  excludeMsgId: string
+): void {
+  // Collect all snapshot IDs still referenced by any message (excluding the one being removed)
+  const allMessages = db.getAllMessages(true);
+  const stillReferenced = new Set<string>();
+  for (const msg of allMessages) {
+    if (msg.id === excludeMsgId) continue;
+    if (msg.contextRefs) {
+      for (const r of msg.contextRefs) {
+        stillReferenced.add(r.id);
+      }
+    }
+  }
+
+  // Delete snapshot files for refs that are no longer referenced
+  for (const ref of refs) {
+    if (stillReferenced.has(ref.id)) continue; // still in use by another message
+    if (!ref.snapshotPath) continue;
+    try {
+      if (fs.existsSync(ref.snapshotPath)) {
+        fs.unlinkSync(ref.snapshotPath);
+        if (process.env["NODE_ENV"] === "development") {
+          // eslint-disable-next-line no-console
+          console.log(`[context:cleanup] deleted snapshot ${ref.id} path=${ref.snapshotPath}`);
+        }
+      }
+    } catch {
+      // Best effort — do not throw on cleanup failure
+    }
+  }
 }
 
 // ── Secret resolver (injected by handlers.ts) ──────────────────────────────
@@ -397,14 +503,50 @@ export class QueueManager {
     });
     this.pushQueueState(conversationId);
 
-    // Build fresh context — may throw ContextIntegrityError if any snapshot
-    // fails its SHA-256 check. Handle that BEFORE opening a stream.
+    // ── Pre-flight: project ownership validation ──────────────────────────
+    // Verify all contextRefs belong to the conversation's project.
+    // Global Chat conversations must never dispatch with project refs.
+    const conv = db.getConversation(true, conversationId);
+    if (item.contextRefs && item.contextRefs.length > 0) {
+      for (const ref of item.contextRefs) {
+        const ownershipError = validateRefOwnership(ref.projectId, conv?.projectId);
+        if (ownershipError) {
+          const errMsg: ChatMessage = {
+            id: randomUUID(),
+            conversationId,
+            role: "error",
+            content: ownershipError,
+            createdAt: Date.now(),
+            isError: true,
+            agentProfileId: profile.id,
+          };
+          db.insertMessage(true, errMsg);
+          db.updateQueueItem(true, conversationId, item.id, {
+            status: "failed",
+            completedAt: Date.now(),
+            lastError: ownershipError,
+          });
+          db.setQueuePaused(true, conversationId, true);
+          const ownerStreamId = randomUUID();
+          this.send(IPC.CHAT_STREAM_ERROR, {
+            streamId: ownerStreamId,
+            message: errMsg,
+            queueItemId: item.id,
+          });
+          this.pushQueueState(conversationId);
+          return;
+        }
+      }
+    }
+
+    // Build fresh context — may throw ContextIntegrityError or ContextMissingError
+    // if any snapshot fails its SHA-256 check or is missing. Handle BEFORE opening a stream.
     const history = db.getMessagesByConversation(true, conversationId);
     let contextMessages: ReturnType<typeof buildContextMessages>;
     try {
       contextMessages = buildContextMessages(history);
     } catch (err: unknown) {
-      if (err instanceof ContextIntegrityError) {
+      if (err instanceof ContextIntegrityError || err instanceof ContextMissingError) {
         const errorContent = err.message;
         const errorMsg: ChatMessage = {
           id: randomUUID(),
@@ -624,9 +766,15 @@ export class QueueManager {
     const q = db.getConvQueue(true, convId);
     const item = q.items.find((i) => i.id === itemId);
     if (!item || item.status === "processing") return false;
-    const patch: Partial<QueueItem> = { content };
+    // When content changes, the existing contextRefs are stale — clear them and
+    // clean up their snapshot files (content changed, refs are now meaningless).
+    const patch: Partial<QueueItem> = { content, contextRefs: [] };
     if (attachmentIds !== undefined) patch.attachmentIds = attachmentIds;
     // targetAgentProfileId is preserved — never changed by edit
+    // Clean up orphaned snapshots from the old contextRefs before overwriting
+    if (item.contextRefs && item.contextRefs.length > 0) {
+      deleteOrphanedSnapshots(item.contextRefs, convId, item.messageId);
+    }
     db.updateQueueItem(true, convId, itemId, patch);
     this.updateMessageContent(convId, item.messageId, content);
     this.pushQueueState(convId);
@@ -647,6 +795,10 @@ export class QueueManager {
     const q = db.getConvQueue(true, convId);
     const item = q.items.find((i) => i.id === itemId);
     if (!item || item.status === "processing") return false;
+    // Clean up orphaned snapshots before removing the message
+    if (item.contextRefs && item.contextRefs.length > 0) {
+      deleteOrphanedSnapshots(item.contextRefs, convId, item.messageId);
+    }
     db.deleteMessage(true, convId, item.messageId);
     for (const attId of item.attachmentIds) {
       const localPath = db.deleteAttachment(true, attId);
@@ -668,6 +820,10 @@ export class QueueManager {
     const q = db.getConvQueue(true, convId);
     for (const item of q.items) {
       if (item.status !== "processing") {
+        // Clean up orphaned snapshots before removing each item
+        if (item.contextRefs && item.contextRefs.length > 0) {
+          deleteOrphanedSnapshots(item.contextRefs, convId, item.messageId);
+        }
         db.deleteMessage(true, convId, item.messageId);
         for (const attId of item.attachmentIds) {
           const localPath = db.deleteAttachment(true, attId);

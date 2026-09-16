@@ -380,8 +380,8 @@ describe("buildContextMessages — context injection", () => {
     expect(contextPart?.text).toContain("fetchData");
   });
 
-  it("skips ref whose snapshot file is missing (deleted/cleaned)", async () => {
-    const { buildContextMessages } = await import("../queue/QueueManager.js");
+  it("throws ContextMissingError when snapshot file is missing (deleted/cleaned)", async () => {
+    const { buildContextMessages, ContextMissingError } = await import("../queue/QueueManager.js");
     const ref = {
       id: "missing-snap",
       projectId: "proj-1",
@@ -404,20 +404,9 @@ describe("buildContextMessages — context injection", () => {
       },
     ];
 
-    const result = buildContextMessages(msgs);
-    expect(result).toHaveLength(1);
-    const msg = result[0]!;
-    // Context part should be absent or empty (no file to read)
-    if (Array.isArray(msg.content)) {
-      const contextPart = (msg.content as Array<{ type: string; text: string }>)
-        .find((p) => p.type === "text" && p.text.includes("<project_context>"));
-      expect(contextPart).toBeUndefined();
-    }
-    // The user message text still present
-    const textPart = Array.isArray(msg.content)
-      ? (msg.content as Array<{ type: string; text: string }>).find((p) => p.type === "text" && p.text.includes("What about"))
-      : null;
-    expect(textPart ?? (typeof msg.content === "string" ? msg.content : "")).toBeTruthy();
+    // Must throw ContextMissingError — missing snapshot must abort the request,
+    // not silently send the message without its context.
+    expect(() => buildContextMessages(msgs)).toThrow(ContextMissingError);
   });
 
   it("two duplicate-basename files get distinct project_file blocks", async () => {
@@ -521,8 +510,8 @@ describe("buildContextMessages — context injection", () => {
     expect(err.message).toContain("lib/utils.ts");
   });
 
-  it("does NOT throw when snapshot file is missing — silently omits the ref", async () => {
-    const { buildContextMessages } = await import("../queue/QueueManager.js");
+  it("ContextMissingError carries relativePath and resourceId", async () => {
+    const { buildContextMessages, ContextMissingError } = await import("../queue/QueueManager.js");
     // A ref pointing to a snapshot that was never written (file simply gone)
     const ref = {
       id: "gone-snap",
@@ -544,10 +533,18 @@ describe("buildContextMessages — context injection", () => {
         contextRefs: [ref],
       },
     ];
-    // Must NOT throw — missing snapshot (readSnapshot returns null) is silently skipped
-    expect(() => buildContextMessages(msgs)).not.toThrow();
-    const result = buildContextMessages(msgs);
-    expect(result).toHaveLength(1);
+    // Must throw ContextMissingError with correct metadata
+    let thrown: unknown;
+    try {
+      buildContextMessages(msgs);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(ContextMissingError);
+    const err = thrown as InstanceType<typeof ContextMissingError>;
+    expect(err.resourceId).toBe("gone-snap");
+    expect(err.relativePath).toBe("src/deleted.ts");
+    expect(err.message).toContain("src/deleted.ts");
   });
 
   it("skips hash check for refs without contentHash (legacy graceful degradation)", async () => {

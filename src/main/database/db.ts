@@ -471,20 +471,30 @@ export function exportConversationMarkdown(_db: true, id: string): string {
   return lines.join("\n");
 }
 
-export function deleteConversation(_db: true, id: string): string[] {
+export function deleteConversation(_db: true, id: string): { attachmentPaths: string[]; snapshotPaths: string[] } {
   const s = store();
   s.conversations = s.conversations.filter((c) => c.id !== id);
+  // Collect snapshot paths from messages BEFORE deleting them
+  const snapshotPaths: string[] = [];
+  const msgs = s.messagesByConv[id] ?? [];
+  for (const msg of msgs) {
+    if (msg.contextRefs) {
+      for (const ref of msg.contextRefs) {
+        if (ref.snapshotPath) snapshotPaths.push(ref.snapshotPath);
+      }
+    }
+  }
   delete s.messagesByConv[id];
   delete s.queues[id];
-  const toDelete: string[] = [];
+  const attachmentPaths: string[] = [];
   for (const [attId, att] of Object.entries(s.attachments)) {
     if (att.conversationId === id) {
-      toDelete.push(att.localPath);
+      attachmentPaths.push(att.localPath);
       delete s.attachments[attId];
     }
   }
   persist();
-  return toDelete;
+  return { attachmentPaths, snapshotPaths };
 }
 
 export function branchConversation(

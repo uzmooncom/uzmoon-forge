@@ -6,7 +6,7 @@
  * Context is captured (snapshot) when the user sends a message.
  */
 import React, { useEffect, useState, useCallback, useRef } from "react";
-import type { Project, DirectoryStatus, ContextChip, ContextRef } from "../../shared/types.js";
+import type { Project, DirectoryStatus, ContextChip, ContextRef, FolderContextPreview } from "../../shared/types.js";
 import { FileExplorer } from "../project/FileExplorer.js";
 import { FilePreview } from "../project/FilePreview.js";
 import { QuickOpen } from "../project/QuickOpen.js";
@@ -72,6 +72,93 @@ function randomId(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
+// ── Folder context modal ───────────────────────────────────────────────────
+
+interface FolderContextModalProps {
+  preview: FolderContextPreview;
+  onConfirm: () => void;
+  onCancel: () => void;
+  loading: boolean;
+}
+
+function FolderContextModal({ preview, onConfirm, onCancel, loading }: FolderContextModalProps) {
+  function formatBytes(bytes: number): string {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)}KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  }
+
+  const skipped = preview.skippedIgnored + preview.skippedBinary + preview.skippedSensitive + preview.skippedTooLarge;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="bg-[#13131a] border border-white/10 rounded-xl shadow-2xl w-[420px] max-h-[70vh] flex flex-col">
+        {/* Header */}
+        <div className="px-4 py-3 border-b border-white/8 flex items-center gap-2 flex-shrink-0">
+          <FolderIcon size={13} />
+          <span className="text-[13px] font-medium text-white/80">Add folder to context</span>
+        </div>
+
+        {/* Summary */}
+        <div className="px-4 py-3 flex-shrink-0">
+          <p className="text-[12px] text-white/55 mb-1">
+            <span className="text-white/80 font-medium">{preview.includedFiles.length}</span> file{preview.includedFiles.length !== 1 ? "s" : ""} from{" "}
+            <span className="font-mono text-white/60 text-[11px]">{preview.relativePath || "/"}</span>{" "}
+            ({formatBytes(preview.totalSize)})
+          </p>
+          {skipped > 0 && (
+            <p className="text-[11px] text-white/30">
+              {skipped} skipped ({[
+                preview.skippedIgnored > 0 && `${preview.skippedIgnored} ignored`,
+                preview.skippedBinary > 0 && `${preview.skippedBinary} binary`,
+                preview.skippedSensitive > 0 && `${preview.skippedSensitive} sensitive`,
+                preview.skippedTooLarge > 0 && `${preview.skippedTooLarge} too large`,
+              ].filter(Boolean).join(", ")})
+            </p>
+          )}
+        </div>
+
+        {/* File list */}
+        {preview.includedFiles.length > 0 && (
+          <div className="flex-1 min-h-0 overflow-y-auto border-t border-white/5 px-4 py-2">
+            {preview.includedFiles.map((f) => (
+              <div key={f.relativePath} className="flex items-center gap-1.5 py-[3px] text-[11px]">
+                <span className="font-mono text-white/45 truncate flex-1">{f.relativePath}</span>
+                {f.size !== undefined && (
+                  <span className="text-[10px] text-white/20 flex-shrink-0">{formatBytes(f.size)}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {preview.includedFiles.length === 0 && (
+          <div className="px-4 py-6 text-center text-[12px] text-white/30">
+            No eligible files found in this folder.
+          </div>
+        )}
+
+        {/* Actions */}
+        <div className="px-4 py-3 border-t border-white/8 flex items-center justify-end gap-2 flex-shrink-0">
+          <button
+            onClick={onCancel}
+            className="px-3 py-1.5 rounded-lg text-[12px] text-white/50 hover:text-white/80 hover:bg-white/5 transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={loading || preview.includedFiles.length === 0}
+            className="px-3 py-1.5 rounded-lg text-[12px] bg-blue-600/80 hover:bg-blue-600 text-white font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {loading ? "Adding…" : `Add ${preview.includedFiles.length} file${preview.includedFiles.length !== 1 ? "s" : ""}`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const EXPLORER_DEFAULT_WIDTH = 220;
 const EXPLORER_MIN_WIDTH = 160;
 const EXPLORER_MAX_WIDTH = 340;
@@ -107,6 +194,14 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
 
   // Captured refs ready to be sent with next message
   const capturedRefsRef = useRef<Map<string, ContextRef>>(new Map()); // chipId → ContextRef
+
+  // Folder context modal state
+  const [folderModal, setFolderModal] = useState<{
+    preview: FolderContextPreview;
+    projectId: string;
+    relativePath: string;
+  } | null>(null);
+  const [folderModalLoading, setFolderModalLoading] = useState(false);
 
   // Resizer drag state
   const explorerResizing = useRef(false);
@@ -231,6 +326,70 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
     capturedRefsRef.current.delete(chipId);
   }, []);
 
+  const handleAddFolderContext = useCallback(async (pId: string, relativePath: string) => {
+    try {
+      const result = await window.forgeApi.projectFiles.folderContextPreview(pId, relativePath);
+      if (!result.ok) return; // silently ignore errors (e.g. path not found)
+      setFolderModal({ preview: result, projectId: pId, relativePath });
+    } catch {
+      // best effort
+    }
+  }, []);
+
+  const handleFolderModalConfirm = useCallback(async () => {
+    if (!folderModal) return;
+    setFolderModalLoading(true);
+    try {
+      // Add each eligible file as a context chip sequentially
+      for (const file of folderModal.preview.includedFiles) {
+        // Re-use the existing handleAddContext logic by calling it directly
+        // We call the raw chip-addition pathway to avoid capturing chips in a stale closure:
+        const chipId = Math.random().toString(36).slice(2, 10);
+        const displayName = file.relativePath;
+        const tempChip: ContextChip = {
+          id: chipId,
+          projectId: folderModal.projectId,
+          relativePath: file.relativePath,
+          displayName,
+          size: file.size ?? 0,
+          language: "plaintext",
+          status: "ready",
+        };
+        setStagedChips((prev) => {
+          // Skip if already staged
+          const dupe = prev.find((c) => c.relativePath === file.relativePath);
+          if (dupe) return prev;
+          return [...prev, tempChip];
+        });
+        // Capture snapshot
+        void window.forgeApi.projectFiles.captureSnapshot(
+          folderModal.projectId, file.relativePath
+        ).then((res) => {
+          if (res.ok) {
+            capturedRefsRef.current.set(chipId, { ...res.ref, projectId: folderModal.projectId });
+            setStagedChips((prev) =>
+              prev.map((c) =>
+                c.id === chipId ? { ...c, size: res.ref.size, language: res.ref.language, status: "ready" } : c
+              )
+            );
+          } else {
+            const status: ContextChip["status"] = res.isSensitive ? "sensitive" : "missing";
+            setStagedChips((prev) =>
+              prev.map((c) => c.id === chipId ? { ...c, status, size: 0 } : c)
+            );
+          }
+        }).catch(() => {
+          setStagedChips((prev) =>
+            prev.map((c) => c.id === chipId ? { ...c, status: "missing" } : c)
+          );
+        });
+      }
+    } finally {
+      setFolderModalLoading(false);
+      setFolderModal(null);
+    }
+  }, [folderModal]);
+
   const handlePreviewFile = useCallback((pId: string, relativePath: string) => {
     if (pId !== project.id) return;
     setPreviewPath(relativePath);
@@ -352,6 +511,7 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
                     stagedChips={stagedChips}
                     onPreviewFile={handlePreviewFile}
                     onAddContext={handleAddContext}
+                    onAddFolderContext={handleAddFolderContext}
                     onRemoveContext={handleRemoveChip}
                   />
                 )}
@@ -409,6 +569,16 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
           onPreview={handlePreviewFile}
           onAddContext={handleAddContext}
           onClose={() => setShowQuickOpen(false)}
+        />
+      )}
+
+      {/* Folder context preview modal */}
+      {folderModal && (
+        <FolderContextModal
+          preview={folderModal.preview}
+          onConfirm={() => void handleFolderModalConfirm()}
+          onCancel={() => setFolderModal(null)}
+          loading={folderModalLoading}
         />
       )}
     </div>

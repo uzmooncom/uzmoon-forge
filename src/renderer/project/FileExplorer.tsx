@@ -99,6 +99,7 @@ interface FileExplorerProps {
   stagedChips: ContextChip[];
   onPreviewFile: (projectId: string, relativePath: string) => void;
   onAddContext: (projectId: string, relativePath: string) => void;
+  onAddFolderContext: (projectId: string, relativePath: string) => void;
   onRemoveContext: (chipId: string) => void;
 }
 
@@ -120,6 +121,7 @@ interface TreeRowProps {
   onToggle: (node: TreeNode) => void;
   onPreview: (node: TreeNode) => void;
   onAddCtx: (node: TreeNode) => void;
+  onAddFolderCtx: (node: TreeNode) => void;
 }
 
 const TreeRow = React.memo(function TreeRow({
@@ -130,6 +132,7 @@ const TreeRow = React.memo(function TreeRow({
   onToggle,
   onPreview,
   onAddCtx,
+  onAddFolderCtx,
 }: TreeRowProps) {
   const { entry } = node;
   const isDir = entry.kind === "directory";
@@ -187,7 +190,7 @@ const TreeRow = React.memo(function TreeRow({
         </span>
       )}
 
-      {/* Add context button */}
+      {/* Add context button — files */}
       {!isDir && !isSensitive && (
         <button
           className={`flex-shrink-0 p-0.5 rounded transition-colors
@@ -197,6 +200,17 @@ const TreeRow = React.memo(function TreeRow({
             }`}
           title={isStaged ? "Already in context" : "Add to context"}
           onClick={(e) => { e.stopPropagation(); onAddCtx(node); }}
+        >
+          <AddContextIcon size={11} />
+        </button>
+      )}
+
+      {/* Add folder context button — directories */}
+      {isDir && (
+        <button
+          className="flex-shrink-0 p-0.5 rounded transition-colors text-white/0 group-hover:text-white/40 group-hover:bg-white/8 hover:!text-amber-400"
+          title="Add folder files to context"
+          onClick={(e) => { e.stopPropagation(); onAddFolderCtx(node); }}
         >
           <AddContextIcon size={11} />
         </button>
@@ -212,6 +226,7 @@ export function FileExplorer({
   stagedChips,
   onPreviewFile,
   onAddContext,
+  onAddFolderContext,
   onRemoveContext: _onRemoveContext,
 }: FileExplorerProps) {
   const [rootNodes, setRootNodes] = useState<TreeNode[]>([]);
@@ -316,6 +331,10 @@ export function FileExplorer({
     onAddContext(projectId, node.entry.relativePath);
   }, [projectId, onAddContext]);
 
+  const handleAddFolderCtx = useCallback((node: TreeNode) => {
+    onAddFolderContext(projectId, node.entry.relativePath);
+  }, [projectId, onAddFolderContext]);
+
   // Flatten tree for rendering
   function flattenNodes(nodes: TreeNode[], depth: number): Array<{ node: TreeNode; depth: number }> {
     const flat: Array<{ node: TreeNode; depth: number }> = [];
@@ -367,6 +386,7 @@ export function FileExplorer({
           onToggle={handleToggle}
           onPreview={handlePreview}
           onAddCtx={handleAddCtx}
+          onAddFolderCtx={handleAddFolderCtx}
         />
       ))}
     </div>

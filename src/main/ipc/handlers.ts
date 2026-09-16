@@ -224,9 +224,12 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   ipcMain.handle(IPC.CONV_DELETE, (_e: IpcMainInvokeEvent, id: string): void => {
     const sid = getActiveStreamId(id);
     if (sid) cancelStream(sid);
-    const filePaths = db.deleteConversation(database, id);
-    for (const fp of filePaths) {
+    const { attachmentPaths, snapshotPaths } = db.deleteConversation(database, id);
+    for (const fp of attachmentPaths) {
       try { if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch { /* best effort */ }
+    }
+    for (const sp of snapshotPaths) {
+      try { if (fs.existsSync(sp)) fs.unlinkSync(sp); } catch { /* best effort */ }
     }
     const dataDir = db.getDataDir();
     const attDir = path.join(dataDir, "attachments", id);

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import type { ChatMessage, Attachment, ContextRef } from "../../../shared/types.js";
 import { fileEmoji, truncFilename, formatTime } from "../helpers.js";
 import { CopyIcon, CheckIcon, ReplyIcon, EditIcon, RetryIcon } from "../icons.js";
@@ -28,6 +28,92 @@ function ChevronIcon({ size = 10, open }: { size?: number; open: boolean }) {
     >
       <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  );
+}
+
+// ── Snapshot viewer modal ─────────────────────────────────────────────────
+
+function CloseIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <path d="M3 3l10 10M13 3L3 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CopySmallIcon({ size = 11 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <rect x="5" y="5" width="8" height="9" rx="1" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M3 11V3h8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+interface SnapshotViewerModalProps {
+  label: string;
+  content: string;
+  capturedAt: number;
+  onClose: () => void;
+}
+
+function SnapshotViewerModal({ label, content, capturedAt, onClose }: SnapshotViewerModalProps) {
+  const [copied, setCopied] = useState(false);
+  const backdropRef = useRef<HTMLDivElement>(null);
+
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const handleCopy = async () => {
+    await window.forgeApi.copyText(content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
+  };
+
+  const handleBackdropClick = (e: React.MouseEvent) => {
+    if (e.target === backdropRef.current) onClose();
+  };
+
+  return (
+    <div
+      ref={backdropRef}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      onClick={handleBackdropClick}
+    >
+      <div className="bg-[#0f0f16] border border-white/10 rounded-xl shadow-2xl w-[640px] max-w-[90vw] max-h-[75vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center gap-2 px-4 py-2.5 border-b border-white/8 flex-shrink-0">
+          <FileContextIcon size={11} />
+          <span className="flex-1 min-w-0 font-mono text-[12px] text-white/70 truncate">{label}</span>
+          <span className="text-[10px] text-white/25 flex-shrink-0">
+            captured {new Date(capturedAt).toLocaleTimeString()}
+          </span>
+          <button
+            onClick={handleCopy}
+            className="flex items-center gap-1 text-[11px] text-white/35 hover:text-white/70 transition-colors px-1.5 py-0.5 rounded hover:bg-white/5 ml-2"
+          >
+            <CopySmallIcon size={10} />
+            {copied ? "Copied" : "Copy"}
+          </button>
+          <button
+            onClick={onClose}
+            className="flex-shrink-0 p-1 rounded text-white/25 hover:text-white/60 hover:bg-white/5 transition-colors ml-1"
+          >
+            <CloseIcon size={11} />
+          </button>
+        </div>
+        {/* Content */}
+        <div className="flex-1 min-h-0 overflow-auto">
+          <pre className="px-4 py-3 text-[11px] font-mono text-white/65 leading-relaxed whitespace-pre-wrap break-words">
+            {content}
+          </pre>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -126,6 +212,7 @@ function ContextRefsBadge({ refs }: { refs: ContextRef[] }) {
 
 function ContextRefRow({ ref_ }: { ref_: ContextRef }) {
   const [loading, setLoading] = useState(false);
+  const [viewerContent, setViewerContent] = useState<string | null>(null);
   const label = refLabel(ref_.relativePath, ref_.lineStart, ref_.lineEnd);
   const fullPath = ref_.relativePath + (ref_.lineStart !== undefined
     ? ` (lines ${ref_.lineStart}-${ref_.lineEnd ?? "end"})`
@@ -138,8 +225,7 @@ function ContextRefRow({ ref_ }: { ref_: ContextRef }) {
       // Read historical snapshot via secure IPC — path is validated server-side
       const result = await window.forgeApi.projectFiles.readSnapshot(ref_.snapshotPath);
       if (result.ok && result.content) {
-        // Copy snapshot content to clipboard — user can inspect it
-        await window.forgeApi.copyText(result.content);
+        setViewerContent(result.content);
       }
     } finally {
       setLoading(false);
@@ -147,22 +233,32 @@ function ContextRefRow({ ref_ }: { ref_: ContextRef }) {
   };
 
   return (
-    <div
-      className="flex items-center gap-1.5 py-[2px] text-[11px] text-white/40 group/ref"
-      title={`${fullPath} · ${formatBytes(ref_.size)} · captured ${new Date(ref_.capturedAt).toLocaleTimeString()}`}
-    >
-      <FileContextIcon size={10} />
-      <span className="font-mono text-white/50 truncate max-w-[220px]">{label}</span>
-      <span className="text-[10px] text-white/25 flex-shrink-0">{formatBytes(ref_.size)}</span>
-      <button
-        onClick={handleView}
-        disabled={loading}
-        className="ml-auto text-[10px] text-white/20 hover:text-white/60 transition-colors opacity-0 group-hover/ref:opacity-100 px-1 py-0.5 rounded hover:bg-white/5"
-        title="Copy snapshot to clipboard"
+    <>
+      <div
+        className="flex items-center gap-1.5 py-[2px] text-[11px] text-white/40 group/ref"
+        title={`${fullPath} · ${formatBytes(ref_.size)} · captured ${new Date(ref_.capturedAt).toLocaleTimeString()}`}
       >
-        {loading ? "…" : "Copy"}
-      </button>
-    </div>
+        <FileContextIcon size={10} />
+        <span className="font-mono text-white/50 truncate max-w-[220px]">{label}</span>
+        <span className="text-[10px] text-white/25 flex-shrink-0">{formatBytes(ref_.size)}</span>
+        <button
+          onClick={handleView}
+          disabled={loading}
+          className="ml-auto text-[10px] text-white/20 hover:text-white/60 transition-colors opacity-0 group-hover/ref:opacity-100 px-1.5 py-0.5 rounded hover:bg-white/5"
+          title="View snapshot content"
+        >
+          {loading ? "…" : "View"}
+        </button>
+      </div>
+      {viewerContent !== null && (
+        <SnapshotViewerModal
+          label={label}
+          content={viewerContent}
+          capturedAt={ref_.capturedAt}
+          onClose={() => setViewerContent(null)}
+        />
+      )}
+    </>
   );
 }
 

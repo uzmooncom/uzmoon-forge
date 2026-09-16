@@ -221,8 +221,8 @@ describe("Conversations", () => {
     createConversation(db, makeConv("c5"));
     const att = makeAtt("a1", "m1", "c5");
     saveAttachmentMeta(db, att);
-    const paths = deleteConversation(db, "c5");
-    expect(paths).toContain(att.localPath);
+    const { attachmentPaths } = deleteConversation(db, "c5");
+    expect(attachmentPaths).toContain(att.localPath);
     expect(getAttachment(db, "a1")).toBeNull();
   });
 });
