@@ -25,6 +25,7 @@ import {
   resolveContextRef,
   verifyBaseSnapshot,
   computeProposalStatus,
+  MULTI_BLOCK_SENTINEL,
 } from "../project-files/edit-service.js";
 import fs from "fs";
 import path from "path";
@@ -138,42 +139,23 @@ export function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
           );
         }
         if (contextParts.length > 0) {
-          // Determine if all refs are full-file (no line range) — only then offer editing capability
-          const hasFullFileRef = m.contextRefs!.some(
+          // Determine full-file eligible paths for request-specific edit context.
+          // The capability instruction is ALWAYS present in project context messages.
+          // Full-file eligibility only affects the request-specific edit context block.
+          const fullFileRefs = m.contextRefs!.filter(
             (r) => r.lineStart === undefined && r.lineEnd === undefined
           );
-          const capabilityDirective = hasFullFileRef
-            ? `\n<forge_capability>
-You are running inside Uzmoon Forge. You do NOT have direct filesystem write access — that is intentional and by design.
-This does NOT mean you cannot help modify files. It means you propose changes and Forge handles the write with explicit user approval.
+          const hasFullFileRef = fullFileRefs.length > 0;
 
-When the user asks to modify, rename, refactor, fix, or change a file whose full content is provided above:
-1. Explain what you are changing (briefly).
-2. Respond with exactly ONE code block using the language identifier "forge_edit_proposal" containing valid JSON:
+          // Request-specific edit context block — communicates what is eligible
+          // in THIS exact request. Separate from the always-on capability instruction.
+          const editContextBlock = hasFullFileRef
+            ? `\n<forge_edit_context>\nComplete editable Project file context is available in this request.\nYou may propose modifications only for the complete files actually present in this request.\nEligible full-file paths:\n${fullFileRefs.map((r) => r.relativePath).join("\n")}\n</forge_edit_context>`
+            : `\n<forge_edit_context>\nNo complete editable Project file is currently available in this request.\nIf the user requests a file modification, explain that the full file must be added to Project context before you can safely propose the modification. Do not fabricate a proposal from partial or unseen content.\n</forge_edit_context>`;
 
-\`\`\`forge_edit_proposal
-{
-  "summary": "One-line description of the change",
-  "files": [
-    {
-      "path": "<exact relative path from project_file tag above>",
-      "content": "<complete new file content — not a diff, the full file>"
-    }
-  ]
-}
-\`\`\`
-
-Do NOT say "I cannot edit files directly" or instruct the user to make changes manually when you have the file's full content above.
-Do NOT include partial snippets. Always include the complete desired file content.
-Do NOT include any hash or checksum fields.
-Forge will compute the diff, show a Review Changes dialog, and only write after explicit user approval.
-
-If the user is asking a question (not requesting a file change), answer normally without a forge_edit_proposal block.
-</forge_capability>`
-            : "";
           parts.push({
             type: "text",
-            text: `<project_context>\n${contextParts.join("\n")}\n</project_context>${capabilityDirective}`,
+            text: `<project_context>\n${contextParts.join("\n")}\n</project_context>${editContextBlock}`,
           });
         }
         // Now handle the rest of the message normally (attachments, reply, content)
@@ -735,32 +717,64 @@ export class QueueManager {
       modelSnapshot: profile.model,
     });
 
-    // If the request includes project file context, inject the V0.3 editing
-    // system prompt so the model knows to respond with a forge_edit_proposal
-    // fence when the user asks for file modifications.
-    const hasProjectContext = !!(item.contextRefs && item.contextRefs.length > 0);
-    const editingSystemPrompt = hasProjectContext
-      ? `You are a coding assistant with access to the user's project files. When the user asks you to modify, refactor, rename, or change source files, you MUST respond with a structured edit proposal using the following format — a single fenced code block with language identifier "forge_edit_proposal" containing valid JSON:
+    // Forge Safe File Editing capability instruction.
+    // Always injected for project-scoped conversations so the model always knows
+    // the proposal-based editing flow exists — regardless of whether the current
+    // request has file context attached.
+    // conv is resolved earlier (pre-flight ownership check) but may be null for
+    // brand-new conversations not yet committed; use item projectId as fallback.
+    const convForSystem = db.getConversation(true, conversationId);
+    const isProjectConversation = !!(convForSystem?.projectId);
+    const forgeSystemPrompt = isProjectConversation
+      ? `<forge_capability>
+You are running inside Uzmoon Forge.
+
+You do NOT have direct filesystem write access. This is intentional.
+
+You can still modify Project files by PROPOSING changes.
+
+Forge owns:
+- diff generation
+- review
+- explicit user approval
+- filesystem write
+- verification
+- undo
+
+Do NOT tell the user to manually edit a file merely because direct filesystem write tools are unavailable.
+
+When the user asks to modify, refactor, fix, optimize, or otherwise change an EXISTING Project file:
+- you may only propose a modification if the COMPLETE file content is available in the CURRENT request
+- search snippets, partial line ranges, filenames, old conversation contents, or guessed content are insufficient
+- use the exact Project-relative path supplied by Forge
+- never claim the file has already been changed
+- do not propose delete, rename, move, or file creation in this version
+- do not output shell commands as if they were applied actions
+
+When complete file content is available in the current request, respond with a brief explanation and exactly ONE structured block:
 
 \`\`\`forge_edit_proposal
 {
-  "summary": "Short one-line description of what this change does",
-  "explanation": "Optional: longer explanation of the approach",
+  "summary": "One-line description of the change",
   "files": [
     {
-      "path": "relative/path/to/file.ts",
-      "content": "... full new file content here ..."
+      "path": "<exact Project-relative path>",
+      "content": "<complete desired final file content>"
     }
   ]
 }
 \`\`\`
 
-Rules:
-- Always output the COMPLETE new file content in "content" — never partial snippets or diffs.
-- Use the exact relative path shown in the <project_file> context tags.
-- Only include files that need to change.
-- If the user is NOT asking for a file modification (e.g. they are asking a question or want an explanation), respond normally WITHOUT a forge_edit_proposal block.
-- Never include the forge_edit_proposal block unless you are actually proposing file changes.`
+Proposal rules:
+- "content" must contain the COMPLETE desired final file — not a diff, not a partial snippet
+- do not include hashes, checksums, absolute paths, or shell commands
+- include multiple files only if the COMPLETE content of every proposed file is available in the CURRENT request
+- emit at most ONE forge_edit_proposal block per response
+
+If the requested file's complete content is NOT available in the CURRENT request, explain that full file context is required before Forge can safely prepare the change. Do not fabricate unseen content.
+
+If the user is asking a question or requesting an explanation rather than a modification, answer normally and do not emit forge_edit_proposal.
+</forge_capability>`
       : undefined;
 
     try {
@@ -770,7 +784,7 @@ Rules:
         messages: contextMessages,
         stream: true,
         signal,
-        ...(editingSystemPrompt !== undefined && { system: editingSystemPrompt }),
+        ...(forgeSystemPrompt !== undefined && { system: forgeSystemPrompt }),
         onChunk: (chunk) => {
           this.send(IPC.CHAT_STREAM_CHUNK, { streamId, chunk });
         },
@@ -787,11 +801,36 @@ Rules:
       // Otherwise save as a plain assistant message.
       let assistantMsg: ChatMessage;
       const rawProposalFenceJson = extractProposalFence(fullText);
-      const parsedProposal = rawProposalFenceJson ? parseProposalJson(rawProposalFenceJson) : null;
       const conv = db.getConversation(true, conversationId);
       const convProjectId = conv?.projectId;
 
-      if (parsedProposal && convProjectId && item.contextRefs && item.contextRefs.length > 0) {
+      // Multi-block: ambiguous structured response — keep prose, show error affordance
+      if (rawProposalFenceJson === MULTI_BLOCK_SENTINEL) {
+        const visibleContent = stripProposalFence(fullText);
+        const errNote = visibleContent
+          ? visibleContent + "\n\n> **Could not prepare proposed changes** — multiple proposal blocks were returned. Please try again."
+          : "> **Could not prepare proposed changes** — multiple proposal blocks were returned. Please try again.";
+        assistantMsg = {
+          id: randomUUID(),
+          conversationId,
+          role: "assistant",
+          content: errNote,
+          createdAt: now,
+          model: profile.model,
+          durationMs,
+          agentProfileId: profile.id,
+          agentNameSnapshot: profile.name,
+          modelSnapshot: profile.model,
+        };
+        db.insertMessage(true, assistantMsg);
+      } else {
+
+      const parsedProposal = rawProposalFenceJson ? parseProposalJson(rawProposalFenceJson) : null;
+
+      // Malformed fence: fence present but JSON is invalid/incomplete
+      const hasMalformedProposal = rawProposalFenceJson !== null && parsedProposal === null;
+
+      if (parsedProposal && convProjectId) {
         // --- Proposal path ---
         const msgId = randomUUID();
         const proposalId = randomUUID();
@@ -823,7 +862,7 @@ Rules:
           const targetResult = captureProposalTarget(proposalId, feId, rawFile.content);
           if (!targetResult.ok) { proposalSaveFailed = true; break; }
 
-          const resolution = resolveContextRef(item.contextRefs, convProjectId, rawFile.path);
+          const resolution = resolveContextRef(item.contextRefs ?? [], convProjectId, rawFile.path);
           let feStatus: import("../../shared/types.js").FileEditStatus;
           let failureReason: string | undefined;
           let baseSnapshotId: string | undefined;
@@ -920,12 +959,20 @@ Rules:
           assistantMsg = fallbackMsg;
         }
       } else {
-        // --- Plain assistant message ---
+        // --- Plain assistant message (or malformed proposal) ---
+        let plainContent = fullText;
+        if (hasMalformedProposal) {
+          // Fence was present but JSON was invalid — strip the raw fence
+          // and append a restrained error note. Do NOT tell the user to edit manually.
+          const stripped = stripProposalFence(fullText);
+          const errorNote = "> **Could not prepare proposed changes.** The response was incomplete or malformed. Please try again.";
+          plainContent = stripped ? stripped + "\n\n" + errorNote : errorNote;
+        }
         assistantMsg = {
           id: randomUUID(),
           conversationId,
           role: "assistant",
-          content: fullText,
+          content: plainContent,
           createdAt: now,
           model: profile.model,
           durationMs,
@@ -935,6 +982,8 @@ Rules:
         };
         db.insertMessage(true, assistantMsg);
       }
+
+      } // close outer multi-block else
 
       db.updateConversation(true, conversationId, { updatedAt: now });
       db.touchAgentProfileLastUsed(true, profile.id);

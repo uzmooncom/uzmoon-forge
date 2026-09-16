@@ -54,8 +54,20 @@ interface ParsedProposal {
 /**
  * Extract the first ```forge_edit_proposal ... ``` fence from a model response.
  * Returns the raw fence JSON string, or null if none found.
+ * Returns the special sentinel "__MULTI_BLOCK__" if more than one fence is present
+ * (caller must treat this as an invalid/ambiguous response).
  */
+export const MULTI_BLOCK_SENTINEL = "__MULTI_BLOCK__" as const;
+
+export function countProposalFences(fullText: string): number {
+  const globalRe = /```forge_edit_proposal[\s\S]*?```/g;
+  return (fullText.match(globalRe) ?? []).length;
+}
+
 export function extractProposalFence(fullText: string): string | null {
+  const count = countProposalFences(fullText);
+  if (count === 0) return null;
+  if (count > 1) return MULTI_BLOCK_SENTINEL;
   const fenceRe = /```forge_edit_proposal\s*\n([\s\S]*?)```/;
   const m = fenceRe.exec(fullText);
   if (!m) return null;

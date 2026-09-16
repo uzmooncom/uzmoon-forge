@@ -756,16 +756,24 @@ describe("forge_edit_proposal — full pipeline fixture test", () => {
     // ── Assert 1: transport was called exactly once
     expect(mockMakeRequest).toHaveBeenCalledTimes(1);
 
-    // ── Assert 2: outbound messages contain the forge_capability directive
-    const callArgs = mockMakeRequest.mock.calls[0]![0] as { messages: Array<{ role: string; content: unknown }> };
+    // ── Assert 2: forge_capability in system field; forge_edit_context + path in user message
+    const callArgs = mockMakeRequest.mock.calls[0]![0] as {
+      messages: Array<{ role: string; content: unknown }>;
+      system?: string;
+    };
+    // System prompt must contain the full capability instruction
+    expect(callArgs.system).toBeDefined();
+    expect(callArgs.system).toContain("forge_capability");
+    expect(callArgs.system).toContain("forge_edit_proposal");
+    // User message must contain project context + request-specific edit context
     const userMsg = callArgs.messages.find((m) => m.role === "user");
     expect(userMsg).toBeDefined();
     const userText = typeof userMsg!.content === "string"
       ? userMsg!.content
       : JSON.stringify(userMsg!.content);
-    expect(userText).toContain("forge_capability");
-    expect(userText).toContain("forge_edit_proposal");
-    expect(userText).toContain("package.json");
+    expect(userText).toContain("forge_edit_context");
+    expect(userText).toContain("package.json"); // eligible path listed
+    expect(userText).toContain("project_context"); // file bytes present
 
     // ── Assert 3: DB has exactly user + assistant message (no error messages)
     const msgs = getMessagesByConversation(true, convId);
@@ -811,5 +819,259 @@ describe("forge_edit_proposal — full pipeline fixture test", () => {
     const diskContent = fs.readFileSync(path.join(projectRoot, "package.json"), "utf8");
     expect(diskContent).toContain('"uzcraft"');
     expect(diskContent).not.toContain('"uzcraft-app"');
+  });
+});
+
+// ── No-full-context edit request (spec req 15) ────────────────────────────
+describe("forge capability — no full-file context", () => {
+  it("system prompt still contains capability; edit context says no complete file available", async () => {
+    const projId = "proj-no-full-ctx";
+    createProject(true, {
+      id: projId,
+      name: "No Full Ctx Project",
+      workingDirectory: projectRoot,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    // Transport: model responds without a proposal (correct behavior for no-full-ctx)
+    mockMakeRequest.mockResolvedValueOnce("Tam dosya içeriğini context'e ekleyin, ardından değişikliği önerebilirim.");
+
+    const convId = "conv-no-full-ctx";
+    createConversation(true, {
+      id: convId,
+      title: "No Full Ctx Conv",
+      projectId: projId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    // Enqueue with NO contextRefs — simulates user typing without attaching a file
+    await queueManager.enqueue({
+      conversationId: convId,
+      content: "name alanını uzcraft-app yap",
+      attachmentIds: [],
+      targetAgentProfileId: PROFILE_ID,
+      projectId: projId,
+      contextRefs: [],
+    });
+
+    await waitForQueue(400);
+
+    expect(mockMakeRequest).toHaveBeenCalledTimes(1);
+    const callArgs = mockMakeRequest.mock.calls[0]![0] as {
+      messages: Array<{ role: string; content: unknown }>;
+      system?: string;
+    };
+
+    // Capability must ALWAYS be present in project conversations
+    expect(callArgs.system).toBeDefined();
+    expect(callArgs.system).toContain("forge_capability");
+
+    // No proposal persisted
+    const msgs = getMessagesByConversation(true, convId);
+    const proposals = msgs.filter((m) => {
+      const ext = m as unknown as Record<string, unknown>;
+      return ext["proposalId"] != null;
+    });
+    expect(proposals).toHaveLength(0);
+  });
+});
+
+// ── Question-not-edit with full context (spec req 16) ─────────────────────
+describe("forge capability — question with full-file context", () => {
+  it("no forge_edit_proposal emitted when user asks a question", async () => {
+    const projId = "proj-question-ctx";
+    createProject(true, {
+      id: projId,
+      name: "Question Ctx Project",
+      workingDirectory: projectRoot,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    writeProjectFile("package.json", '{ "name": "uzcraft", "version": "0.1.0" }\n');
+    const snapResult = captureSnapshot(projId, projectRoot, "package.json");
+    expect(snapResult.ok).toBe(true);
+    if (!snapResult.ok) return;
+
+    // Model answers normally — no fence
+    mockMakeRequest.mockResolvedValueOnce("Bu dosya proje yapılandırmasını içerir. 'name' alanı paketi tanımlar.");
+
+    const convId = "conv-question-ctx";
+    createConversation(true, {
+      id: convId,
+      title: "Question Conv",
+      projectId: projId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    await queueManager.enqueue({
+      conversationId: convId,
+      content: "bu dosya ne yapıyor?",
+      attachmentIds: [],
+      targetAgentProfileId: PROFILE_ID,
+      projectId: projId,
+      contextRefs: [snapResult.ref],
+    });
+
+    await waitForQueue(400);
+
+    expect(mockMakeRequest).toHaveBeenCalledTimes(1);
+
+    // No proposal — pure Q&A
+    const msgs = getMessagesByConversation(true, convId);
+    const assistantMsgs = msgs.filter((m) => m.role === "assistant");
+    expect(assistantMsgs).toHaveLength(1);
+    const aMsg = assistantMsgs[0]!;
+    expect((aMsg as unknown as Record<string, unknown>)["proposalId"]).toBeFalsy();
+    // Content should be the normal answer
+    expect(aMsg.content).toContain("yapılandırmasını");
+  });
+});
+
+// ── Partial-context (line range) edit request (spec req 17) ──────────────
+describe("forge capability — partial/line-range context", () => {
+  it("forge_edit_context says no complete eligible file for line-range ref", async () => {
+    const projId = "proj-partial-ctx";
+    createProject(true, {
+      id: projId,
+      name: "Partial Ctx Project",
+      workingDirectory: projectRoot,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    writeProjectFile("src/index.ts", "export const a = 1;\nexport const b = 2;\n");
+    // Capture a LINE RANGE ref (not full file)
+    const snapResult = captureSnapshot(projId, projectRoot, "src/index.ts", 1, 1);
+    expect(snapResult.ok).toBe(true);
+    if (!snapResult.ok) return;
+
+    mockMakeRequest.mockResolvedValueOnce("Tam dosya içeriği gerekli, lütfen dosyanın tamamını context'e ekleyin.");
+
+    const convId = "conv-partial-ctx";
+    createConversation(true, {
+      id: convId,
+      title: "Partial Conv",
+      projectId: projId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    await queueManager.enqueue({
+      conversationId: convId,
+      content: "a değerini 99 yap",
+      attachmentIds: [],
+      targetAgentProfileId: PROFILE_ID,
+      projectId: projId,
+      contextRefs: [snapResult.ref],
+    });
+
+    await waitForQueue(400);
+
+    expect(mockMakeRequest).toHaveBeenCalledTimes(1);
+    const callArgs = mockMakeRequest.mock.calls[0]![0] as {
+      messages: Array<{ role: string; content: unknown }>;
+      system?: string;
+    };
+
+    // Capability always present
+    expect(callArgs.system).toContain("forge_capability");
+
+    // User message forge_edit_context must say no complete file
+    const userMsg = callArgs.messages.find((m) => m.role === "user");
+    const userText = typeof userMsg!.content === "string"
+      ? userMsg!.content
+      : JSON.stringify(userMsg!.content);
+    expect(userText).toContain("forge_edit_context");
+    expect(userText).toContain("No complete editable Project file");
+
+    // No proposal persisted
+    const msgs = getMessagesByConversation(true, convId);
+    const hasProposal = msgs.some((m) => (m as unknown as Record<string, unknown>)["proposalId"]);
+    expect(hasProposal).toBe(false);
+  });
+});
+
+// ── Multi-block proposal rejection (spec req 12) ──────────────────────────
+import { countProposalFences, MULTI_BLOCK_SENTINEL } from "../project-files/edit-service.js";
+
+describe("forge capability — multi-block proposal rejection", () => {
+  it("countProposalFences returns correct count and extractProposalFence returns sentinel", () => {
+    const singleFence = "Hello\n```forge_edit_proposal\n{}\n```\nDone.";
+    expect(countProposalFences(singleFence)).toBe(1);
+
+    const multiFence = "```forge_edit_proposal\n{}\n```\nAnd also\n```forge_edit_proposal\n{}\n```";
+    expect(countProposalFences(multiFence)).toBe(2);
+    // extractProposalFence returns the sentinel constant for multi-block responses
+    expect(MULTI_BLOCK_SENTINEL).toBe("__MULTI_BLOCK__");
+
+    const noFence = "Just text";
+    expect(countProposalFences(noFence)).toBe(0);
+  });
+
+  it("pipeline produces restrained error message when model returns multiple proposal blocks", async () => {
+    const projId = "proj-multi-block";
+    createProject(true, {
+      id: projId,
+      name: "Multi Block Project",
+      workingDirectory: projectRoot,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    writeProjectFile("a.json", '{ "x": 1 }\n');
+    const snapResult = captureSnapshot(projId, projectRoot, "a.json");
+    expect(snapResult.ok).toBe(true);
+    if (!snapResult.ok) return;
+
+    // Model returns TWO forge_edit_proposal blocks — invalid
+    const multiBlockResponse = [
+      "Birinci öneri:",
+      "```forge_edit_proposal",
+      '{ "summary": "first", "files": [{"path": "a.json", "content": "{}"}] }',
+      "```",
+      "İkinci öneri:",
+      "```forge_edit_proposal",
+      '{ "summary": "second", "files": [{"path": "a.json", "content": "{}"}] }',
+      "```",
+    ].join("\n");
+
+    mockMakeRequest.mockResolvedValueOnce(multiBlockResponse);
+
+    const convId = "conv-multi-block";
+    createConversation(true, {
+      id: convId,
+      title: "Multi Block Conv",
+      projectId: projId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    await queueManager.enqueue({
+      conversationId: convId,
+      content: "değiştir",
+      attachmentIds: [],
+      targetAgentProfileId: PROFILE_ID,
+      projectId: projId,
+      contextRefs: [snapResult.ref],
+    });
+
+    await waitForQueue(400);
+
+    const msgs = getMessagesByConversation(true, convId);
+    const assistantMsgs = msgs.filter((m) => m.role === "assistant");
+    expect(assistantMsgs).toHaveLength(1);
+    const aMsg = assistantMsgs[0]!;
+
+    // No proposal persisted
+    expect((aMsg as unknown as Record<string, unknown>)["proposalId"]).toBeFalsy();
+
+    // Restrained error note present
+    expect(aMsg.content).toContain("Could not prepare proposed changes");
+    expect(aMsg.content).toContain("multiple proposal blocks");
+
+    // Source file unchanged
+    const disk = fs.readFileSync(path.join(projectRoot, "a.json"), "utf8");
+    expect(disk).toContain('"x": 1');
   });
 });

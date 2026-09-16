@@ -89,11 +89,10 @@ describe("extractProposalFence", () => {
     expect(extractProposalFence("just regular text")).toBeNull();
   });
 
-  it("only extracts first fence", () => {
+  it("returns MULTI_BLOCK_SENTINEL when multiple fences present", () => {
     const text = "```forge_edit_proposal\n{\"summary\":\"a\",\"files\":[]}\n```\n```forge_edit_proposal\n{\"summary\":\"b\",\"files\":[]}\n```";
     const result = extractProposalFence(text);
-    expect(result).toContain('"summary":"a"');
-    expect(result).not.toContain('"summary":"b"');
+    expect(result).toBe("__MULTI_BLOCK__");
   });
 });
 
