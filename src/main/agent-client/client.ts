@@ -90,19 +90,24 @@ function serializeAnthropicContent(
 function buildOpenAIBody(
   messages: SimpleMessage[],
   model: string,
-  stream: boolean
+  stream: boolean,
+  system?: string
 ): string {
   const serialized = messages.map((m) => ({
     role: m.role,
     content: serializeOpenAIContent(m.content),
   }));
-  return JSON.stringify({ model, messages: serialized, stream, max_tokens: 4096 });
+  const sysMessages: Array<{ role: string; content: string }> = system
+    ? [{ role: "system", content: system }]
+    : [];
+  return JSON.stringify({ model, messages: [...sysMessages, ...serialized], stream, max_tokens: 4096 });
 }
 
 function buildAnthropicBody(
   messages: SimpleMessage[],
   model: string,
-  stream: boolean
+  stream: boolean,
+  system?: string
 ): string {
   const serialized = messages.map((m) => ({
     role: m.role,
@@ -111,8 +116,9 @@ function buildAnthropicBody(
   return JSON.stringify({
     model,
     messages: serialized,
-    max_tokens: 4096,
+    max_tokens: 8192,
     stream,
+    ...(system !== undefined && { system }),
   });
 }
 
@@ -123,6 +129,7 @@ interface RequestOptions {
   apiKey: string;
   messages: SimpleMessage[];
   stream: boolean;
+  system?: string;
   onChunk?: (text: string) => void;
   signal?: { aborted: boolean };
 }
@@ -153,8 +160,8 @@ export function makeRequest(opts: RequestOptions): Promise<string> {
 
     const body =
       cfg.protocol === "openai"
-        ? buildOpenAIBody(messages, cfg.model, stream)
-        : buildAnthropicBody(messages, cfg.model, stream);
+        ? buildOpenAIBody(messages, cfg.model, stream, opts.system)
+        : buildAnthropicBody(messages, cfg.model, stream, opts.system);
 
     const authHeaders = resolveHeaders(cfg, apiKey);
     const extraHeaders: Record<string, string> =

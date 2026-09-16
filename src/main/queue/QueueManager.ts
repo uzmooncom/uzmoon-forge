@@ -702,6 +702,34 @@ export class QueueManager {
       modelSnapshot: profile.model,
     });
 
+    // If the request includes project file context, inject the V0.3 editing
+    // system prompt so the model knows to respond with a forge_edit_proposal
+    // fence when the user asks for file modifications.
+    const hasProjectContext = !!(item.contextRefs && item.contextRefs.length > 0);
+    const editingSystemPrompt = hasProjectContext
+      ? `You are a coding assistant with access to the user's project files. When the user asks you to modify, refactor, rename, or change source files, you MUST respond with a structured edit proposal using the following format — a single fenced code block with language identifier "forge_edit_proposal" containing valid JSON:
+
+\`\`\`forge_edit_proposal
+{
+  "summary": "Short one-line description of what this change does",
+  "explanation": "Optional: longer explanation of the approach",
+  "files": [
+    {
+      "path": "relative/path/to/file.ts",
+      "content": "... full new file content here ..."
+    }
+  ]
+}
+\`\`\`
+
+Rules:
+- Always output the COMPLETE new file content in "content" — never partial snippets or diffs.
+- Use the exact relative path shown in the <project_file> context tags.
+- Only include files that need to change.
+- If the user is NOT asking for a file modification (e.g. they are asking a question or want an explanation), respond normally WITHOUT a forge_edit_proposal block.
+- Never include the forge_edit_proposal block unless you are actually proposing file changes.`
+      : undefined;
+
     try {
       fullText = await makeRequest({
         cfg,
@@ -709,6 +737,7 @@ export class QueueManager {
         messages: contextMessages,
         stream: true,
         signal,
+        ...(editingSystemPrompt !== undefined && { system: editingSystemPrompt }),
         onChunk: (chunk) => {
           this.send(IPC.CHAT_STREAM_CHUNK, { streamId, chunk });
         },
