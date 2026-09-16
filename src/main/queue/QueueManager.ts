@@ -138,9 +138,42 @@ export function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
           );
         }
         if (contextParts.length > 0) {
+          // Determine if all refs are full-file (no line range) — only then offer editing capability
+          const hasFullFileRef = m.contextRefs!.some(
+            (r) => r.lineStart === undefined && r.lineEnd === undefined
+          );
+          const capabilityDirective = hasFullFileRef
+            ? `\n<forge_capability>
+You are running inside Uzmoon Forge. You do NOT have direct filesystem write access — that is intentional and by design.
+This does NOT mean you cannot help modify files. It means you propose changes and Forge handles the write with explicit user approval.
+
+When the user asks to modify, rename, refactor, fix, or change a file whose full content is provided above:
+1. Explain what you are changing (briefly).
+2. Respond with exactly ONE code block using the language identifier "forge_edit_proposal" containing valid JSON:
+
+\`\`\`forge_edit_proposal
+{
+  "summary": "One-line description of the change",
+  "files": [
+    {
+      "path": "<exact relative path from project_file tag above>",
+      "content": "<complete new file content — not a diff, the full file>"
+    }
+  ]
+}
+\`\`\`
+
+Do NOT say "I cannot edit files directly" or instruct the user to make changes manually when you have the file's full content above.
+Do NOT include partial snippets. Always include the complete desired file content.
+Do NOT include any hash or checksum fields.
+Forge will compute the diff, show a Review Changes dialog, and only write after explicit user approval.
+
+If the user is asking a question (not requesting a file change), answer normally without a forge_edit_proposal block.
+</forge_capability>`
+            : "";
           parts.push({
             type: "text",
-            text: `<project_context>\n${contextParts.join("\n")}\n</project_context>`,
+            text: `<project_context>\n${contextParts.join("\n")}\n</project_context>${capabilityDirective}`,
           });
         }
         // Now handle the rest of the message normally (attachments, reply, content)

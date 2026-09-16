@@ -678,3 +678,138 @@ describe("deleteOrphanedSnapshots — additional edge cases", () => {
     expect(fs.existsSync(snapPath)).toBe(true);
   });
 });
+// ── forge_edit_proposal fixture test ──────────────────────────────────────
+// Req: deterministic fixture test verifying the full proposal pipeline.
+// The mock transport returns a realistic assistant response containing a
+// forge_edit_proposal block. We verify every step of the pipeline:
+//   1. capability directive is present in the outbound messages
+//   2. proposal is persisted
+//   3. assistantMessage.proposalId is populated
+//   4. fence is stripped from visible message content
+//   5. proposed target content contains "uzcraft-app"
+//   6. source file on disk is unchanged before Apply
+//   7. no extra DB messages (exactly 1 user + 1 assistant)
+
+import { createProject, getMessagesByConversation, getProposal } from "../database/db.js";
+
+const FIXTURE_RESPONSE = `I'll update the name field in your package.json for you.
+
+\`\`\`forge_edit_proposal
+{
+  "summary": "Rename package from uzcraft to uzcraft-app",
+  "files": [
+    {
+      "path": "package.json",
+      "content": "{\\n  \\"name\\": \\"uzcraft-app\\",\\n  \\"version\\": \\"0.1.0\\"\\n}\\n"
+    }
+  ]
+}
+\`\`\`
+
+The diff will show the name field changing from "uzcraft" to "uzcraft-app". Review and apply when ready.`;
+
+describe("forge_edit_proposal — full pipeline fixture test", () => {
+  it("proposal is persisted and assistantMessage.proposalId is populated", async () => {
+    // Setup: project + source file
+    const projId = "fixture-proj-001";
+    createProject(true, {
+      id: projId,
+      name: "Fixture Project",
+      workingDirectory: projectRoot,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    writeProjectFile("package.json", '{\n  "name": "uzcraft",\n  "version": "0.1.0"\n}\n');
+
+    // Capture snapshot of package.json
+    const snapResult = captureSnapshot(projId, projectRoot, "package.json");
+    expect(snapResult.ok).toBe(true);
+    if (!snapResult.ok) return;
+    const contextRef = snapResult.ref;
+
+    // Mock transport returns fixture response with proposal block
+    mockMakeRequest.mockResolvedValueOnce(FIXTURE_RESPONSE);
+
+    // Create conversation in project scope
+    const convId = "conv-fixture-proposal";
+    createConversation(true, {
+      id: convId,
+      title: "Fixture Conv",
+      projectId: projId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    // Enqueue with the captured context ref (full-file, no line range)
+    await queueManager.enqueue({
+      conversationId: convId,
+      content: 'name alanını "uzcraft-app" yap',
+      attachmentIds: [],
+      targetAgentProfileId: PROFILE_ID,
+      projectId: projId,
+      contextRefs: [contextRef],
+    });
+
+    // Wait for queue processing
+    await waitForQueue(500);
+
+    // ── Assert 1: transport was called exactly once
+    expect(mockMakeRequest).toHaveBeenCalledTimes(1);
+
+    // ── Assert 2: outbound messages contain the forge_capability directive
+    const callArgs = mockMakeRequest.mock.calls[0]![0] as { messages: Array<{ role: string; content: unknown }> };
+    const userMsg = callArgs.messages.find((m) => m.role === "user");
+    expect(userMsg).toBeDefined();
+    const userText = typeof userMsg!.content === "string"
+      ? userMsg!.content
+      : JSON.stringify(userMsg!.content);
+    expect(userText).toContain("forge_capability");
+    expect(userText).toContain("forge_edit_proposal");
+    expect(userText).toContain("package.json");
+
+    // ── Assert 3: DB has exactly user + assistant message (no error messages)
+    const msgs = getMessagesByConversation(true, convId);
+    const userMsgs = msgs.filter((m) => m.role === "user");
+    const assistantMsgs = msgs.filter((m) => m.role === "assistant");
+    const errorMsgs = msgs.filter((m) => m.role === "error");
+    expect(errorMsgs).toHaveLength(0);
+    expect(userMsgs).toHaveLength(1);
+    expect(assistantMsgs).toHaveLength(1);
+
+    const assistantMessage = assistantMsgs[0]!;
+
+    // ── Assert 4: assistantMessage.proposalId is populated
+    const proposalId = (assistantMessage as unknown as Record<string, unknown>)["proposalId"];
+    expect(proposalId).toBeTruthy();
+    expect(typeof proposalId).toBe("string");
+
+    // ── Assert 5: fence is NOT visible in message content
+    expect(assistantMessage.content).not.toContain("forge_edit_proposal");
+    // Explanation prose IS visible
+    expect(assistantMessage.content).toContain("name field");
+
+    // ── Assert 6: proposal is persisted in DB
+    const proposal = getProposal(true, proposalId as string);
+    expect(proposal).not.toBeNull();
+    expect(proposal!.projectId).toBe(projId);
+    expect(proposal!.conversationId).toBe(convId);
+    expect(proposal!.messageId).toBe(assistantMessage.id);
+
+    // ── Assert 7: at least one fileEdit with "uzcraft-app" in target
+    expect(proposal!.fileEdits.length).toBeGreaterThan(0);
+    const fe = proposal!.fileEdits[0]!;
+    expect(fe.relativePath).toBe("package.json");
+
+    // Read the captured target resource — should contain "uzcraft-app"
+    const targetContent = fs.existsSync(fe.targetResourcePath)
+      ? fs.readFileSync(fe.targetResourcePath, "utf8")
+      : null;
+    expect(targetContent).not.toBeNull();
+    expect(targetContent).toContain("uzcraft-app");
+
+    // ── Assert 8: source file on disk is UNCHANGED (no apply yet)
+    const diskContent = fs.readFileSync(path.join(projectRoot, "package.json"), "utf8");
+    expect(diskContent).toContain('"uzcraft"');
+    expect(diskContent).not.toContain('"uzcraft-app"');
+  });
+});
