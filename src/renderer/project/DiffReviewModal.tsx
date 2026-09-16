@@ -69,7 +69,9 @@ function FileEditStatusBadge({ status }: { status: FileEdit["status"] }) {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function canSelectEdit(fe: FileEdit): boolean {
-  return fe.status === "ready";
+  // A file is selectable only when it is in ready state AND has a base snapshot.
+  // These must both be true for a valid diff and safe apply.
+  return fe.status === "ready" && !!(fe as unknown as Record<string, unknown>)["baseSnapshotId"];
 }
 
 // ── Main Component ───────────────────────────────────────────────────────────
@@ -127,37 +129,33 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
       [activeFileId]: { loading: true, proposedContent: null, baseContent: null, error: null },
     }));
 
-    void (async (feCapture: FileEdit) => {
-      const fe = feCapture;
-      // Load proposed content from main
-      const targetResult = await window.forgeApi.fileEditing.readProposalTarget(proposal.id, fe.id);
-      if (!targetResult.ok) {
+    void (async (feCapture: FileEdit, capturedFileId: string) => {
+      // Load both proposed and base content from main process in a single IPC call.
+      // The handler reads the base from the captured snapshot (ContextRef).
+      const result = await window.forgeApi.fileEditing.readProposalTarget(proposal.id, feCapture.id);
+      if (!result.ok) {
         setDiffStates((prev) => ({
           ...prev,
-          [activeFileId]: { loading: false, proposedContent: null, baseContent: null, error: targetResult.error },
+          [capturedFileId]: {
+            loading: false,
+            proposedContent: null,
+            baseContent: null,
+            error: result.error,
+          },
         }));
         return;
       }
 
-      // Load base content from snapshot if available
-      let baseContent: string | null = null;
-      if (fe.status === "ready" || fe.status === "stale" || fe.status === "applied") {
-        // Try to read base content via snapshot path (ContextRef-based)
-        // We don't have the snapshot path here — use a placeholder showing "no base available"
-        // The diff will still show the proposed content vs empty base when base is unavailable
-        baseContent = "(base content not available — add file to context to see diff)";
-      }
-
       setDiffStates((prev) => ({
         ...prev,
-        [activeFileId]: {
+        [capturedFileId]: {
           loading: false,
-          proposedContent: targetResult.content,
-          baseContent,
+          proposedContent: result.proposedContent,
+          baseContent: result.baseContent,
           error: null,
         },
       }));
-    })(fe);
+    })(fe, activeFileId);
   }, [activeFileId, proposal.id, proposal.fileEdits, diffStates]);
 
   const handleToggleSelect = useCallback((feId: string) => {
@@ -357,9 +355,10 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
                   {diffState.error}
                 </div>
               )}
-              {activeFileId && diffState && !diffState.loading && !diffState.error && diffState.proposedContent !== null && (
+              {activeFileId && diffState && !diffState.loading && !diffState.error &&
+               diffState.proposedContent !== null && diffState.baseContent !== null && (
                 <DiffView
-                  baseContent={diffState.baseContent ?? ""}
+                  baseContent={diffState.baseContent}
                   proposedContent={diffState.proposedContent}
                   filePath={activeFe?.relativePath}
                   maxLines={undefined}

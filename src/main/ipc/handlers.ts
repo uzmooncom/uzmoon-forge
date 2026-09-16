@@ -794,14 +794,45 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       _e: IpcMainInvokeEvent,
       proposalId: string,
       fileEditId: string
-    ): { ok: true; content: string } | { ok: false; error: string } => {
+    ):
+      | { ok: true; proposedContent: string; baseContent: string }
+      | { ok: false; error: string } => {
       const proposal = db.getProposal(database, proposalId);
       if (!proposal) return { ok: false, error: "Proposal not found" };
       const fe = proposal.fileEdits.find((f) => f.id === fileEditId);
       if (!fe) return { ok: false, error: "File edit not found" };
-      const content = editService.readProposalTarget(fe.targetResourcePath);
-      if (content === null) return { ok: false, error: "Proposal target resource not found" };
-      return { ok: true, content };
+
+      // Proposed content (what the model wants to write)
+      const proposedContent = editService.readProposalTarget(fe.targetResourcePath);
+      if (proposedContent === null)
+        return { ok: false, error: "Proposal target resource not found" };
+
+      // Base content (the snapshot captured at request time — the truth for the diff)
+      // baseSnapshotId is the ContextRef.id; we need the snapshotPath from that ref.
+      // The snapshotPath is stored on the ContextRef which lives on the ChatMessage.
+      // Retrieve it by scanning the conversation's message contextRefs.
+      let baseContent: string | null = null;
+      if (fe.baseSnapshotId) {
+        // Find the snapshot path from the originating message's contextRefs
+        const messages = db.getMessagesByConversation(database, proposal.conversationId);
+        outer: for (const msg of messages) {
+          for (const ref of (msg.contextRefs ?? [])) {
+            if (ref.id === fe.baseSnapshotId) {
+              baseContent = projectFiles.readSnapshot(ref.snapshotPath);
+              break outer;
+            }
+          }
+        }
+      }
+
+      if (baseContent === null) {
+        return {
+          ok: false,
+          error: `Base snapshot not available for "${fe.relativePath}". The file must be added to context before this proposal can be reviewed.`,
+        };
+      }
+
+      return { ok: true, proposedContent, baseContent };
     }
   );
 

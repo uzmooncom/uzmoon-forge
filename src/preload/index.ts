@@ -351,8 +351,13 @@ const forgeApi = {
     rejectProposal: (proposalId: string, fileEditIds?: string[]): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(EDIT_IPC.PROPOSAL_REJECT, proposalId, fileEditIds),
 
-    readProposalTarget: (proposalId: string, fileEditId: string): Promise<{ ok: true; content: string } | { ok: false; error: string }> =>
-      ipcRenderer.invoke(EDIT_IPC.PROPOSAL_READ_TARGET, proposalId, fileEditId),
+    readProposalTarget: (
+      proposalId: string,
+      fileEditId: string
+    ): Promise<
+      | { ok: true; proposedContent: string; baseContent: string }
+      | { ok: false; error: string }
+    > => ipcRenderer.invoke(EDIT_IPC.PROPOSAL_READ_TARGET, proposalId, fileEditId),
 
     preflightCheck: (proposalId: string, selectedFileEditIds: string[]): Promise<PreflightResult[]> =>
       ipcRenderer.invoke(EDIT_IPC.PREFLIGHT_CHECK, proposalId, selectedFileEditIds),

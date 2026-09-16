@@ -32,7 +32,9 @@ import {
   sweepWriteJournal,
   saveAssistantMessageWithProposal,
   resolveContextRef,
+  verifyBaseSnapshot,
 } from "./edit-service.js";
+import { captureSnapshot } from "./service.js";
 import type { FileEdit, EditProposal, ContextRef, WriteJournalEntry } from "../../shared/types.js";
 
 // ── DB mock ────────────────────────────────────────────────────────────────
@@ -62,18 +64,22 @@ vi.mock("../database/db.js", () => ({
   getProposal: (_: true, id: string) => mockProposals[id] ?? null,
 }));
 
-vi.mock("./eligibility.js", () => ({
-  resolveProjectPath: (root: string, rel: string) => {
-    if (rel.includes("..")) return null;
-    return path.join(root, rel);
-  },
-  checkEligibility: (_root: string, absPath: string) => {
-    if (absPath.includes(".env") || absPath.includes(".pem")) return { status: "sensitive" };
-    if (absPath.endsWith(".png") || absPath.endsWith(".bin")) return { status: "binary" };
-    if (!fs.existsSync(absPath)) return { status: "missing" };
-    return { status: "ok", language: "typescript", sizeBytes: 100 };
-  },
-}));
+vi.mock("./eligibility.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./eligibility.js")>();
+  return {
+    ...real,
+    resolveProjectPath: (root: string, rel: string) => {
+      if (rel.includes("..")) return null;
+      return path.join(root, rel);
+    },
+    checkEligibility: (_root: string, absPath: string) => {
+      if (absPath.includes(".env") || absPath.includes(".pem")) return { status: "sensitive" };
+      if (absPath.endsWith(".png") || absPath.endsWith(".bin")) return { status: "binary" };
+      if (!fs.existsSync(absPath)) return { status: "missing" };
+      return { status: "ok", language: "typescript", sizeBytes: 100 };
+    },
+  };
+});
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -846,5 +852,103 @@ describe("computeDiffStats — diff library correctness", () => {
     expect(stats.linesAdded).toBe(1);
     expect(stats.linesRemoved).toBe(1);
     expect(stats.linesUnchanged).toBe(2);
+  });
+});
+// ── Review state contract ─────────────────────────────────────────────────
+// (uses imports already declared at the top of the file)
+
+describe("review state contract — FileEdit ready requires baseSnapshotId", () => {
+  let tmpDir: string;
+  let projId: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-audit-review-"));
+    projId = "audit-review-proj";
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("verifyBaseSnapshot sets ok:true and ref has contentHash for valid full-file snapshot", () => {
+    const filePath = path.join(tmpDir, "index.ts");
+    fs.writeFileSync(filePath, "export const x = 1;\n");
+    const snap = captureSnapshot(projId, tmpDir, "index.ts");
+    expect(snap.ok).toBe(true);
+    if (!snap.ok) return;
+    expect(snap.ref.contentHash).toBeTruthy();
+    expect(snap.ref.lineStart).toBeUndefined();
+    expect(snap.ref.lineEnd).toBeUndefined();
+
+    const verify = verifyBaseSnapshot(snap.ref);
+    expect(verify.ok).toBe(true);
+  });
+
+  it("verifyBaseSnapshot returns needs_context when snapshot file deleted", () => {
+    const filePath = path.join(tmpDir, "index.ts");
+    fs.writeFileSync(filePath, "export const x = 1;\n");
+    const snap = captureSnapshot(projId, tmpDir, "index.ts");
+    expect(snap.ok).toBe(true);
+    if (!snap.ok) return;
+
+    // Delete the snapshot file
+    fs.unlinkSync(snap.ref.snapshotPath);
+
+    const verify = verifyBaseSnapshot(snap.ref);
+    expect(verify.ok).toBe(false);
+    if (!verify.ok) expect(verify.status).toBe("needs_context");
+  });
+
+  it("resolveContextRef returns needs_context for line-range ref — not eligible for diff", () => {
+    const filePath = path.join(tmpDir, "util.ts");
+    fs.writeFileSync(filePath, "export const a = 1;\nexport const b = 2;\n");
+    const snap = captureSnapshot(projId, tmpDir, "util.ts", 1, 1);
+    expect(snap.ok).toBe(true);
+    if (!snap.ok) return;
+
+    // Line-range refs must never be eligible for editing
+    const resolution = resolveContextRef([snap.ref], projId, "util.ts");
+    expect(resolution.status).toBe("needs_context");
+  });
+
+  it("full-file ref resolves and verifies — produces baseSnapshotId and baseContentHash", () => {
+    const filePath = path.join(tmpDir, "package.json");
+    fs.writeFileSync(filePath, '{ "name": "uzcraft" }\n');
+    const snap = captureSnapshot(projId, tmpDir, "package.json");
+    expect(snap.ok).toBe(true);
+    if (!snap.ok) return;
+
+    const resolution = resolveContextRef([snap.ref], projId, "package.json");
+    expect(resolution.status).toBe("ok");
+    if (resolution.status !== "ok") return;
+
+    const verify = verifyBaseSnapshot(resolution.ref);
+    expect(verify.ok).toBe(true);
+
+    // These are the values that must be set on FileEdit for it to be ready
+    expect(resolution.ref.id).toBeTruthy();         // baseSnapshotId
+    expect(resolution.ref.contentHash).toBeTruthy(); // baseContentHash
+  });
+
+  it("missing-base scenario: verifyBaseSnapshot fails → FileEdit must not be ready", () => {
+    const filePath = path.join(tmpDir, "main.ts");
+    fs.writeFileSync(filePath, "const x = 1;\n");
+    const snap = captureSnapshot(projId, tmpDir, "main.ts");
+    expect(snap.ok).toBe(true);
+    if (!snap.ok) return;
+
+    // Simulate snapshot going missing after capture
+    fs.unlinkSync(snap.ref.snapshotPath);
+
+    const resolution = resolveContextRef([snap.ref], projId, "main.ts");
+    // resolveContextRef returns ok (snapshot existence checked by verifyBaseSnapshot)
+    if (resolution.status !== "ok") return;
+
+    const verify = verifyBaseSnapshot(resolution.ref);
+    expect(verify.ok).toBe(false);
+    // The resulting FileEdit status must NOT be ready — it must be needs_context or failed
+    if (!verify.ok) {
+      expect(["needs_context", "failed"]).toContain(verify.status);
+    }
   });
 });

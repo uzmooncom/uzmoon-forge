@@ -808,6 +808,13 @@ describe("forge_edit_proposal — full pipeline fixture test", () => {
     const fe = proposal!.fileEdits[0]!;
     expect(fe.relativePath).toBe("package.json");
 
+    // FileEdit must be Ready — the full review state contract
+    expect(fe.status).toBe("ready");
+    // baseSnapshotId MUST be set — it is required for base content loading in the diff modal
+    expect((fe as unknown as Record<string, unknown>)["baseSnapshotId"]).toBeTruthy();
+    // baseContentHash MUST be set — required for stale-undo guard
+    expect((fe as unknown as Record<string, unknown>)["baseContentHash"]).toBeTruthy();
+
     // Read the captured target resource — should contain "uzcraft-app"
     const targetContent = fs.existsSync(fe.targetResourcePath)
       ? fs.readFileSync(fe.targetResourcePath, "utf8")
