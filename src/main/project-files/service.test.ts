@@ -458,4 +458,128 @@ describe("buildContextMessages — context injection", () => {
     expect(contextText).toContain("WEB");
     expect(contextText).toContain("API");
   });
+
+  it("throws ContextIntegrityError when snapshot content has been tampered", async () => {
+    const { buildContextMessages, ContextIntegrityError } = await import("../queue/QueueManager.js");
+    writeFile("src/sensitive.ts", "export const SECRET = 42;");
+    const res = captureSnapshot(projectRoot, "src/sensitive.ts");
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    // Tamper: overwrite snapshot file with different content after capture
+    fs.writeFileSync(res.ref.snapshotPath, "export const SECRET = 999; // tampered", "utf8");
+
+    const ref = { ...res.ref, projectId: "proj-tamper" };
+    const msgs = [
+      {
+        id: "msg-tamper",
+        conversationId: "conv-tamper",
+        role: "user" as const,
+        content: "Use this file",
+        createdAt: Date.now(),
+        contextRefs: [ref],
+      },
+    ];
+
+    // Must throw — must NOT silently skip and send the message without context
+    expect(() => buildContextMessages(msgs)).toThrow(ContextIntegrityError);
+  });
+
+  it("ContextIntegrityError carries relativePath and resourceId", async () => {
+    const { buildContextMessages, ContextIntegrityError } = await import("../queue/QueueManager.js");
+    writeFile("lib/utils.ts", "export const util = true;");
+    const res = captureSnapshot(projectRoot, "lib/utils.ts");
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+
+    // Tamper with different content
+    fs.writeFileSync(res.ref.snapshotPath, "// corrupted", "utf8");
+
+    const ref = { ...res.ref, projectId: "proj-err" };
+    const msgs = [
+      {
+        id: "msg-err",
+        conversationId: "conv-err",
+        role: "user" as const,
+        content: "Check this",
+        createdAt: Date.now(),
+        contextRefs: [ref],
+      },
+    ];
+
+    let thrown: unknown;
+    try {
+      buildContextMessages(msgs);
+    } catch (e) {
+      thrown = e;
+    }
+
+    expect(thrown).toBeInstanceOf(ContextIntegrityError);
+    const err = thrown as InstanceType<typeof ContextIntegrityError>;
+    expect(err.resourceId).toBe(res.ref.id);
+    expect(err.relativePath).toBe("lib/utils.ts");
+    expect(err.message).toContain("lib/utils.ts");
+  });
+
+  it("does NOT throw when snapshot file is missing — silently omits the ref", async () => {
+    const { buildContextMessages } = await import("../queue/QueueManager.js");
+    // A ref pointing to a snapshot that was never written (file simply gone)
+    const ref = {
+      id: "gone-snap",
+      projectId: "proj-gone",
+      relativePath: "src/deleted.ts",
+      capturedAt: Date.now(),
+      size: 50,
+      language: "typescript",
+      snapshotPath: path.join(dataDir, "snapshots", "gone-uuid.txt"),
+      contentHash: "aabbccdd",
+    };
+    const msgs = [
+      {
+        id: "msg-gone",
+        conversationId: "conv-gone",
+        role: "user" as const,
+        content: "Hello",
+        createdAt: Date.now(),
+        contextRefs: [ref],
+      },
+    ];
+    // Must NOT throw — missing snapshot (readSnapshot returns null) is silently skipped
+    expect(() => buildContextMessages(msgs)).not.toThrow();
+    const result = buildContextMessages(msgs);
+    expect(result).toHaveLength(1);
+  });
+
+  it("skips hash check for refs without contentHash (legacy graceful degradation)", async () => {
+    const { buildContextMessages } = await import("../queue/QueueManager.js");
+    // Write a snapshot manually with no contentHash on the ref
+    const snapshotId = "legacy-no-hash";
+    const snapshotsDir = path.join(dataDir, "snapshots");
+    if (!fs.existsSync(snapshotsDir)) fs.mkdirSync(snapshotsDir, { recursive: true });
+    const snapshotFile = path.join(snapshotsDir, `${snapshotId}.txt`);
+    fs.writeFileSync(snapshotFile, "export const legacy = 1;", "utf8");
+
+    const ref = {
+      id: snapshotId,
+      projectId: "proj-legacy",
+      relativePath: "legacy.ts",
+      capturedAt: Date.now(),
+      size: 24,
+      language: "typescript",
+      snapshotPath: snapshotFile,
+      contentHash: "", // empty string = no hash = skip check
+    };
+    const msgs = [
+      {
+        id: "msg-legacy",
+        conversationId: "conv-legacy",
+        role: "user" as const,
+        content: "Use legacy file",
+        createdAt: Date.now(),
+        contextRefs: [ref],
+      },
+    ];
+    // Must NOT throw — empty contentHash means skip integrity check
+    expect(() => buildContextMessages(msgs)).not.toThrow();
+  });
 });

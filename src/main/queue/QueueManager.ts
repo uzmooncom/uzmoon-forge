@@ -19,6 +19,22 @@ import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
 import { readSnapshot } from "../project-files/service.js";
 import fs from "fs";
 
+/**
+ * Thrown by buildContextMessages when a snapshot fails its SHA-256 integrity
+ * check. Signals that the request MUST be aborted — never silently continue
+ * with missing context.
+ */
+export class ContextIntegrityError extends Error {
+  constructor(
+    public readonly resourceId: string,
+    public readonly relativePath: string,
+    message: string
+  ) {
+    super(message);
+    this.name = "ContextIntegrityError";
+  }
+}
+
 // ── Context builder ────────────────────────────────────────────────────────
 
 function isImageMime(mimeType: string): boolean {
@@ -41,13 +57,14 @@ export function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
           const content = readSnapshot(ref.snapshotPath);
           if (!content) continue;
 
-          // Integrity: verify snapshot content matches stored hash
+          // Integrity: verify snapshot content matches stored hash.
+          // On mismatch, throw immediately — the request must be aborted, not
+          // silently sent without its context.
           if (ref.contentHash) {
             const actualHash = createHash("sha256")
               .update(Buffer.from(content, "utf8"))
               .digest("hex");
             if (actualHash !== ref.contentHash) {
-              // Dev mode: log integrity failure; always skip corrupted snapshot
               if (process.env["NODE_ENV"] === "development" || process.env["NODE_ENV"] === "test") {
                 // eslint-disable-next-line no-console
                 console.error(
@@ -55,7 +72,11 @@ export function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
                   ` path=${ref.relativePath} stored=${ref.contentHash.slice(0, 8)} actual=${actualHash.slice(0, 8)}`
                 );
               }
-              continue; // Skip corrupted snapshot — do NOT send wrong content
+              throw new ContextIntegrityError(
+                ref.id,
+                ref.relativePath,
+                `Context integrity check failed for "${ref.relativePath}": snapshot has been modified or corrupted since it was captured. Remove the context and try again.`
+              );
             }
           }
 
@@ -376,9 +397,42 @@ export class QueueManager {
     });
     this.pushQueueState(conversationId);
 
-    // Build fresh context
+    // Build fresh context — may throw ContextIntegrityError if any snapshot
+    // fails its SHA-256 check. Handle that BEFORE opening a stream.
     const history = db.getMessagesByConversation(true, conversationId);
-    const contextMessages = buildContextMessages(history);
+    let contextMessages: ReturnType<typeof buildContextMessages>;
+    try {
+      contextMessages = buildContextMessages(history);
+    } catch (err: unknown) {
+      if (err instanceof ContextIntegrityError) {
+        const errorContent = err.message;
+        const errorMsg: ChatMessage = {
+          id: randomUUID(),
+          conversationId,
+          role: "error",
+          content: errorContent,
+          createdAt: Date.now(),
+          isError: true,
+          agentProfileId: profile.id,
+        };
+        db.insertMessage(true, errorMsg);
+        db.updateQueueItem(true, conversationId, item.id, {
+          status: "failed",
+          completedAt: Date.now(),
+          lastError: errorContent,
+        });
+        db.setQueuePaused(true, conversationId, true);
+        const integrityStreamId = randomUUID();
+        this.send(IPC.CHAT_STREAM_ERROR, {
+          streamId: integrityStreamId,
+          message: errorMsg,
+          queueItemId: item.id,
+        });
+        this.pushQueueState(conversationId);
+        return;
+      }
+      throw err;
+    }
 
     const streamId = randomUUID();
     const signal = { aborted: false, convId: conversationId };
