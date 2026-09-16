@@ -31,8 +31,6 @@ function ChevronIcon({ size = 10, open }: { size?: number; open: boolean }) {
   );
 }
 
-// ── Snapshot viewer modal ─────────────────────────────────────────────────
-
 function CloseIcon({ size = 12 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
@@ -50,14 +48,95 @@ function CopySmallIcon({ size = 11 }: { size?: number }) {
   );
 }
 
+function ShieldCheckIcon({ size = 10 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <path d="M8 2L3 4.5v4c0 3 2.5 5 5 5.5 2.5-.5 5-2.5 5-5.5v-4L8 2z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M5.5 8l2 2 3-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ShieldAlertIcon({ size = 10 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <path d="M8 2L3 4.5v4c0 3 2.5 5 5 5.5 2.5-.5 5-2.5 5-5.5v-4L8 2z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="M8 6v3M8 11v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function QuestionIcon({ size = 10 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M6.5 6.5C6.5 5.7 7.1 5 8 5c.9 0 1.5.6 1.5 1.5 0 .8-.7 1.2-1.5 1.5v1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <circle cx="8" cy="11.5" r=".5" fill="currentColor" />
+    </svg>
+  );
+}
+
+// ── Snapshot integrity verification ───────────────────────────────────────
+
+type SnapshotStatus = "verified" | "integrity-failed" | "legacy" | "missing";
+
+async function computeHashAsync(content: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(content);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// ── Status pill ────────────────────────────────────────────────────────────
+
+function StatusPill({ status }: { status: SnapshotStatus }) {
+  if (status === "verified") {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400/80 bg-emerald-900/20 border border-emerald-700/30 rounded-full px-1.5 py-0.5">
+        <ShieldCheckIcon size={9} />
+        Verified
+      </span>
+    );
+  }
+  if (status === "integrity-failed") {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] text-red-400/80 bg-red-900/20 border border-red-700/30 rounded-full px-1.5 py-0.5">
+        <ShieldAlertIcon size={9} />
+        Integrity Failed
+      </span>
+    );
+  }
+  if (status === "missing") {
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] text-orange-400/70 bg-orange-900/15 border border-orange-700/25 rounded-full px-1.5 py-0.5">
+        <QuestionIcon size={9} />
+        Missing
+      </span>
+    );
+  }
+  // legacy
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] text-white/35 bg-white/5 border border-white/10 rounded-full px-1.5 py-0.5">
+      <QuestionIcon size={9} />
+      Legacy
+    </span>
+  );
+}
+
+// ── Snapshot viewer modal ─────────────────────────────────────────────────
+
 interface SnapshotViewerModalProps {
-  label: string;
-  content: string;
-  capturedAt: number;
+  ref_: ContextRef;
   onClose: () => void;
 }
 
-function SnapshotViewerModal({ label, content, capturedAt, onClose }: SnapshotViewerModalProps) {
+function SnapshotViewerModal({ ref_, onClose }: SnapshotViewerModalProps) {
+  const [loadState, setLoadState] = useState<{
+    content: string | null;
+    loading: boolean;
+    status: SnapshotStatus | null;
+  }>({ content: null, loading: true, status: null });
   const [copied, setCopied] = useState(false);
   const backdropRef = useRef<HTMLDivElement>(null);
 
@@ -68,8 +147,35 @@ function SnapshotViewerModal({ label, content, capturedAt, onClose }: SnapshotVi
     return () => window.removeEventListener("keydown", handler);
   }, [onClose]);
 
+  // Load snapshot on mount and verify integrity
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await window.forgeApi.projectFiles.readSnapshot(ref_.snapshotPath);
+        if (cancelled) return;
+        const content = result.ok && result.content ? result.content : null;
+        // Compute async hash for integrity check
+        let status: SnapshotStatus;
+        if (content === null) {
+          status = "missing";
+        } else if (!ref_.contentHash) {
+          status = "legacy";
+        } else {
+          const actualHash = await computeHashAsync(content);
+          status = actualHash === ref_.contentHash ? "verified" : "integrity-failed";
+        }
+        if (!cancelled) setLoadState({ content, loading: false, status });
+      } catch {
+        if (!cancelled) setLoadState({ content: null, loading: false, status: "missing" });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [ref_.snapshotPath, ref_.contentHash]);
+
   const handleCopy = async () => {
-    await window.forgeApi.copyText(content);
+    if (!loadState.content) return;
+    await window.forgeApi.copyText(loadState.content);
     setCopied(true);
     setTimeout(() => setCopied(false), 1800);
   };
@@ -78,27 +184,29 @@ function SnapshotViewerModal({ label, content, capturedAt, onClose }: SnapshotVi
     if (e.target === backdropRef.current) onClose();
   };
 
+  const label = refLabelFull(ref_);
+  const { content, loading, status } = loadState;
+
+  // Metadata
+  const capturedStr = new Date(ref_.capturedAt).toLocaleString();
+  const sizeStr = formatBytes(ref_.size);
+  const lineInfo = ref_.lineStart !== undefined
+    ? `Lines ${ref_.lineStart}–${ref_.lineEnd ?? "end"}`
+    : "Full file";
+
   return (
     <div
       ref={backdropRef}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
       onClick={handleBackdropClick}
     >
-      <div className="bg-[#0f0f16] border border-white/10 rounded-xl shadow-2xl w-[640px] max-w-[90vw] max-h-[75vh] flex flex-col">
-        {/* Header */}
+      <div className="bg-[#0f0f16] border border-white/10 rounded-xl shadow-2xl w-[680px] max-w-[92vw] max-h-[80vh] flex flex-col">
+
+        {/* ── Header ── */}
         <div className="flex items-center gap-2 px-4 py-2.5 border-b border-white/8 flex-shrink-0">
           <FileContextIcon size={11} />
-          <span className="flex-1 min-w-0 font-mono text-[12px] text-white/70 truncate">{label}</span>
-          <span className="text-[10px] text-white/25 flex-shrink-0">
-            captured {new Date(capturedAt).toLocaleTimeString()}
-          </span>
-          <button
-            onClick={handleCopy}
-            className="flex items-center gap-1 text-[11px] text-white/35 hover:text-white/70 transition-colors px-1.5 py-0.5 rounded hover:bg-white/5 ml-2"
-          >
-            <CopySmallIcon size={10} />
-            {copied ? "Copied" : "Copy"}
-          </button>
+          <span className="flex-1 min-w-0 font-mono text-[12px] text-white/75 truncate">{label}</span>
+          {status && !loading && <StatusPill status={status} />}
           <button
             onClick={onClose}
             className="flex-shrink-0 p-1 rounded text-white/25 hover:text-white/60 hover:bg-white/5 transition-colors ml-1"
@@ -106,11 +214,74 @@ function SnapshotViewerModal({ label, content, capturedAt, onClose }: SnapshotVi
             <CloseIcon size={11} />
           </button>
         </div>
-        {/* Content */}
+
+        {/* ── Metadata row ── */}
+        <div className="flex items-center gap-3 px-4 py-2 border-b border-white/5 text-[10px] text-white/30 flex-shrink-0">
+          <span title="Captured at">{capturedStr}</span>
+          <span className="text-white/12">·</span>
+          <span>{sizeStr}</span>
+          <span className="text-white/12">·</span>
+          <span>{ref_.language}</span>
+          <span className="text-white/12">·</span>
+          <span>{lineInfo}</span>
+        </div>
+
+        {/* ── Body ── */}
         <div className="flex-1 min-h-0 overflow-auto">
-          <pre className="px-4 py-3 text-[11px] font-mono text-white/65 leading-relaxed whitespace-pre-wrap break-words">
-            {content}
-          </pre>
+          {loading && (
+            <div className="px-4 py-8 text-center text-[12px] text-white/30">
+              Loading snapshot…
+            </div>
+          )}
+
+          {!loading && status === "missing" && (
+            <div className="px-4 py-8 text-center">
+              <p className="text-[13px] text-orange-300/70 font-medium mb-1">Snapshot unavailable</p>
+              <p className="text-[11px] text-white/30">
+                The original captured context can no longer be read.<br />
+                The snapshot file may have been cleaned up or moved.
+              </p>
+            </div>
+          )}
+
+          {!loading && status === "integrity-failed" && (
+            <div className="px-4 py-4 border-b border-red-800/20 flex-shrink-0">
+              <p className="text-[12px] text-red-300/80 font-medium mb-0.5">Snapshot integrity check failed</p>
+              <p className="text-[11px] text-white/35">
+                <span className="font-mono text-white/45">{ref_.relativePath}</span>
+                &nbsp;— the snapshot has been modified or corrupted since it was captured.
+                Do not treat this as a verified historical record.
+              </p>
+            </div>
+          )}
+
+          {!loading && status === "legacy" && (
+            <div className="px-4 py-2 border-b border-white/5 flex-shrink-0">
+              <p className="text-[11px] text-white/35">
+                Legacy snapshot — integrity at original capture cannot be verified
+                (no hash was recorded when this snapshot was saved).
+              </p>
+            </div>
+          )}
+
+          {!loading && content !== null && status !== "missing" && (
+            <>
+              <div className="flex items-center justify-between px-4 pt-2.5 pb-1 flex-shrink-0">
+                <span className="text-[10px] text-white/20 font-mono">{ref_.language}</span>
+                <button
+                  onClick={handleCopy}
+                  disabled={!content}
+                  className="flex items-center gap-1 text-[11px] text-white/30 hover:text-white/70 transition-colors px-1.5 py-0.5 rounded hover:bg-white/5 disabled:opacity-40"
+                >
+                  <CopySmallIcon size={10} />
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+              <pre className="px-4 pb-4 text-[11.5px] font-mono text-white/65 leading-relaxed whitespace-pre-wrap break-words">
+                {content}
+              </pre>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -120,8 +291,7 @@ function SnapshotViewerModal({ label, content, capturedAt, onClose }: SnapshotVi
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /**
- * Returns an unambiguous short label for a context ref path.
- * Shows "parent/filename" so duplicate basenames (e.g. two index.ts) are distinguishable.
+ * Unambiguous short label: shows "parent/filename" so duplicate basenames are distinguishable.
  */
 function refLabel(relativePath: string, lineStart?: number, lineEnd?: number): string {
   const parts = relativePath.replace(/\\/g, "/").split("/").filter(Boolean);
@@ -131,6 +301,10 @@ function refLabel(relativePath: string, lineStart?: number, lineEnd?: number): s
   if (lineStart !== undefined && lineEnd !== undefined) return `${base}:${lineStart}-${lineEnd}`;
   if (lineStart !== undefined) return `${base}:${lineStart}+`;
   return base;
+}
+
+function refLabelFull(ref: ContextRef): string {
+  return refLabel(ref.relativePath, ref.lineStart, ref.lineEnd);
 }
 
 function formatBytes(bytes: number): string {
@@ -175,8 +349,7 @@ function ReplyBanner({ content, role }: { content: string; role: string }) {
 
 /**
  * Historical context references display — collapsed by default.
- * Shows "Context · N files" header; click to expand and see paths.
- * Clicking a path opens the historical snapshot via forgeApi.
+ * Clicking "View" on a ref opens the SnapshotViewerModal with integrity check.
  */
 function ContextRefsBadge({ refs }: { refs: ContextRef[] }) {
   const [expanded, setExpanded] = useState(false);
@@ -211,26 +384,11 @@ function ContextRefsBadge({ refs }: { refs: ContextRef[] }) {
 }
 
 function ContextRefRow({ ref_ }: { ref_: ContextRef }) {
-  const [loading, setLoading] = useState(false);
-  const [viewerContent, setViewerContent] = useState<string | null>(null);
+  const [viewerOpen, setViewerOpen] = useState(false);
   const label = refLabel(ref_.relativePath, ref_.lineStart, ref_.lineEnd);
   const fullPath = ref_.relativePath + (ref_.lineStart !== undefined
-    ? ` (lines ${ref_.lineStart}-${ref_.lineEnd ?? "end"})`
+    ? ` (lines ${ref_.lineStart}–${ref_.lineEnd ?? "end"})`
     : "");
-
-  const handleView = async () => {
-    if (loading) return;
-    setLoading(true);
-    try {
-      // Read historical snapshot via secure IPC — path is validated server-side
-      const result = await window.forgeApi.projectFiles.readSnapshot(ref_.snapshotPath);
-      if (result.ok && result.content) {
-        setViewerContent(result.content);
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
 
   return (
     <>
@@ -242,29 +400,67 @@ function ContextRefRow({ ref_ }: { ref_: ContextRef }) {
         <span className="font-mono text-white/50 truncate max-w-[220px]">{label}</span>
         <span className="text-[10px] text-white/25 flex-shrink-0">{formatBytes(ref_.size)}</span>
         <button
-          onClick={handleView}
-          disabled={loading}
+          onClick={() => setViewerOpen(true)}
           className="ml-auto text-[10px] text-white/20 hover:text-white/60 transition-colors opacity-0 group-hover/ref:opacity-100 px-1.5 py-0.5 rounded hover:bg-white/5"
-          title="View snapshot content"
+          title="View snapshot"
         >
-          {loading ? "…" : "View"}
+          View
         </button>
       </div>
-      {viewerContent !== null && (
+      {viewerOpen && (
         <SnapshotViewerModal
-          label={label}
-          content={viewerContent}
-          capturedAt={ref_.capturedAt}
-          onClose={() => setViewerContent(null)}
+          ref_={ref_}
+          onClose={() => setViewerOpen(false)}
         />
       )}
     </>
   );
 }
 
-// ── Agent avatar ───────────────────────────────────────────────────────────
+// ── Agent avatar (small inline mark for document style) ────────────────────
 
-/** Clean Forge mark — no purple gradient */
+function ForgeMarkIcon({ size = 10 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <path d="M4 3h8M4 8h6M4 13V3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function AgentIdentityRow({
+  agentName,
+  model,
+  isError,
+}: {
+  agentName?: string;
+  model?: string;
+  isError?: boolean;
+}) {
+  return (
+    <div className={`flex items-center gap-1.5 mb-2 ${isError ? "text-red-400/60" : "text-white/30"}`}>
+      <div
+        className={`flex-shrink-0 w-4 h-4 rounded-full flex items-center justify-center border ${
+          isError
+            ? "bg-red-900/40 border-red-700/40 text-red-400/80"
+            : "bg-white/8 border-white/12 text-white/45"
+        }`}
+      >
+        {isError
+          ? <svg width="8" height="8" viewBox="0 0 16 16" fill="none"><path d="M8 3v6M8 12v.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" /></svg>
+          : <ForgeMarkIcon size={8} />
+        }
+      </div>
+      <span className="text-[11px] font-medium">
+        {agentName ?? "Forge"}
+      </span>
+      {model && (
+        <span className="text-[10px] text-white/18 font-mono">{model}</span>
+      )}
+    </div>
+  );
+}
+
+/** Clean avatar for left-column display next to user messages */
 function AgentAvatar({ isError }: { isError: boolean }) {
   if (isError) {
     return (
@@ -277,10 +473,7 @@ function AgentAvatar({ isError }: { isError: boolean }) {
   }
   return (
     <div className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center bg-white/8 border border-white/10 text-white/50 mt-0.5">
-      <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
-        {/* Minimal "F" mark for Forge */}
-        <path d="M4 3h8M4 8h6M4 13V3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
+      <ForgeMarkIcon size={11} />
     </div>
   );
 }
@@ -323,66 +516,48 @@ export function MessageBubble({
   const fileAtts = msg.attachments?.filter((a) => !a.mimeType.startsWith("image/")) ?? [];
   const contextRefs = msg.contextRefs ?? [];
 
-  return (
-    <div className={`group flex gap-2.5 py-2 ${isUser ? "justify-end" : "justify-start"}`}>
-      {/* Avatar — assistant / error only */}
-      {!isUser && <AgentAvatar isError={isError} />}
-
-      <div className={`flex flex-col gap-1 min-w-0 ${isUser ? "max-w-[72%] items-end" : "max-w-[78%] items-start"}`}>
-        {/* Historical context refs (user messages only) */}
-        {isUser && contextRefs.length > 0 && (
-          <ContextRefsBadge refs={contextRefs} />
-        )}
+  // ── ASSISTANT — document-style ────────────────────────────────────────────
+  //
+  // Assistant (and error) messages are NOT wrapped in a rounded bubble.
+  // They are rendered as content directly on the workspace, with only a small
+  // identity row (agent name + model) above the text.
+  if (!isUser) {
+    return (
+      <div className="group flex flex-col gap-0 py-3 px-1">
+        {/* Identity row */}
+        <AgentIdentityRow
+          {...(msg.agentNameSnapshot !== undefined && { agentName: msg.agentNameSnapshot })}
+          {...(msg.modelSnapshot !== undefined && { model: msg.modelSnapshot })}
+          isError={isError}
+        />
 
         {/* Image attachments */}
         {imageAtts.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-1">
+          <div className="flex flex-wrap gap-2 mb-2">
             {imageAtts.map((att) => (
               <MessageImage key={att.id} att={att} onExpand={onExpand} />
             ))}
           </div>
         )}
 
-        {/* File attachments */}
-        {fileAtts.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-1">
-            {fileAtts.map((att) => (
-              <AttachmentBadge key={att.id} att={att} />
-            ))}
-          </div>
-        )}
-
-        {/* Bubble */}
-        {(msg.content ||
-          (!msg.content && imageAtts.length === 0 && fileAtts.length === 0)) && (
-          <div
-            className={`rounded-2xl text-sm leading-relaxed ${
-              isUser
-                ? "bg-[#1e2d45] border border-blue-900/40 text-blue-50/90 rounded-tr-sm px-4 py-2.5"
-                : isError
-                ? "bg-red-950/50 border border-red-800/40 text-red-300/90 rounded-tl-sm px-4 py-2.5"
-                : "bg-[#161622] border border-white/6 text-gray-100/90 rounded-tl-sm px-4 py-3"
-            }`}
-          >
-            {/* Reply banner */}
-            {replyTarget && (
-              <ReplyBanner content={replyTarget.content} role={replyTarget.role} />
-            )}
-
-            {isAssistant ? (
-              <MarkdownContent content={msg.content} />
+        {/* Content — rendered as markdown for assistant, plain for errors */}
+        {msg.content && (
+          <div className={`text-sm leading-relaxed ${isError ? "text-red-300/85" : "text-gray-100/90"}`}>
+            {isError ? (
+              <div className="flex items-start gap-2">
+                <div className="flex-shrink-0 mt-0.5">
+                  <AgentAvatar isError />
+                </div>
+                <span className="whitespace-pre-wrap break-words">{msg.content}</span>
+              </div>
             ) : (
-              <span className="whitespace-pre-wrap break-words">{msg.content}</span>
+              <MarkdownContent content={msg.content} />
             )}
           </div>
         )}
 
         {/* Action bar */}
-        <div
-          className={`flex items-center gap-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150 ${
-            isUser ? "flex-row-reverse" : "flex-row"
-          }`}
-        >
+        <div className="flex items-center gap-2 px-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
           <span className="text-[10px] text-white/20">{formatTime(msg.createdAt)}</span>
           {isAssistant && msg.durationMs && (
             <span className="text-[10px] text-white/18">
@@ -406,20 +581,84 @@ export function MessageBubble({
               <ReplyIcon size={11} /> Reply
             </button>
           )}
-          {isUser && onEdit && (
-            <button
-              onClick={() => onEdit(msg)}
-              className="flex items-center gap-1 text-[11px] text-white/30 hover:text-white/70 transition-colors py-0.5 px-1.5 rounded hover:bg-white/5"
-            >
-              <EditIcon size={11} /> Edit
-            </button>
-          )}
           {isError && onRetry && (
             <button
               onClick={() => onRetry(msg)}
               className="flex items-center gap-1 text-[11px] text-red-400/50 hover:text-red-300 transition-colors py-0.5 px-1.5 rounded hover:bg-red-900/10"
             >
               <RetryIcon size={11} /> Retry
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── USER — right-aligned bubble ───────────────────────────────────────────
+
+  return (
+    <div className="group flex gap-2.5 py-2 justify-end">
+      <div className="flex flex-col gap-1 min-w-0 max-w-[72%] items-end">
+        {/* Historical context refs (user messages only) */}
+        {contextRefs.length > 0 && (
+          <ContextRefsBadge refs={contextRefs} />
+        )}
+
+        {/* Image attachments */}
+        {imageAtts.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-1">
+            {imageAtts.map((att) => (
+              <MessageImage key={att.id} att={att} onExpand={onExpand} />
+            ))}
+          </div>
+        )}
+
+        {/* File attachments */}
+        {fileAtts.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1">
+            {fileAtts.map((att) => (
+              <AttachmentBadge key={att.id} att={att} />
+            ))}
+          </div>
+        )}
+
+        {/* User bubble */}
+        {(msg.content ||
+          (!msg.content && imageAtts.length === 0 && fileAtts.length === 0)) && (
+          <div className="rounded-2xl rounded-tr-sm text-sm leading-relaxed bg-[#1e2d45] border border-blue-900/40 text-blue-50/90 px-4 py-2.5">
+            {replyTarget && (
+              <ReplyBanner content={replyTarget.content} role={replyTarget.role} />
+            )}
+            <span className="whitespace-pre-wrap break-words">{msg.content}</span>
+          </div>
+        )}
+
+        {/* Action bar */}
+        <div className="flex items-center gap-2 px-1 opacity-0 group-hover:opacity-100 transition-opacity duration-150 flex-row-reverse">
+          <span className="text-[10px] text-white/20">{formatTime(msg.createdAt)}</span>
+          {msg.content && (
+            <button
+              onClick={handleCopy}
+              className="flex items-center gap-1 text-[11px] text-white/30 hover:text-white/70 transition-colors py-0.5 px-1.5 rounded hover:bg-white/5"
+            >
+              {copied ? <CheckIcon size={11} /> : <CopyIcon size={11} />}
+              {copied ? "Copied" : "Copy"}
+            </button>
+          )}
+          {onQuote && (
+            <button
+              onClick={() => onQuote(msg)}
+              className="flex items-center gap-1 text-[11px] text-white/30 hover:text-white/70 transition-colors py-0.5 px-1.5 rounded hover:bg-white/5"
+            >
+              <ReplyIcon size={11} /> Reply
+            </button>
+          )}
+          {onEdit && (
+            <button
+              onClick={() => onEdit(msg)}
+              className="flex items-center gap-1 text-[11px] text-white/30 hover:text-white/70 transition-colors py-0.5 px-1.5 rounded hover:bg-white/5"
+            >
+              <EditIcon size={11} /> Edit
             </button>
           )}
         </div>

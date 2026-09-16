@@ -4,7 +4,7 @@ import path from "path";
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.integration.test.ts"],
     alias: {
       "@shared": path.resolve(__dirname, "src/shared"),
     },
