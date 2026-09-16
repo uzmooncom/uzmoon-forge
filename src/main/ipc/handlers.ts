@@ -20,7 +20,8 @@ import * as projectFiles from "../project-files/service.js";
 import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
 import { testConnection } from "../agent-client/client.js";
-import { queueManager, cancelStream, getActiveStreamId, setSecretGetter } from "../queue/QueueManager.js";
+import { queueManager, cancelStream, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots } from "../queue/QueueManager.js";
+void sweepOrphanedSnapshots; // imported for startup use — called from main.ts
 
 interface Services {
   secrets: SecretStore;
@@ -224,16 +225,34 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   ipcMain.handle(IPC.CONV_DELETE, (_e: IpcMainInvokeEvent, id: string): void => {
     const sid = getActiveStreamId(id);
     if (sid) cancelStream(sid);
-    const { attachmentPaths, snapshotPaths } = db.deleteConversation(database, id);
+
+    // Collect all contextRefs + their message IDs BEFORE deletion, so we can
+    // do a reference-safe orphan sweep afterward (branches may share snapshots).
+    const msgsBefore = db.getMessagesByConversation(database, id);
+    const convSnapshotRefs: import("../../shared/types.js").ContextRef[] = [];
+    const convMsgIds = new Set<string>();
+    for (const msg of msgsBefore) {
+      convMsgIds.add(msg.id);
+      if (msg.contextRefs) {
+        for (const r of msg.contextRefs) convSnapshotRefs.push(r);
+      }
+    }
+
+    const { attachmentPaths } = db.deleteConversation(database, id);
     for (const fp of attachmentPaths) {
       try { if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch { /* best effort */ }
-    }
-    for (const sp of snapshotPaths) {
-      try { if (fs.existsSync(sp)) fs.unlinkSync(sp); } catch { /* best effort */ }
     }
     const dataDir = db.getDataDir();
     const attDir = path.join(dataDir, "attachments", id);
     try { if (fs.existsSync(attDir)) fs.rmdirSync(attDir); } catch { /* not empty */ }
+
+    // Reference-safe snapshot cleanup: only delete snapshots with zero remaining
+    // references after this conversation's messages are gone. Branch conversations
+    // sharing the same snapshotPath are protected because their messages still
+    // reference the snapshot ID in the DB.
+    if (convSnapshotRefs.length > 0) {
+      deleteOrphanedSnapshots(convSnapshotRefs, convMsgIds);
+    }
   });
 
   ipcMain.handle(IPC.CONV_MESSAGES, (_e: IpcMainInvokeEvent, convId: string) => {
@@ -353,32 +372,38 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       const stagedRefs = extReq.stagedContextRefs ?? [];
       const capturedContextRefs: import("../../shared/types.js").ContextRef[] = [];
 
+      const captureFailedPaths: string[] = [];
       for (const staged of stagedRefs) {
         const stagedProject = db.getProject(database, staged.projectId);
         if (!stagedProject) continue;
         const result = projectFiles.captureSnapshot(
+          staged.projectId,
           stagedProject.workingDirectory,
           staged.relativePath,
           staged.lineStart,
           staged.lineEnd
         );
         if (result.ok) {
-          const ref = { ...result.ref, projectId: staged.projectId };
-          capturedContextRefs.push(ref);
+          // projectId is now embedded at creation — no post-hoc patch needed
+          capturedContextRefs.push(result.ref);
           if (process.env["NODE_ENV"] === "development") {
             // eslint-disable-next-line no-console
             console.log(
-              `[context:capture] resource=${ref.id} project=${staged.projectId}` +
-              ` path=${staged.relativePath} sha256=${ref.contentHash.slice(0, 8)} bytes=${ref.size}`
+              `[context:capture] resource=${result.ref.id} project=${staged.projectId}` +
+              ` path=${staged.relativePath} sha256=${result.ref.contentHash.slice(0, 8)} bytes=${result.ref.size}`
             );
           }
-        } else if (process.env["NODE_ENV"] === "development") {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[context:capture-FAIL] project=${staged.projectId} path=${staged.relativePath} error=${result.error}`
-          );
+        } else {
+          captureFailedPaths.push(staged.relativePath);
+          if (process.env["NODE_ENV"] === "development") {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[context:capture-FAIL] project=${staged.projectId} path=${staged.relativePath} error=${result.error}`
+            );
+          }
         }
       }
+      void captureFailedPaths; // available for future caller feedback
 
       try {
         const result = await queueManager.enqueue({
@@ -396,6 +421,14 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
           conversation: result.conversation,
         };
       } catch (err: unknown) {
+        // Rollback: if enqueue failed, the captured snapshots were never stored in the
+        // DB — they are now orphaned. Delete them immediately rather than waiting for
+        // the startup orphan sweep.
+        for (const ref of capturedContextRefs) {
+          try {
+            if (fs.existsSync(ref.snapshotPath)) fs.unlinkSync(ref.snapshotPath);
+          } catch { /* best effort */ }
+        }
         return { error: err instanceof Error ? err.message : "Failed to enqueue message." };
       }
     }
@@ -622,13 +655,10 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     ) => {
       const project = db.getProject(database, projectId);
       if (!project) return { ok: false, error: "Project not found" };
-      const result = projectFiles.captureSnapshot(
-        project.workingDirectory, relativePath, lineStart, lineEnd
+      // projectId is now embedded by captureSnapshot itself — no post-hoc patch
+      return projectFiles.captureSnapshot(
+        projectId, project.workingDirectory, relativePath, lineStart, lineEnd
       );
-      if (result.ok) {
-        return { ...result, ref: { ...result.ref, projectId } };
-      }
-      return result;
     }
   );
 

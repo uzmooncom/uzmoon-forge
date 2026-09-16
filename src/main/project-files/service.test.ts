@@ -22,6 +22,8 @@ let tmpDir: string;
 let projectRoot: string;
 let dataDir: string;
 
+const TEST_PROJECT_ID = "test-project-001";
+
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-svc-test-"));
   projectRoot = path.join(tmpDir, "project");
@@ -50,20 +52,20 @@ function writeFile(rel: string, content: string): void {
 // ── Snapshot capture tests ─────────────────────────────────────────────────
 
 describe("captureSnapshot — identity", () => {
-  it("returns a ContextRef with projectId placeholder and correct relativePath", () => {
+  it("returns a ContextRef with correct projectId and relativePath", () => {
     writeFile("src/index.ts", "export const x = 1;");
-    const res = captureSnapshot(projectRoot, "src/index.ts");
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "src/index.ts");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    // Service leaves projectId empty — caller fills in
-    expect(res.ref.projectId).toBe("");
+    // projectId is embedded by captureSnapshot — not a placeholder
+    expect(res.ref.projectId).toBe(TEST_PROJECT_ID);
     expect(res.ref.relativePath).toBe("src/index.ts");
     expect(res.ref.id).toBeTruthy();
   });
 
   it("produces a stable UUID snapshot path inside dataDir/snapshots", () => {
     writeFile("main.ts", "const a = 1;");
-    const res = captureSnapshot(projectRoot, "main.ts");
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "main.ts");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     const snapshotsDir = path.join(dataDir, "snapshots");
@@ -74,7 +76,7 @@ describe("captureSnapshot — identity", () => {
   it("snapshot file contains exactly the captured content", () => {
     const content = "export function hello() { return 42; }";
     writeFile("hello.ts", content);
-    const res = captureSnapshot(projectRoot, "hello.ts");
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "hello.ts");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     const written = fs.readFileSync(res.ref.snapshotPath, "utf8");
@@ -84,7 +86,7 @@ describe("captureSnapshot — identity", () => {
   it("includes contentHash matching SHA-256 of the content", () => {
     const content = "const PI = 3.14159;";
     writeFile("pi.ts", content);
-    const res = captureSnapshot(projectRoot, "pi.ts");
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "pi.ts");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     const expectedHash = createHash("sha256")
@@ -95,12 +97,12 @@ describe("captureSnapshot — identity", () => {
 
   it("contentHash changes if file content changes between captures", () => {
     writeFile("changing.ts", "const v = 1;");
-    const res1 = captureSnapshot(projectRoot, "changing.ts");
+    const res1 = captureSnapshot(TEST_PROJECT_ID, projectRoot, "changing.ts");
     expect(res1.ok).toBe(true);
     if (!res1.ok) return;
 
     writeFile("changing.ts", "const v = 2;");
-    const res2 = captureSnapshot(projectRoot, "changing.ts");
+    const res2 = captureSnapshot(TEST_PROJECT_ID, projectRoot, "changing.ts");
     expect(res2.ok).toBe(true);
     if (!res2.ok) return;
 
@@ -113,7 +115,7 @@ describe("captureSnapshot — identity", () => {
   it("snapshot is immutable — modifying source file does not affect captured snapshot", () => {
     const original = "const answer = 42;";
     writeFile("answer.ts", original);
-    const res = captureSnapshot(projectRoot, "answer.ts");
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "answer.ts");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
 
@@ -124,6 +126,12 @@ describe("captureSnapshot — identity", () => {
     const snapshotContent = readSnapshot(res.ref.snapshotPath);
     expect(snapshotContent).toBe(original);
   });
+
+  it("fails with error when projectId is empty string", () => {
+    writeFile("any.ts", "const x = 1;");
+    const res = captureSnapshot("", projectRoot, "any.ts");
+    expect(res.ok).toBe(false);
+  });
 });
 
 // ── Duplicate basename disambiguation ─────────────────────────────────────
@@ -133,8 +141,8 @@ describe("captureSnapshot — duplicate basenames", () => {
     writeFile("src/a/index.ts", "export const A = 'a';");
     writeFile("src/b/index.ts", "export const B = 'b';");
 
-    const resA = captureSnapshot(projectRoot, "src/a/index.ts");
-    const resB = captureSnapshot(projectRoot, "src/b/index.ts");
+    const resA = captureSnapshot(TEST_PROJECT_ID, projectRoot, "src/a/index.ts");
+    const resB = captureSnapshot(TEST_PROJECT_ID, projectRoot, "src/b/index.ts");
     expect(resA.ok).toBe(true);
     expect(resB.ok).toBe(true);
     if (!resA.ok || !resB.ok) return;
@@ -158,8 +166,8 @@ describe("captureSnapshot — duplicate basenames", () => {
     writeFile("pkg/a/types.ts", sharedContent);
     writeFile("pkg/b/types.ts", sharedContent);
 
-    const resA = captureSnapshot(projectRoot, "pkg/a/types.ts");
-    const resB = captureSnapshot(projectRoot, "pkg/b/types.ts");
+    const resA = captureSnapshot(TEST_PROJECT_ID, projectRoot, "pkg/a/types.ts");
+    const resB = captureSnapshot(TEST_PROJECT_ID, projectRoot, "pkg/b/types.ts");
     expect(resA.ok).toBe(true);
     expect(resB.ok).toBe(true);
     if (!resA.ok || !resB.ok) return;
@@ -176,7 +184,7 @@ describe("captureSnapshot — duplicate basenames", () => {
     writeFile("packages/ui/index.ts", "export * from './ui';");
     writeFile("packages/core/index.ts", "export * from './core';");
 
-    const resUi = captureSnapshot(projectRoot, "packages/ui/index.ts");
+    const resUi = captureSnapshot(TEST_PROJECT_ID, projectRoot, "packages/ui/index.ts");
     expect(resUi.ok).toBe(true);
     if (!resUi.ok) return;
 
@@ -199,11 +207,15 @@ describe("captureSnapshot — cross-project isolation", () => {
     fs.writeFileSync(path.join(projectA, "config.ts"), "export const env = 'production';", "utf8");
     fs.writeFileSync(path.join(projectB, "config.ts"), "export const env = 'staging';", "utf8");
 
-    const resA = captureSnapshot(projectA, "config.ts");
-    const resB = captureSnapshot(projectB, "config.ts");
+    const resA = captureSnapshot("project-a-id", projectA, "config.ts");
+    const resB = captureSnapshot("project-b-id", projectB, "config.ts");
     expect(resA.ok).toBe(true);
     expect(resB.ok).toBe(true);
     if (!resA.ok || !resB.ok) return;
+
+    // projectId is correctly embedded
+    expect(resA.ref.projectId).toBe("project-a-id");
+    expect(resB.ref.projectId).toBe("project-b-id");
 
     // Same relativePath — but different project roots → different content
     expect(resA.ref.relativePath).toBe("config.ts");
@@ -230,7 +242,7 @@ describe("captureSnapshot — security", () => {
     const outsideFile = path.join(tmpDir, "outside-secret.txt");
     fs.writeFileSync(outsideFile, "SECRET", "utf8");
 
-    const res = captureSnapshot(projectRoot, "../outside-secret.txt");
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "../outside-secret.txt");
     // Should fail — path traversal blocked by readFile
     expect(res.ok).toBe(false);
   });
@@ -239,7 +251,7 @@ describe("captureSnapshot — security", () => {
     const outsideFile = path.join(tmpDir, "absolute-secret.txt");
     fs.writeFileSync(outsideFile, "ABSOLUTE_SECRET", "utf8");
 
-    const res = captureSnapshot(projectRoot, outsideFile);
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, outsideFile);
     // Absolute path treated as relative inside project → won't resolve to real file
     expect(res.ok).toBe(false);
   });
@@ -250,7 +262,7 @@ describe("captureSnapshot — security", () => {
 describe("captureSnapshot — line ranges", () => {
   it("captures only selected lines with lineStart/lineEnd", () => {
     writeFile("multi.ts", "line1\nline2\nline3\nline4\nline5");
-    const res = captureSnapshot(projectRoot, "multi.ts", 2, 4);
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "multi.ts", 2, 4);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.ref.lineStart).toBe(2);
@@ -266,8 +278,8 @@ describe("captureSnapshot — line ranges", () => {
 
   it("line-range and full-file snapshots of same file have different hashes", () => {
     writeFile("big.ts", "const a = 1;\nconst b = 2;\nconst c = 3;");
-    const full = captureSnapshot(projectRoot, "big.ts");
-    const partial = captureSnapshot(projectRoot, "big.ts", 1, 1);
+    const full = captureSnapshot(TEST_PROJECT_ID, projectRoot, "big.ts");
+    const partial = captureSnapshot(TEST_PROJECT_ID, projectRoot, "big.ts", 1, 1);
     expect(full.ok).toBe(true);
     expect(partial.ok).toBe(true);
     if (!full.ok || !partial.ok) return;
@@ -285,7 +297,7 @@ describe("readSnapshot", () => {
 
   it("returns content that matches what was written", () => {
     writeFile("verify.ts", "const verified = true;");
-    const res = captureSnapshot(projectRoot, "verify.ts");
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "verify.ts");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     const content = readSnapshot(res.ref.snapshotPath);
@@ -350,10 +362,9 @@ describe("buildContextMessages — context injection", () => {
   it("injects project_file XML block for messages with contextRefs", async () => {
     const { buildContextMessages } = await import("../queue/QueueManager.js");
     writeFile("src/api.ts", "export async function fetchData() {}");
-    const res = captureSnapshot(projectRoot, "src/api.ts");
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "src/api.ts");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    const ref = { ...res.ref, projectId: "proj-1" };
 
     const msgs = [
       {
@@ -362,7 +373,7 @@ describe("buildContextMessages — context injection", () => {
         role: "user" as const,
         content: "Explain the fetch function",
         createdAt: Date.now(),
-        contextRefs: [ref],
+        contextRefs: [res.ref], // projectId already embedded — no spread needed
       },
     ];
 
@@ -414,16 +425,11 @@ describe("buildContextMessages — context injection", () => {
     writeFile("apps/web/index.ts", "export const WEB = 'web';");
     writeFile("apps/api/index.ts", "export const API = 'api';");
 
-    const resWeb = captureSnapshot(projectRoot, "apps/web/index.ts");
-    const resApi = captureSnapshot(projectRoot, "apps/api/index.ts");
+    const resWeb = captureSnapshot(TEST_PROJECT_ID, projectRoot, "apps/web/index.ts");
+    const resApi = captureSnapshot(TEST_PROJECT_ID, projectRoot, "apps/api/index.ts");
     expect(resWeb.ok).toBe(true);
     expect(resApi.ok).toBe(true);
     if (!resWeb.ok || !resApi.ok) return;
-
-    const refs = [
-      { ...resWeb.ref, projectId: "proj-1" },
-      { ...resApi.ref, projectId: "proj-1" },
-    ];
 
     const msgs = [
       {
@@ -432,7 +438,7 @@ describe("buildContextMessages — context injection", () => {
         role: "user" as const,
         content: "Compare these two",
         createdAt: Date.now(),
-        contextRefs: refs,
+        contextRefs: [resWeb.ref, resApi.ref], // both have embedded projectId
       },
     ];
 
@@ -451,14 +457,13 @@ describe("buildContextMessages — context injection", () => {
   it("throws ContextIntegrityError when snapshot content has been tampered", async () => {
     const { buildContextMessages, ContextIntegrityError } = await import("../queue/QueueManager.js");
     writeFile("src/sensitive.ts", "export const SECRET = 42;");
-    const res = captureSnapshot(projectRoot, "src/sensitive.ts");
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "src/sensitive.ts");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
 
     // Tamper: overwrite snapshot file with different content after capture
     fs.writeFileSync(res.ref.snapshotPath, "export const SECRET = 999; // tampered", "utf8");
 
-    const ref = { ...res.ref, projectId: "proj-tamper" };
     const msgs = [
       {
         id: "msg-tamper",
@@ -466,7 +471,7 @@ describe("buildContextMessages — context injection", () => {
         role: "user" as const,
         content: "Use this file",
         createdAt: Date.now(),
-        contextRefs: [ref],
+        contextRefs: [res.ref],
       },
     ];
 
@@ -477,14 +482,13 @@ describe("buildContextMessages — context injection", () => {
   it("ContextIntegrityError carries relativePath and resourceId", async () => {
     const { buildContextMessages, ContextIntegrityError } = await import("../queue/QueueManager.js");
     writeFile("lib/utils.ts", "export const util = true;");
-    const res = captureSnapshot(projectRoot, "lib/utils.ts");
+    const res = captureSnapshot(TEST_PROJECT_ID, projectRoot, "lib/utils.ts");
     expect(res.ok).toBe(true);
     if (!res.ok) return;
 
     // Tamper with different content
     fs.writeFileSync(res.ref.snapshotPath, "// corrupted", "utf8");
 
-    const ref = { ...res.ref, projectId: "proj-err" };
     const msgs = [
       {
         id: "msg-err",
@@ -492,7 +496,7 @@ describe("buildContextMessages — context injection", () => {
         role: "user" as const,
         content: "Check this",
         createdAt: Date.now(),
-        contextRefs: [ref],
+        contextRefs: [res.ref],
       },
     ];
 
@@ -578,5 +582,110 @@ describe("buildContextMessages — context injection", () => {
     ];
     // Must NOT throw — empty contentHash means skip integrity check
     expect(() => buildContextMessages(msgs)).not.toThrow();
+  });
+});
+
+// ── deleteOrphanedSnapshots — branch safety ───────────────────────────────
+
+describe("deleteOrphanedSnapshots — branch safety", () => {
+  it("does not delete a snapshot still referenced by a branch conversation", async () => {
+    const { deleteOrphanedSnapshots } = await import("../queue/QueueManager.js");
+    // Write a real snapshot file
+    const snapshotsDir = path.join(dataDir, "snapshots");
+    fs.mkdirSync(snapshotsDir, { recursive: true });
+    const snapPath = path.join(snapshotsDir, "shared-snap.txt");
+    fs.writeFileSync(snapPath, "shared content", "utf8");
+
+    const sharedRef = {
+      id: "shared-snap",
+      projectId: TEST_PROJECT_ID,
+      relativePath: "shared.ts",
+      capturedAt: Date.now(),
+      size: 14,
+      language: "typescript",
+      snapshotPath: snapPath,
+      contentHash: "abc123",
+    };
+
+    // Simulate: conv A has a message referencing the snapshot
+    const { createConversation, insertMessage } = await import("../database/db.js");
+    createConversation(true, {
+      id: "conv-A",
+      title: "A",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    insertMessage(true, {
+      id: "msg-A",
+      conversationId: "conv-A",
+      role: "user",
+      content: "Hello",
+      createdAt: Date.now(),
+      contextRefs: [sharedRef],
+    });
+
+    // Simulate: branch conv B also has a message referencing the SAME snapshot
+    createConversation(true, {
+      id: "conv-B",
+      title: "B",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    insertMessage(true, {
+      id: "msg-B",
+      conversationId: "conv-B",
+      role: "user",
+      content: "Branch",
+      createdAt: Date.now(),
+      contextRefs: [sharedRef],
+    });
+
+    // Delete conv A — exclude msg-A from the reference scan
+    deleteOrphanedSnapshots([sharedRef], new Set(["msg-A"]));
+
+    // Snapshot must still exist — msg-B still references it
+    expect(fs.existsSync(snapPath)).toBe(true);
+  });
+
+  it("deletes a snapshot when ALL referencing messages are excluded (last reference gone)", async () => {
+    const { deleteOrphanedSnapshots } = await import("../queue/QueueManager.js");
+    const snapshotsDir = path.join(dataDir, "snapshots");
+    fs.mkdirSync(snapshotsDir, { recursive: true });
+    const snapPath = path.join(snapshotsDir, "sole-snap.txt");
+    fs.writeFileSync(snapPath, "sole content", "utf8");
+
+    const soleRef = {
+      id: "sole-snap",
+      projectId: TEST_PROJECT_ID,
+      relativePath: "sole.ts",
+      capturedAt: Date.now(),
+      size: 12,
+      language: "typescript",
+      snapshotPath: snapPath,
+      contentHash: "def456",
+    };
+
+    // Only one message references this snapshot
+    const { createConversation, insertMessage } = await import("../database/db.js");
+    createConversation(true, {
+      id: "conv-sole",
+      title: "Sole",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    insertMessage(true, {
+      id: "msg-sole",
+      conversationId: "conv-sole",
+      role: "user",
+      content: "Only one",
+      createdAt: Date.now(),
+      contextRefs: [soleRef],
+    });
+
+    // Delete that sole message — no remaining references
+    deleteOrphanedSnapshots([soleRef], new Set(["msg-sole"]));
+
+    // Snapshot must be deleted
+    expect(fs.existsSync(snapPath)).toBe(false);
   });
 });

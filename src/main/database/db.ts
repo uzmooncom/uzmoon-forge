@@ -471,19 +471,9 @@ export function exportConversationMarkdown(_db: true, id: string): string {
   return lines.join("\n");
 }
 
-export function deleteConversation(_db: true, id: string): { attachmentPaths: string[]; snapshotPaths: string[] } {
+export function deleteConversation(_db: true, id: string): { attachmentPaths: string[] } {
   const s = store();
   s.conversations = s.conversations.filter((c) => c.id !== id);
-  // Collect snapshot paths from messages BEFORE deleting them
-  const snapshotPaths: string[] = [];
-  const msgs = s.messagesByConv[id] ?? [];
-  for (const msg of msgs) {
-    if (msg.contextRefs) {
-      for (const ref of msg.contextRefs) {
-        if (ref.snapshotPath) snapshotPaths.push(ref.snapshotPath);
-      }
-    }
-  }
   delete s.messagesByConv[id];
   delete s.queues[id];
   const attachmentPaths: string[] = [];
@@ -494,7 +484,7 @@ export function deleteConversation(_db: true, id: string): { attachmentPaths: st
     }
   }
   persist();
-  return { attachmentPaths, snapshotPaths };
+  return { attachmentPaths };
 }
 
 export function branchConversation(

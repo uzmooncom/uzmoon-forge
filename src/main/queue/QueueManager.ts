@@ -18,6 +18,7 @@ import { makeRequest, classifyError } from "../agent-client/client.js";
 import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
 import { readSnapshot } from "../project-files/service.js";
 import fs from "fs";
+import path from "path";
 
 /**
  * Thrown by buildContextMessages when a snapshot fails its SHA-256 integrity
@@ -258,25 +259,41 @@ function validateRefOwnership(
   return null;
 }
 
-// ── Orphaned snapshot cleanup ─────────────────────────────────────────────
+// ── Canonical snapshot cleanup ───────────────────────────────────────────
+//
+// ONE implementation. All call sites use these functions — never raw fs.unlinkSync
+// on a snapshotPath without going through the reference check.
 
 /**
- * Delete snapshot files that are no longer referenced by any message in the DB,
- * excluding the message being removed (excludeMsgId).
+ * Canonical reference-safe snapshot cleanup.
  *
- * This is "best effort" — never throws. If a snapshot is still referenced by
- * another message, it is left intact.
+ * Given a set of ContextRefs to consider for deletion and a set of message IDs
+ * to exclude from the "still alive" scan (because those messages are being
+ * removed transactionally), deletes only snapshot files with zero remaining
+ * canonical DB references.
+ *
+ * This handles the branch case correctly:
+ *   - Conversation A references snapshot S
+ *   - Branch B also references snapshot S (same snapshotPath, same ref.id)
+ *   - Delete A → excludeMsgIds = A's message IDs
+ *   - B's message still references S → S is NOT deleted
+ *   - Delete B → no more references → S IS deleted
+ *
+ * Best-effort: never throws.
  */
-function deleteOrphanedSnapshots(
+export function deleteOrphanedSnapshots(
   refs: import("../../shared/types.js").ContextRef[],
-  _convId: string,
-  excludeMsgId: string
+  excludeMsgIds: Set<string> | string
 ): void {
-  // Collect all snapshot IDs still referenced by any message (excluding the one being removed)
+  // Normalise: accept either a single string or a Set
+  const excludeSet: Set<string> =
+    typeof excludeMsgIds === "string" ? new Set([excludeMsgIds]) : excludeMsgIds;
+
+  // Collect all snapshot ref IDs still alive in the DB (excluding removed messages)
   const allMessages = db.getAllMessages(true);
   const stillReferenced = new Set<string>();
   for (const msg of allMessages) {
-    if (msg.id === excludeMsgId) continue;
+    if (excludeSet.has(msg.id)) continue;
     if (msg.contextRefs) {
       for (const r of msg.contextRefs) {
         stillReferenced.add(r.id);
@@ -284,20 +301,90 @@ function deleteOrphanedSnapshots(
     }
   }
 
-  // Delete snapshot files for refs that are no longer referenced
   for (const ref of refs) {
-    if (stillReferenced.has(ref.id)) continue; // still in use by another message
+    if (stillReferenced.has(ref.id)) continue; // still in use
     if (!ref.snapshotPath) continue;
+    // Security: only delete files inside the Forge-owned snapshots directory
+    const dataDir = db.getDataDir();
+    const resolved = path.resolve(ref.snapshotPath);
+    const expectedDir = path.resolve(path.join(dataDir, "snapshots"));
+    if (!resolved.startsWith(expectedDir + path.sep) && resolved !== expectedDir) continue;
     try {
-      if (fs.existsSync(ref.snapshotPath)) {
-        fs.unlinkSync(ref.snapshotPath);
+      if (fs.existsSync(resolved)) {
+        fs.unlinkSync(resolved);
         if (process.env["NODE_ENV"] === "development") {
           // eslint-disable-next-line no-console
-          console.log(`[context:cleanup] deleted snapshot ${ref.id} path=${ref.snapshotPath}`);
+          console.log(`[context:cleanup] deleted snapshot ${ref.id} path=${resolved}`);
         }
       }
     } catch {
-      // Best effort — do not throw on cleanup failure
+      // Best effort
+    }
+  }
+}
+
+/**
+ * Startup orphan sweep.
+ *
+ * Enumerates all files in the Forge-owned snapshots directory and removes any
+ * that are not referenced by any canonical DB message. This catches leaks from:
+ *   - failed enqueue after successful snapshot capture
+ *   - bugs or crashes between capture and persistence
+ *
+ * ONLY operates on files inside the canonical snapshots directory.
+ * Never touches project source directories.
+ * If a file's ownership is uncertain (e.g. not a .txt), it is kept.
+ */
+export function sweepOrphanedSnapshots(): void {
+  const dataDir = db.getDataDir();
+  const snapshotsDir = path.resolve(path.join(dataDir, "snapshots"));
+  if (!fs.existsSync(snapshotsDir)) return;
+
+  // Build set of all canonically referenced snapshot IDs
+  const allMessages = db.getAllMessages(true);
+  const referencedIds = new Set<string>();
+  for (const msg of allMessages) {
+    if (msg.contextRefs) {
+      for (const r of msg.contextRefs) {
+        referencedIds.add(r.id); // r.id === UUID === filename stem
+      }
+    }
+  }
+
+  // Also reference snapshot paths from queue items (pending, not yet in sent messages)
+  const allConversations = db.listConversations(true, true);
+  for (const conv of allConversations) {
+    const queue = db.getConvQueue(true, conv.id);
+    for (const item of queue.items) {
+      if (item.contextRefs) {
+        for (const r of item.contextRefs) {
+          referencedIds.add(r.id);
+        }
+      }
+    }
+  }
+
+  let dirEntries: fs.Dirent[];
+  try {
+    dirEntries = fs.readdirSync(snapshotsDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const dirent of dirEntries) {
+    if (!dirent.isFile()) continue;
+    if (!dirent.name.endsWith(".txt")) continue; // only Forge snapshot files
+    const stem = dirent.name.replace(/\.txt$/, "");
+    if (referencedIds.has(stem)) continue; // still referenced
+    const fullPath = path.join(snapshotsDir, dirent.name);
+    try {
+      fs.unlinkSync(fullPath);
+      if (process.env["NODE_ENV"] === "development") {
+        // eslint-disable-next-line no-console
+        console.log(`[context:sweep] removed orphan snapshot ${fullPath}`);
+      }
+    } catch {
+      // Best effort
     }
   }
 }
@@ -773,7 +860,7 @@ export class QueueManager {
     // targetAgentProfileId is preserved — never changed by edit
     // Clean up orphaned snapshots from the old contextRefs before overwriting
     if (item.contextRefs && item.contextRefs.length > 0) {
-      deleteOrphanedSnapshots(item.contextRefs, convId, item.messageId);
+      deleteOrphanedSnapshots(item.contextRefs, item.messageId);
     }
     db.updateQueueItem(true, convId, itemId, patch);
     this.updateMessageContent(convId, item.messageId, content);
@@ -797,7 +884,7 @@ export class QueueManager {
     if (!item || item.status === "processing") return false;
     // Clean up orphaned snapshots before removing the message
     if (item.contextRefs && item.contextRefs.length > 0) {
-      deleteOrphanedSnapshots(item.contextRefs, convId, item.messageId);
+      deleteOrphanedSnapshots(item.contextRefs, item.messageId);
     }
     db.deleteMessage(true, convId, item.messageId);
     for (const attId of item.attachmentIds) {
@@ -822,7 +909,7 @@ export class QueueManager {
       if (item.status !== "processing") {
         // Clean up orphaned snapshots before removing each item
         if (item.contextRefs && item.contextRefs.length > 0) {
-          deleteOrphanedSnapshots(item.contextRefs, convId, item.messageId);
+          deleteOrphanedSnapshots(item.contextRefs, item.messageId);
         }
         db.deleteMessage(true, convId, item.messageId);
         for (const attId of item.attachmentIds) {

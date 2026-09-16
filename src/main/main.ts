@@ -3,6 +3,7 @@ import path from "path";
 import { getDb } from "./database/db.js";
 import { SecretStore } from "./secret-store/secrets.js";
 import { registerHandlers } from "./ipc/handlers.js";
+import { sweepOrphanedSnapshots } from "./queue/QueueManager.js";
 
 const dataDir =
   process.env["FORGE_DATA_DIR"] ?? app.getPath("userData");
@@ -59,6 +60,11 @@ function createWindow(secrets: SecretStore, database: true): void {
 app.whenReady().then(() => {
   const database = getDb(dataDir);
   const secrets = new SecretStore(dataDir);
+
+  // Sweep orphaned snapshot files from prior sessions (crash, failed enqueue, etc.)
+  // DB must be initialised first so getAllMessages works.
+  void database;
+  try { sweepOrphanedSnapshots(); } catch { /* non-fatal */ }
 
   createWindow(secrets, database);
 

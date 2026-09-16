@@ -210,15 +210,20 @@ export function readFile(
 // ── Context snapshot ────────────────────────────────────────────────────────
 
 /**
- * Capture a snapshot of a file (or line range) into dataDir/snapshots/<convId>/<uuid>.
- * Returns a ContextRef that the queue manager stores alongside the message.
+ * Capture a snapshot of a file (or line range) into dataDir/snapshots/<uuid>.txt.
+ * Returns a ContextRef with a canonical, non-empty projectId.
+ * projectId MUST be a valid project ID — never pass an empty string.
  */
 export function captureSnapshot(
+  projectId: string,
   projectRoot: string,
   relativePath: string,
   lineStart?: number,
   lineEnd?: number
 ): SnapshotResult | SnapshotError {
+  if (!projectId) {
+    return { ok: false, error: "captureSnapshot: projectId must be non-empty" };
+  }
   const readResult = readFile(projectRoot, relativePath, lineStart, lineEnd, true);
   if (!readResult.ok) {
     return {
@@ -260,7 +265,7 @@ export function captureSnapshot(
 
   const ref: ContextRef = {
     id: snapshotId,
-    projectId: "", // caller must fill in
+    projectId,
     relativePath,
     capturedAt: Date.now(),
     size: sizeBytes,
