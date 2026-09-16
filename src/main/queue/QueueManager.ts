@@ -12,10 +12,11 @@
 import { randomUUID, createHash } from "crypto";
 import { WebContents } from "electron";
 import { IPC, EDIT_IPC } from "../../shared/types.js";
-import type { QueueItem, ChatMessage, Conversation, ContextRef } from "../../shared/types.js";
+import type { QueueItem, ChatMessage, Conversation, ContextRef, ToolActivityEntry, RequestContextLedger, ForgeToolCall, ForgeToolResult } from "../../shared/types.js";
 import * as db from "../database/db.js";
-import { makeRequest, classifyError } from "../agent-client/client.js";
+import { classifyError } from "../agent-client/client.js";
 import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
+import { runAgentLoop } from "../agent-client/agent-loop.js";
 import { readSnapshot } from "../project-files/service.js";
 import {
   extractProposalFence,
@@ -324,6 +325,10 @@ export function deleteOrphanedSnapshots(
       }
     }
   }
+  // V0.4: also protect snapshots referenced by agentReadRefs in persisted ledgers
+  for (const id of db.getAllAgentReadRefSnapshotIds(true)) {
+    stillReferenced.add(id);
+  }
 
   for (const ref of refs) {
     if (stillReferenced.has(ref.id)) continue; // still in use
@@ -386,6 +391,11 @@ export function sweepOrphanedSnapshots(): void {
         }
       }
     }
+  }
+
+  // V0.4: protect snapshots referenced by agentReadRefs in persisted ledgers
+  for (const id of db.getAllAgentReadRefSnapshotIds(true)) {
+    referencedIds.add(id);
   }
 
   let dirEntries: fs.Dirent[];
@@ -774,21 +784,96 @@ Proposal rules:
 If the requested file's complete content is NOT available in the CURRENT request, explain that full file context is required before Forge can safely prepare the change. Do not fabricate unseen content.
 
 If the user is asking a question or requesting an explanation rather than a modification, answer normally and do not emit forge_edit_proposal.
-</forge_capability>`
+</forge_capability>
+
+<forge_project_tools>
+You are working in an Uzmoon Forge Project with autonomous read-only access to eligible Project files.
+
+Available tools:
+- list_directory: List files/directories in the project. Default: project root.
+- search_files: Search by filename or path fragment. Returns relative paths only.
+- search_code: Search file contents for a literal string. Returns snippets — clues, not complete content.
+- read_file: Read the complete content of a file. Creates an immutable snapshot eligible for Safe File Editing.
+- read_file_range: Read a specific line range. NOTE: range reads CANNOT serve as Safe File Editing bases.
+
+Rules:
+- Start from any manually provided context if present.
+- Use tools autonomously when project knowledge is needed to answer the user.
+- search_code results are clues — call read_file for complete understanding before proposing changes.
+- Before proposing to modify a file, obtain complete content via read_file.
+- Do not repeat identical reads of unchanged files in the same request.
+- Do not exhaustively read the entire project — be targeted.
+- Always use exact relative paths returned by tool results.
+- Never request sensitive files (e.g. .env, private keys).
+- Terminal, shell, and command execution are unavailable — do not claim commands were executed.
+- If a tool call fails, explain the limitation to the user rather than guessing.
+</forge_project_tools>`
       : undefined;
 
+    // Create RequestContextLedger for this request
+    const requestId = randomUUID();
+    const ledger: RequestContextLedger = {
+      requestId,
+      conversationId,
+      projectId: convForSystem?.projectId ?? "",
+      agentProfileId: profile.id,
+      manualRefIds: (item.contextRefs ?? []).map((r) => r.id),
+      agentReadRefs: [],
+      toolActivity: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
     try {
-      fullText = await makeRequest({
+      const loopResult = await runAgentLoop({
         cfg,
         apiKey,
         messages: contextMessages,
-        stream: true,
+        system: forgeSystemPrompt,  // string | undefined — AgentLoopOptions.system is string | undefined
+        projectId: convForSystem?.projectId ?? "",
+        projectRoot: (() => {
+          const proj = convForSystem?.projectId ? db.getProject(true, convForSystem.projectId) : null;
+          return proj?.workingDirectory ?? "";
+        })(),
+        requestId,
+        conversationId,
         signal,
-        ...(forgeSystemPrompt !== undefined && { system: forgeSystemPrompt }),
         onChunk: (chunk) => {
           this.send(IPC.CHAT_STREAM_CHUNK, { streamId, chunk });
         },
+        onToolStart: (call: ForgeToolCall) => {
+          this.send(IPC.CHAT_STREAM_TOOL_START, { streamId, requestId, call });
+        },
+        onToolEnd: (call: ForgeToolCall, result: ForgeToolResult, durationMs: number) => {
+          this.send(IPC.CHAT_STREAM_TOOL_END, { streamId, requestId, call, result, durationMs });
+          // Update in-memory ledger
+          const activity: ToolActivityEntry = {
+            id: randomUUID(),
+            requestId,
+            conversationId,
+            toolName: call.name,
+            arguments: call.arguments,
+            resultSummary: result.ok ? "ok" : (result.errorCode ?? "error"),
+            durationMs,
+            ok: result.ok,
+            ...(result.errorCode !== undefined && { errorCode: result.errorCode }),
+            executedAt: Date.now(),
+          };
+          ledger.toolActivity.push(activity);
+        },
       });
+
+      fullText = loopResult.finalText;
+
+      // Populate ledger with agent read refs
+      ledger.agentReadRefs = loopResult.agentReadRefs;
+      ledger.toolActivity = loopResult.toolActivity;
+      ledger.updatedAt = Date.now();
+
+      // Persist ledger if any tool activity occurred
+      if (loopResult.agentReadRefs.length > 0 || loopResult.toolActivity.length > 0) {
+        try { db.saveLedger(true, ledger); } catch { /* best effort */ }
+      }
 
       activeStreams.delete(streamId);
       convToStream.delete(conversationId);
@@ -862,7 +947,22 @@ If the user is asking a question or requesting an explanation rather than a modi
           const targetResult = captureProposalTarget(proposalId, feId, rawFile.content);
           if (!targetResult.ok) { proposalSaveFailed = true; break; }
 
-          const resolution = resolveContextRef(item.contextRefs ?? [], convProjectId, rawFile.path);
+          // V0.4: also search agentReadRefs from this request's ledger.
+          // Only fullFile=true refs are valid edit bases (range reads cannot be used).
+          const agentRefsAsContextRefs: ContextRef[] = (ledger.agentReadRefs ?? [])
+            .filter((ar) => ar.fullFile)
+            .map((ar): ContextRef => ({
+              id: ar.id,
+              projectId: ar.projectId,
+              relativePath: ar.relativePath,
+              snapshotPath: ar.snapshotPath,
+              contentHash: ar.contentHash,
+              capturedAt: ar.capturedAt,
+              size: ar.size,
+              language: ar.language,
+            }));
+          const combinedRefs: ContextRef[] = [...(item.contextRefs ?? []), ...agentRefsAsContextRefs];
+          const resolution = resolveContextRef(combinedRefs, convProjectId, rawFile.path);
           let feStatus: import("../../shared/types.js").FileEditStatus;
           let failureReason: string | undefined;
           let baseSnapshotId: string | undefined;
@@ -995,9 +1095,18 @@ If the user is asking a question or requesting an explanation rather than a modi
       });
       db.pruneQueueHistory(true, conversationId);
 
+      // V0.4: attach agentReadRefs as extension field on the sent message
+      // so the renderer can display the "Explored N files" section.
+      const msgWithRefs = ledger.agentReadRefs.length > 0
+        ? ({
+            ...assistantMsg,
+            agentReadRefs: ledger.agentReadRefs,
+          } as unknown as ChatMessage)
+        : assistantMsg;
+
       this.send(IPC.CHAT_STREAM_END, {
         streamId,
-        message: assistantMsg,
+        message: msgWithRefs,
         conversation: db.getConversation(true, conversationId),
         queueItemId: item.id,
       });

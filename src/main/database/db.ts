@@ -16,6 +16,7 @@ import type {
   EditProposal,
   AppliedEdit,
   WriteJournalEntry,
+  RequestContextLedger,
 } from "../../shared/types.js";
 
 // ── Store shape ────────────────────────────────────────────────────────────
@@ -49,6 +50,9 @@ interface Store {
   editHistory: Record<string, AppliedEdit>;
   /** In-flight write journal entries keyed by entry id */
   writeJournal: Record<string, WriteJournalEntry>;
+  // ── V0.4: Agent Read Tools ─────────────────────────────────────────────
+  /** RequestContextLedgers keyed by requestId */
+  requestLedgers: Record<string, RequestContextLedger>;
 }
 
 const DEFAULT_STORE: Store = {
@@ -58,6 +62,7 @@ const DEFAULT_STORE: Store = {
   projects: {},
   conversations: [],
   messagesByConv: {},
+  requestLedgers: {},
   attachments: {},
   queues: {},
   proposals: {},
@@ -92,6 +97,7 @@ function load(): Store {
       proposals: raw.proposals ?? {},
       editHistory: raw.editHistory ?? {},
       writeJournal: raw.writeJournal ?? {},
+      requestLedgers: raw.requestLedgers ?? {},
     };
 
     // ── One-time migration: AgentConfig → AgentProfile ─────────────────
@@ -852,4 +858,53 @@ export function removeWriteJournalEntry(_db: true, id: string): void {
 
 export function listWriteJournalEntries(_db: true): WriteJournalEntry[] {
   return structuredClone(Object.values(store().writeJournal));
+}
+
+// ── Request Context Ledgers (V0.4) ─────────────────────────────────────────
+
+export function saveLedger(_db: true, ledger: RequestContextLedger): void {
+  store().requestLedgers[ledger.requestId] = ledger;
+  persist();
+}
+
+export function getLedger(_db: true, requestId: string): RequestContextLedger | null {
+  const l = store().requestLedgers[requestId];
+  return l ? structuredClone(l) : null;
+}
+
+export function updateLedger(
+  _db: true,
+  requestId: string,
+  patch: Partial<Omit<RequestContextLedger, "requestId" | "createdAt">>
+): RequestContextLedger | null {
+  const s = store();
+  const l = s.requestLedgers[requestId];
+  if (!l) return null;
+  Object.assign(l, patch);
+  l.updatedAt = Date.now();
+  persist();
+  return structuredClone(l);
+}
+
+export function getLedgersByConversation(_db: true, conversationId: string): RequestContextLedger[] {
+  return structuredClone(
+    Object.values(store().requestLedgers)
+      .filter((l) => l.conversationId === conversationId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+  );
+}
+
+/**
+ * Returns the set of all agentReadRef snapshot IDs across ALL persisted ledgers.
+ * Used by deleteOrphanedSnapshots to avoid deleting snapshots that are still
+ * referenced by agent-read refs from a past request.
+ */
+export function getAllAgentReadRefSnapshotIds(_db: true): Set<string> {
+  const ids = new Set<string>();
+  for (const ledger of Object.values(store().requestLedgers)) {
+    for (const ref of ledger.agentReadRefs) {
+      ids.add(ref.id);
+    }
+  }
+  return ids;
 }

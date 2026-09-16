@@ -1,7 +1,9 @@
 import https from "https";
 import http from "http";
 import { URL } from "url";
-import type { AgentConfig, ConnectionTestResult } from "../../shared/types.js";
+import { randomUUID } from "crypto";
+import type { AgentConfig, ConnectionTestResult, ForgeToolCall } from "../../shared/types.js";
+import type { OpenAIToolDef, AnthropicToolDef } from "./tool-types.js";
 
 // ── Message types ──────────────────────────────────────────────────────────
 
@@ -91,7 +93,8 @@ function buildOpenAIBody(
   messages: SimpleMessage[],
   model: string,
   stream: boolean,
-  system?: string
+  system?: string,
+  tools?: OpenAIToolDef[]
 ): string {
   const serialized = messages.map((m) => ({
     role: m.role,
@@ -100,14 +103,21 @@ function buildOpenAIBody(
   const sysMessages: Array<{ role: string; content: string }> = system
     ? [{ role: "system", content: system }]
     : [];
-  return JSON.stringify({ model, messages: [...sysMessages, ...serialized], stream, max_tokens: 4096 });
+  return JSON.stringify({
+    model,
+    messages: [...sysMessages, ...serialized],
+    stream,
+    max_tokens: 4096,
+    ...(tools && tools.length > 0 && { tools }),
+  });
 }
 
 function buildAnthropicBody(
   messages: SimpleMessage[],
   model: string,
   stream: boolean,
-  system?: string
+  system?: string,
+  tools?: AnthropicToolDef[]
 ): string {
   const serialized = messages.map((m) => ({
     role: m.role,
@@ -119,6 +129,7 @@ function buildAnthropicBody(
     max_tokens: 8192,
     stream,
     ...(system !== undefined && { system }),
+    ...(tools && tools.length > 0 && { tools }),
   });
 }
 
@@ -130,7 +141,11 @@ interface RequestOptions {
   messages: SimpleMessage[];
   stream: boolean;
   system?: string;
+  /** Native tool definitions (OpenAI or Anthropic format) */
+  tools?: OpenAIToolDef[] | AnthropicToolDef[];
   onChunk?: (text: string) => void;
+  /** Called when a complete tool call is extracted from the stream */
+  onToolCall?: (call: ForgeToolCall) => void;
   signal?: { aborted: boolean };
 }
 
@@ -160,8 +175,8 @@ export function makeRequest(opts: RequestOptions): Promise<string> {
 
     const body =
       cfg.protocol === "openai"
-        ? buildOpenAIBody(messages, cfg.model, stream, opts.system)
-        : buildAnthropicBody(messages, cfg.model, stream, opts.system);
+        ? buildOpenAIBody(messages, cfg.model, stream, opts.system, opts.tools as OpenAIToolDef[] | undefined)
+        : buildAnthropicBody(messages, cfg.model, stream, opts.system, opts.tools as AnthropicToolDef[] | undefined);
 
     const authHeaders = resolveHeaders(cfg, apiKey);
     const extraHeaders: Record<string, string> =
@@ -185,6 +200,13 @@ export function makeRequest(opts: RequestOptions): Promise<string> {
 
     const transport = url.protocol === "https:" ? https : http;
     let fullText = "";
+    const pendingToolCalls: ForgeToolCall[] = [];
+    // Accumulator for in-progress tool call deltas (OpenAI streaming)
+    const toolCallAccumulator = new Map<number, {
+      callId: string;
+      name: string;
+      argsJson: string;
+    }>();
 
     const req = transport.request(reqOptions, (res) => {
       if (signal?.aborted) {
@@ -261,10 +283,15 @@ export function makeRequest(opts: RequestOptions): Promise<string> {
           const jsonStr = trimmed.slice(6);
           try {
             const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-            const text = extractStreamText(parsed, cfg.protocol);
+            const { text, toolCalls } = extractStreamChunk(parsed, cfg.protocol, toolCallAccumulator);
             if (text) {
               fullText += text;
               onChunk?.(text);
+            }
+            // Dispatch completed tool calls
+            for (const tc of toolCalls) {
+              opts.onToolCall?.(tc);
+              pendingToolCalls.push(tc);
             }
           } catch {
             // malformed SSE chunk — skip
@@ -276,13 +303,27 @@ export function makeRequest(opts: RequestOptions): Promise<string> {
         if (!stream) {
           try {
             const parsed = JSON.parse(buffer) as Record<string, unknown>;
-            const text = extractFullText(parsed, cfg.protocol);
-            resolve(text);
+            const { text, toolCalls } = extractFullResponse(parsed, cfg.protocol);
+            for (const tc of toolCalls) {
+              opts.onToolCall?.(tc);
+              pendingToolCalls.push(tc);
+            }
+            // Encode tool calls into fullText using forge_tool fence so callers can detect them
+            if (pendingToolCalls.length > 0) {
+              resolve(encodeToolCallsAsText(text, pendingToolCalls));
+            } else {
+              resolve(text);
+            }
           } catch {
             reject(new Error("invalid_response"));
           }
         } else {
-          resolve(fullText);
+          // For streaming, encode any accumulated tool calls
+          if (pendingToolCalls.length > 0) {
+            resolve(encodeToolCallsAsText(fullText, pendingToolCalls));
+          } else {
+            resolve(fullText);
+          }
         }
       });
 
@@ -307,33 +348,127 @@ export function makeRequest(opts: RequestOptions): Promise<string> {
   });
 }
 
-function extractStreamText(
-  parsed: Record<string, unknown>,
-  protocol: string
-): string {
-  if (protocol === "openai") {
-    const choices = parsed["choices"];
-    if (!Array.isArray(choices) || choices.length === 0) return "";
-    const delta = (choices[0] as Record<string, unknown>)["delta"];
-    if (typeof delta !== "object" || delta === null) return "";
-    const content = (delta as Record<string, unknown>)["content"];
-    return typeof content === "string" ? content : "";
-  }
-  // anthropic streaming
-  const type = parsed["type"];
-  if (type === "content_block_delta") {
-    const delta = parsed["delta"];
-    if (typeof delta !== "object" || delta === null) return "";
-    const text = (delta as Record<string, unknown>)["text"];
-    return typeof text === "string" ? text : "";
-  }
-  return "";
+// ── Stream/response extraction (extended for tool calls) ──────────────────
+
+interface ChunkResult {
+  text: string;
+  toolCalls: ForgeToolCall[];
 }
 
-function extractFullText(
+/**
+ * Extract text delta and any newly-completed tool calls from an SSE chunk.
+ * Modifies toolCallAccumulator in place for OpenAI streaming.
+ */
+function extractStreamChunk(
+  parsed: Record<string, unknown>,
+  protocol: string,
+  toolCallAccumulator: Map<number, { callId: string; name: string; argsJson: string }>
+): ChunkResult {
+  const completedCalls: ForgeToolCall[] = [];
+
+  if (protocol === "openai") {
+    const choices = parsed["choices"];
+    if (!Array.isArray(choices) || choices.length === 0) return { text: "", toolCalls: [] };
+    const delta = (choices[0] as Record<string, unknown>)["delta"];
+    if (typeof delta !== "object" || delta === null) return { text: "", toolCalls: [] };
+    const d = delta as Record<string, unknown>;
+
+    // Text delta
+    const textContent = typeof d["content"] === "string" ? d["content"] : "";
+
+    // Tool call deltas
+    const toolCallDeltas = d["tool_calls"];
+    if (Array.isArray(toolCallDeltas)) {
+      for (const tcDelta of toolCallDeltas) {
+        const tc = tcDelta as Record<string, unknown>;
+        const idx = typeof tc["index"] === "number" ? tc["index"] : 0;
+        const existing = toolCallAccumulator.get(idx) ?? {
+          callId: (typeof tc["id"] === "string" ? tc["id"] : null) ?? randomUUID(),
+          name: "",
+          argsJson: "",
+        };
+        const fn = tc["function"] as Record<string, unknown> | undefined;
+        if (fn) {
+          if (typeof fn["name"] === "string" && fn["name"]) {
+            existing.name = fn["name"];
+          }
+          if (typeof fn["arguments"] === "string") {
+            existing.argsJson += fn["arguments"];
+          }
+        }
+        // Update callId if we get it now
+        if (typeof tc["id"] === "string" && tc["id"]) {
+          existing.callId = tc["id"];
+        }
+        toolCallAccumulator.set(idx, existing);
+      }
+    }
+
+    // Check finish_reason to flush completed tool calls
+    const finishReason = (choices[0] as Record<string, unknown>)["finish_reason"];
+    if (finishReason === "tool_calls" || finishReason === "stop") {
+      for (const [, acc] of toolCallAccumulator) {
+        if (acc.name) {
+          let parsedArgs: Record<string, unknown> = {};
+          try { parsedArgs = JSON.parse(acc.argsJson) as Record<string, unknown>; } catch { /* empty args */ }
+          completedCalls.push({ callId: acc.callId, name: acc.name, arguments: parsedArgs });
+        }
+      }
+      toolCallAccumulator.clear();
+    }
+
+    return { text: textContent, toolCalls: completedCalls };
+  }
+
+  // Anthropic streaming
+  const type = parsed["type"];
+  if (type === "content_block_delta") {
+    const delta = parsed["delta"] as Record<string, unknown> | undefined;
+    if (!delta) return { text: "", toolCalls: [] };
+    const deltaType = delta["type"];
+    if (deltaType === "text_delta") {
+      const text = delta["text"];
+      return { text: typeof text === "string" ? text : "", toolCalls: [] };
+    }
+    if (deltaType === "input_json_delta") {
+      // Anthropic streams tool input incrementally via content block index
+      const idx = typeof parsed["index"] === "number" ? (parsed["index"] as number) : 0;
+      const existing = toolCallAccumulator.get(idx);
+      if (existing) {
+        existing.argsJson += typeof delta["partial_json"] === "string" ? delta["partial_json"] : "";
+      }
+    }
+  } else if (type === "content_block_start") {
+    const block = parsed["content_block"] as Record<string, unknown> | undefined;
+    if (block && block["type"] === "tool_use") {
+      const idx = typeof parsed["index"] === "number" ? (parsed["index"] as number) : 0;
+      toolCallAccumulator.set(idx, {
+        callId: typeof block["id"] === "string" ? block["id"] : randomUUID(),
+        name: typeof block["name"] === "string" ? block["name"] : "",
+        argsJson: "",
+      });
+    }
+  } else if (type === "content_block_stop") {
+    const idx = typeof parsed["index"] === "number" ? (parsed["index"] as number) : 0;
+    const acc = toolCallAccumulator.get(idx);
+    if (acc && acc.name) {
+      let parsedArgs: Record<string, unknown> = {};
+      try { parsedArgs = JSON.parse(acc.argsJson) as Record<string, unknown>; } catch { /* empty */ }
+      completedCalls.push({ callId: acc.callId, name: acc.name, arguments: parsedArgs });
+      toolCallAccumulator.delete(idx);
+    }
+  }
+
+  return { text: "", toolCalls: completedCalls };
+}
+
+/**
+ * Extract text + tool calls from a non-streaming (complete) response body.
+ */
+function extractFullResponse(
   parsed: Record<string, unknown>,
   protocol: string
-): string {
+): ChunkResult {
   if (protocol === "openai") {
     const choices = parsed["choices"];
     if (!Array.isArray(choices) || choices.length === 0) {
@@ -343,17 +478,58 @@ function extractFullText(
     if (typeof message !== "object" || message === null) {
       throw new Error("invalid_response");
     }
-    const content = (message as Record<string, unknown>)["content"];
-    return typeof content === "string" ? content : "";
+    const m = message as Record<string, unknown>;
+    const text = typeof m["content"] === "string" ? m["content"] : "";
+    const toolCalls: ForgeToolCall[] = [];
+    if (Array.isArray(m["tool_calls"])) {
+      for (const tc of m["tool_calls"] as Record<string, unknown>[]) {
+        const fn = tc["function"] as Record<string, unknown> | undefined;
+        if (!fn) continue;
+        let parsedArgs: Record<string, unknown> = {};
+        try { parsedArgs = JSON.parse(typeof fn["arguments"] === "string" ? fn["arguments"] : "{}") as Record<string, unknown>; } catch { /* ok */ }
+        toolCalls.push({
+          callId: typeof tc["id"] === "string" ? tc["id"] : randomUUID(),
+          name: typeof fn["name"] === "string" ? fn["name"] : "",
+          arguments: parsedArgs,
+        });
+      }
+    }
+    return { text, toolCalls };
   }
-  // anthropic
+
+  // Anthropic non-streaming
   const content = parsed["content"];
-  if (!Array.isArray(content) || content.length === 0) {
-    throw new Error("invalid_response");
+  if (!Array.isArray(content)) throw new Error("invalid_response");
+  let text = "";
+  const toolCalls: ForgeToolCall[] = [];
+  for (const block of content as Record<string, unknown>[]) {
+    if (block["type"] === "text") {
+      text += typeof block["text"] === "string" ? block["text"] : "";
+    } else if (block["type"] === "tool_use") {
+      toolCalls.push({
+        callId: typeof block["id"] === "string" ? block["id"] : randomUUID(),
+        name: typeof block["name"] === "string" ? block["name"] : "",
+        arguments: (typeof block["input"] === "object" && block["input"] !== null)
+          ? (block["input"] as Record<string, unknown>)
+          : {},
+      });
+    }
   }
-  const block = content[0] as Record<string, unknown>;
-  const text = block["text"];
-  return typeof text === "string" ? text : "";
+  if (text === "" && toolCalls.length === 0) throw new Error("invalid_response");
+  return { text, toolCalls };
+}
+
+/**
+ * Encode tool calls as forge_tool fences appended to text.
+ * Used when native tool calls are returned — agent-loop.ts decodes them.
+ */
+export function encodeToolCallsAsText(text: string, toolCalls: ForgeToolCall[]): string {
+  if (toolCalls.length === 0) return text;
+  const fences = toolCalls.map((tc) => {
+    const payload = JSON.stringify({ callId: tc.callId, name: tc.name, arguments: tc.arguments });
+    return `\`\`\`forge_tool\n${payload}\n\`\`\``;
+  }).join("\n");
+  return text ? `${text}\n${fences}` : fences;
 }
 
 // ── Connection Test ────────────────────────────────────────────────────────

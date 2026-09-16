@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -26,6 +26,10 @@ import type {
   EditProposal,
   AppliedEdit,
   PreflightResult,
+  RequestContextLedger,
+  ToolActivityEntry,
+  ForgeToolCall,
+  ForgeToolResult,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -391,6 +395,27 @@ const forgeApi = {
 
   clearHistory: (): Promise<void> =>
     ipcRenderer.invoke(IPC.CONV_UPDATE, "", {}),
+
+  // ── Agent Tool Activity (V0.4) ────────────────────────────────────────────
+  agentTools: {
+    getLedger: (requestId: string): Promise<RequestContextLedger | null> =>
+      ipcRenderer.invoke(AGENT_TOOL_IPC.LEDGER_GET, requestId),
+
+    getToolActivity: (conversationId: string): Promise<ToolActivityEntry[]> =>
+      ipcRenderer.invoke(AGENT_TOOL_IPC.TOOL_ACTIVITY_GET, conversationId),
+
+    onToolStart: (cb: (payload: { streamId: string; requestId: string; call: ForgeToolCall }) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { streamId: string; requestId: string; call: ForgeToolCall }) => cb(payload);
+      ipcRenderer.on(IPC.CHAT_STREAM_TOOL_START, listener);
+      return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_TOOL_START, listener);
+    },
+
+    onToolEnd: (cb: (payload: { streamId: string; requestId: string; call: ForgeToolCall; result: ForgeToolResult; durationMs: number }) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { streamId: string; requestId: string; call: ForgeToolCall; result: ForgeToolResult; durationMs: number }) => cb(payload);
+      ipcRenderer.on(IPC.CHAT_STREAM_TOOL_END, listener);
+      return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_TOOL_END, listener);
+    },
+  },
 };
 
 contextBridge.exposeInMainWorld("forgeApi", forgeApi);

@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } fr
 import { randomUUID } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -1066,6 +1066,28 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     EDIT_IPC.EDIT_HISTORY_LIST,
     (_e: IpcMainInvokeEvent, projectId: string): import("../../shared/types.js").AppliedEdit[] => {
       return db.listAppliedEditsForProject(database, projectId);
+    }
+  );
+
+  // ── V0.4 Agent Tool IPC ────────────────────────────────────────────────
+  ipcMain.handle(
+    AGENT_TOOL_IPC.LEDGER_GET,
+    (_e: IpcMainInvokeEvent, requestId: string): import("../../shared/types.js").RequestContextLedger | null => {
+      return db.getLedger(database, requestId);
+    }
+  );
+
+  ipcMain.handle(
+    AGENT_TOOL_IPC.TOOL_ACTIVITY_GET,
+    (_e: IpcMainInvokeEvent, conversationId: string): import("../../shared/types.js").ToolActivityEntry[] => {
+      const ledgers = db.getLedgersByConversation(database, conversationId);
+      const allActivity: import("../../shared/types.js").ToolActivityEntry[] = [];
+      for (const ledger of ledgers) {
+        allActivity.push(...ledger.toolActivity);
+      }
+      // Sort by executedAt ascending
+      allActivity.sort((a, b) => a.executedAt - b.executedAt);
+      return allActivity;
     }
   );
 }

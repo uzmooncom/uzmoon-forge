@@ -233,6 +233,10 @@ export const IPC = {
   CHAT_STREAM_END: "chat:streamEnd",
   CHAT_STREAM_ERROR: "chat:streamError",
   CHAT_CANCEL: "chat:cancel",
+  /** Pushed from main when a tool call starts during agent loop */
+  CHAT_STREAM_TOOL_START: "chat:streamToolStart",
+  /** Pushed from main when a tool call completes during agent loop */
+  CHAT_STREAM_TOOL_END: "chat:streamToolEnd",
 
   // Queue management
   QUEUE_GET: "queue:get",
@@ -594,3 +598,98 @@ export interface FolderContextPreview {
   skippedTooLarge: number;
   totalSize: number;
 }
+
+// ── Project Intelligence + Agent Read Tools (V0.4) ────────────────────────
+
+/**
+ * A file autonomously read by the Agent during a request.
+ * fullFile=true means the complete file was read — valid as a V0.3 edit base.
+ * fullFile=false means only a line range was read — NOT a valid edit base.
+ */
+export interface AgentReadRef {
+  /** UUID — same as snapshot file basename */
+  id: string;
+  requestId: string;
+  conversationId: string;
+  projectId: string;
+  relativePath: string;
+  /** Absolute path inside app dataDir/snapshots/ */
+  snapshotPath: string;
+  /** SHA-256 hex of captured content */
+  contentHash: string;
+  capturedAt: number;
+  /** Byte size of captured content */
+  size: number;
+  language: string;
+  /** true = whole file; false = line range only */
+  fullFile: boolean;
+  lineStart?: number;
+  lineEnd?: number;
+}
+
+/** One agent tool invocation recorded for audit and UI display */
+export interface ToolActivityEntry {
+  id: string;
+  requestId: string;
+  conversationId: string;
+  /** e.g. "search_code", "read_file" */
+  toolName: string;
+  /** The arguments the model passed */
+  arguments: Record<string, unknown>;
+  /** Human-readable summary e.g. "12 matches" or "read 3.2 KB" */
+  resultSummary: string;
+  durationMs: number;
+  ok: boolean;
+  errorCode?: string;
+  executedAt: number;
+}
+
+/** All context seen by the model during one generation request */
+export interface RequestContextLedger {
+  requestId: string;
+  conversationId: string;
+  projectId: string;
+  agentProfileId: string;
+  /** QueueItem.contextRefs IDs that were in scope for this request */
+  manualRefIds: string[];
+  /** Files the agent autonomously read */
+  agentReadRefs: AgentReadRef[];
+  /** Ordered log of all tool invocations */
+  toolActivity: ToolActivityEntry[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** A tool call parsed from model output (native or forge_tool fallback) */
+export interface ForgeToolCall {
+  /** Provider-assigned or Forge-generated stable ID */
+  callId: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+/** Tool result to feed back to the model */
+export interface ForgeToolResult {
+  callId: string;
+  toolName: string;
+  ok: boolean;
+  data?: unknown;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+/** Normalized single-turn response from the model */
+export interface NormalizedAgentResponse {
+  type: "final" | "tool_calls";
+  /** Accumulated text content (final text or prose before tool calls) */
+  content: string;
+  toolCalls?: ForgeToolCall[];
+}
+
+/** IPC channels for V0.4 agent tool ledger */
+export const AGENT_TOOL_IPC = {
+  /** Get the RequestContextLedger for a given requestId */
+  LEDGER_GET: "agentTool:ledgerGet",
+  /** Get tool activity entries for a given requestId */
+  TOOL_ACTIVITY_GET: "agentTool:activityGet",
+} as const;

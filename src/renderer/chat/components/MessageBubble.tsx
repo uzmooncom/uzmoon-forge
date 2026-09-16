@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import type { ChatMessage, Attachment, ContextRef, EditProposal, FileEdit } from "../../../shared/types.js";
+import type { ChatMessage, Attachment, ContextRef, EditProposal, FileEdit, AgentReadRef } from "../../../shared/types.js";
 import { DiffReviewModal } from "../../project/DiffReviewModal.js";
 import { fileEmoji, truncFilename, formatTime } from "../helpers.js";
 import { CopyIcon, CheckIcon, ReplyIcon, EditIcon, RetryIcon } from "../icons.js";
@@ -428,6 +428,124 @@ function ForgeMarkIcon({ size = 10 }: { size?: number }) {
   );
 }
 
+// ── ExploredFilesSection ──────────────────────────────────────────────────
+
+function ExploredIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M10 10l3 3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ExploredFilesSection({ msg }: { msg: ChatMessage }) {
+  const [open, setOpen] = useState(false);
+  const [viewerRef, setViewerRef] = useState<AgentReadRef | null>(null);
+
+  // V0.4: agentReadRefs are stored as an extension field on assistant messages
+  const agentReadRefs = (msg as unknown as Record<string, unknown>)["agentReadRefs"] as AgentReadRef[] | undefined;
+  if (!agentReadRefs || agentReadRefs.length === 0) return null;
+
+  return (
+    <>
+      <div className="mt-1.5">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-1.5 text-[11px] text-white/30 hover:text-white/55 transition-colors py-0.5 px-1 rounded hover:bg-white/5"
+        >
+          <ChevronIcon size={9} open={open} />
+          <ExploredIcon size={10} />
+          <span>Explored {agentReadRefs.length} file{agentReadRefs.length !== 1 ? "s" : ""}</span>
+        </button>
+
+        {open && (
+          <div className="mt-1 ml-4 flex flex-col gap-0.5">
+            {agentReadRefs.map((ref) => (
+              <button
+                key={ref.id}
+                onClick={() => setViewerRef(ref)}
+                className="flex items-center gap-1.5 text-[11px] text-white/40 hover:text-white/70 py-0.5 px-1.5 rounded hover:bg-white/5 transition-colors text-left"
+              >
+                <FileContextIcon size={10} />
+                <span className="font-mono truncate max-w-[280px]">{ref.relativePath}</span>
+                {ref.fullFile ? null : (
+                  <span className="text-white/20 ml-1">(range)</span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Snapshot viewer for a clicked explored file */}
+      {viewerRef && (
+        <ExploredFileViewerModal ref_={viewerRef} onClose={() => setViewerRef(null)} />
+      )}
+    </>
+  );
+}
+
+function ExploredFileViewerModal({ ref_, onClose }: { ref_: AgentReadRef; onClose: () => void }) {
+  const [content, setContent] = useState<string | null>(null);
+  const [status, setStatus] = useState<"loading" | "loaded" | "missing">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    window.forgeApi.projectFiles.readSnapshot(ref_.snapshotPath).then((res) => {
+      if (cancelled) return;
+      if ("content" in res) {
+        setContent(res.content);
+        setStatus("loaded");
+      } else {
+        setStatus("missing");
+      }
+    }).catch(() => {
+      if (!cancelled) setStatus("missing");
+    });
+    return () => { cancelled = true; };
+  }, [ref_.snapshotPath]);
+
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="bg-[#0d1117] border border-white/10 rounded-xl shadow-2xl w-[700px] max-w-[92vw] max-h-[80vh] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-white/8">
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-xs text-white/70">{ref_.relativePath}</span>
+            {ref_.fullFile ? null : (
+              <span className="text-[11px] text-white/35">range read (lines {ref_.lineStart ?? "?"}–{ref_.lineEnd ?? "end"})</span>
+            )}
+          </div>
+          <button onClick={onClose} className="text-white/30 hover:text-white/70 p-1">
+            <CloseIcon size={13} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-auto p-4">
+          {status === "loading" && (
+            <div className="text-xs text-white/30 italic">Loading…</div>
+          )}
+          {status === "missing" && (
+            <div className="text-xs text-red-400/70">Snapshot unavailable — the captured file content can no longer be read.</div>
+          )}
+          {status === "loaded" && content !== null && (
+            <pre className="text-xs text-white/75 font-mono whitespace-pre-wrap break-words leading-relaxed">{content}</pre>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AgentIdentityRow({
   agentName,
   model,
@@ -697,6 +815,11 @@ export function MessageBubble({
         {/* Proposal card (shown when this message contains a file edit proposal) */}
         {proposalId && isAssistant && !isError && (
           <ProposalCard proposalId={proposalId} />
+        )}
+
+        {/* Explored files section (V0.4 — agent autonomously read files) */}
+        {isAssistant && !isError && (
+          <ExploredFilesSection msg={msg} />
         )}
 
         {/* Action bar */}
