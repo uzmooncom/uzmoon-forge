@@ -211,7 +211,7 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
     });
     setPreflightResults(null);
     setApplyError(null);
-  }, [proposal.fileEdits]);
+  }, [proposal.fileEdits, diffStates]);
 
   const handlePreflight = useCallback(async () => {
     if (selectedIds.size === 0) return;
