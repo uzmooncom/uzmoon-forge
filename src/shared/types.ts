@@ -323,6 +323,8 @@ export interface ContextRef {
   language: string;
   /** Absolute path inside app dataDir — NOT inside the project folder */
   snapshotPath: string;
+  /** SHA-256 hex digest of the captured content — for integrity verification */
+  contentHash: string;
 }
 
 /** UI representation of a staged context item in the composer */

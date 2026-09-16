@@ -42,15 +42,23 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
+/**
+ * Produces an unambiguous short label for a context chip.
+ * Uses "parent/filename" so duplicate basenames (e.g. two index.ts) are distinguishable.
+ * If path has only one segment, the full path is used.
+ */
 function chipLabel(chip: ContextChip): string {
-  const filename = chip.displayName.split("/").pop() ?? chip.displayName;
+  const parts = chip.relativePath.replace(/\\/g, "/").split("/").filter(Boolean);
+  const filename = parts[parts.length - 1] ?? chip.relativePath;
+  const parent = parts.length > 1 ? parts[parts.length - 2] : null;
+  const base = parent ? `${parent}/${filename}` : filename;
   if (chip.lineStart !== undefined && chip.lineEnd !== undefined) {
-    return `${filename}:${chip.lineStart}-${chip.lineEnd}`;
+    return `${base}:${chip.lineStart}-${chip.lineEnd}`;
   }
   if (chip.lineStart !== undefined) {
-    return `${filename}:${chip.lineStart}+`;
+    return `${base}:${chip.lineStart}+`;
   }
-  return filename;
+  return base;
 }
 
 function chipTitle(chip: ContextChip): string {

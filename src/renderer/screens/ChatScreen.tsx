@@ -1210,8 +1210,11 @@ export default function ChatScreen({
             {/* Empty state */}
             {messages.length === 0 && !streaming && (
               <div className="flex flex-col items-center justify-center min-h-[60vh] gap-6 text-center">
-                <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500/20 to-violet-600/20 border border-white/8 flex items-center justify-center text-3xl">
-                  💬
+                <div className="w-14 h-14 rounded-2xl bg-white/4 border border-white/8 flex items-center justify-center">
+                  <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+                    <rect x="6" y="6" width="20" height="20" rx="4" stroke="currentColor" strokeWidth="1.5" className="text-white/20" />
+                    <path d="M11 12h10M11 16h7M11 20v-8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="text-white/30" />
+                  </svg>
                 </div>
                 <div>
                   <div className="text-white/70 font-semibold text-lg">{agentName}</div>
@@ -1325,10 +1328,10 @@ export default function ChatScreen({
                   onPaste={handlePaste}
                   placeholder={
                     editingQueueItemId
-                      ? "Edit message… (Enter to save)"
+                      ? "Edit message…"
                       : streaming
-                      ? "Responding… (you can queue the next message)"
-                      : "Message… (Enter to send, Shift+Enter for newline)"
+                      ? "Queue next message…"
+                      : "Message…"
                   }
                   rows={1}
                   autoFocus

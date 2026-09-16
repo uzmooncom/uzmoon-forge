@@ -360,7 +360,20 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
           staged.lineEnd
         );
         if (result.ok) {
-          capturedContextRefs.push({ ...result.ref, projectId: staged.projectId });
+          const ref = { ...result.ref, projectId: staged.projectId };
+          capturedContextRefs.push(ref);
+          if (process.env["NODE_ENV"] === "development") {
+            // eslint-disable-next-line no-console
+            console.log(
+              `[context:capture] resource=${ref.id} project=${staged.projectId}` +
+              ` path=${staged.relativePath} sha256=${ref.contentHash.slice(0, 8)} bytes=${ref.size}`
+            );
+          }
+        } else if (process.env["NODE_ENV"] === "development") {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[context:capture-FAIL] project=${staged.projectId} path=${staged.relativePath} error=${result.error}`
+          );
         }
       }
 

@@ -9,7 +9,7 @@
  * - On stop/failure, queue is paused — user must explicitly resume.
  * - On restart, any "processing" items were already recovered to "paused" by db.load().
  */
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import { WebContents } from "electron";
 import { IPC } from "../../shared/types.js";
 import type { QueueItem, ChatMessage, Conversation, ContextRef } from "../../shared/types.js";
@@ -40,6 +40,34 @@ export function buildContextMessages(msgs: ChatMessage[]): SimpleMessage[] {
         for (const ref of m.contextRefs) {
           const content = readSnapshot(ref.snapshotPath);
           if (!content) continue;
+
+          // Integrity: verify snapshot content matches stored hash
+          if (ref.contentHash) {
+            const actualHash = createHash("sha256")
+              .update(Buffer.from(content, "utf8"))
+              .digest("hex");
+            if (actualHash !== ref.contentHash) {
+              // Dev mode: log integrity failure; always skip corrupted snapshot
+              if (process.env["NODE_ENV"] === "development" || process.env["NODE_ENV"] === "test") {
+                // eslint-disable-next-line no-console
+                console.error(
+                  `[context:integrity-FAIL] resource=${ref.id} project=${ref.projectId}` +
+                  ` path=${ref.relativePath} stored=${ref.contentHash.slice(0, 8)} actual=${actualHash.slice(0, 8)}`
+                );
+              }
+              continue; // Skip corrupted snapshot — do NOT send wrong content
+            }
+          }
+
+          // Dev mode: log successful context serialization
+          if (process.env["NODE_ENV"] === "development") {
+            // eslint-disable-next-line no-console
+            console.log(
+              `[context:serialize] resource=${ref.id} project=${ref.projectId}` +
+              ` path=${ref.relativePath} sha256=${(ref.contentHash ?? "").slice(0, 8)} bytes=${ref.size}`
+            );
+          }
+
           const lineRange = ref.lineStart !== undefined
             ? ` lines="${ref.lineStart}-${ref.lineEnd ?? "end"}"`
             : "";

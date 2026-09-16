@@ -7,7 +7,7 @@
  */
 import path from "path";
 import fs from "fs";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import type {
   ProjectFileEntry,
   ContextRef,
@@ -235,12 +235,27 @@ export function captureSnapshot(
   const snapshotId = randomUUID();
   const snapshotFile = path.join(snapshotsDir, `${snapshotId}.txt`);
   const content = readResult.content;
-  const sizeBytes = Buffer.byteLength(content, "utf8");
+  const contentBuf = Buffer.from(content, "utf8");
+  const sizeBytes = contentBuf.byteLength;
+  const contentHash = createHash("sha256").update(contentBuf).digest("hex");
 
   try {
     fs.writeFileSync(snapshotFile, content, "utf8");
   } catch {
     return { ok: false, error: "Failed to write snapshot" };
+  }
+
+  // Verify written content matches computed hash
+  if (process.env["NODE_ENV"] === "development" || process.env["NODE_ENV"] === "test") {
+    try {
+      const written = fs.readFileSync(snapshotFile, "utf8");
+      const writtenHash = createHash("sha256").update(Buffer.from(written, "utf8")).digest("hex");
+      if (writtenHash !== contentHash) {
+        return { ok: false, error: "Snapshot write integrity check failed" };
+      }
+    } catch {
+      // Non-fatal in this path
+    }
   }
 
   const ref: ContextRef = {
@@ -251,6 +266,7 @@ export function captureSnapshot(
     size: sizeBytes,
     language: readResult.language,
     snapshotPath: snapshotFile,
+    contentHash,
     ...(lineStart !== undefined && { lineStart }),
     ...(lineEnd !== undefined && { lineEnd }),
   };
