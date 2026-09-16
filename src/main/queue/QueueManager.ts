@@ -11,12 +11,21 @@
  */
 import { randomUUID, createHash } from "crypto";
 import { WebContents } from "electron";
-import { IPC } from "../../shared/types.js";
+import { IPC, EDIT_IPC } from "../../shared/types.js";
 import type { QueueItem, ChatMessage, Conversation, ContextRef } from "../../shared/types.js";
 import * as db from "../database/db.js";
 import { makeRequest, classifyError } from "../agent-client/client.js";
 import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
 import { readSnapshot } from "../project-files/service.js";
+import {
+  extractProposalFence,
+  stripProposalFence,
+  parseProposalJson,
+  captureProposalTarget,
+  resolveContextRef,
+  verifyBaseSnapshot,
+  computeProposalStatus,
+} from "../project-files/edit-service.js";
 import fs from "fs";
 import path from "path";
 
@@ -709,26 +718,169 @@ export class QueueManager {
       convToStream.delete(conversationId);
 
       const durationMs = Date.now() - startTime;
-      const assistantMsg: ChatMessage = {
-        id: randomUUID(),
-        conversationId,
-        role: "assistant",
-        content: fullText,
-        createdAt: Date.now(),
-        model: profile.model,
-        durationMs,
-        agentProfileId: profile.id,
-        agentNameSnapshot: profile.name,
-        modelSnapshot: profile.model,
-      };
-      db.insertMessage(true, assistantMsg);
-      db.updateConversation(true, conversationId, { updatedAt: Date.now() });
+      const now = Date.now();
+
+      // ── Proposal detection ─────────────────────────────────────────────────
+      // If the model included a forge_edit_proposal fence, save as proposal.
+      // Otherwise save as a plain assistant message.
+      let assistantMsg: ChatMessage;
+      const rawProposalFenceJson = extractProposalFence(fullText);
+      const parsedProposal = rawProposalFenceJson ? parseProposalJson(rawProposalFenceJson) : null;
+      const conv = db.getConversation(true, conversationId);
+      const convProjectId = conv?.projectId;
+
+      if (parsedProposal && convProjectId && item.contextRefs && item.contextRefs.length > 0) {
+        // --- Proposal path ---
+        const msgId = randomUUID();
+        const proposalId = randomUUID();
+        const displayContent = stripProposalFence(fullText);
+
+        assistantMsg = {
+          id: msgId,
+          conversationId,
+          role: "assistant",
+          content: displayContent,
+          createdAt: now,
+          model: profile.model,
+          durationMs,
+          agentProfileId: profile.id,
+          agentNameSnapshot: profile.name,
+          modelSnapshot: profile.model,
+          // Extension field — proposal back-reference
+          ...(({ proposalId } as unknown) as Record<string, unknown>),
+        };
+        db.insertMessage(true, assistantMsg);
+
+        // Build FileEdits
+        const { FileEdit: _FEType, ..._ } = {} as { FileEdit: import("../../shared/types.js").FileEdit };
+        void _FEType; void _;
+        const fileEdits: import("../../shared/types.js").FileEdit[] = [];
+        let proposalSaveFailed = false;
+        for (const rawFile of parsedProposal.files) {
+          const feId = randomUUID();
+          const targetResult = captureProposalTarget(proposalId, feId, rawFile.content);
+          if (!targetResult.ok) { proposalSaveFailed = true; break; }
+
+          const resolution = resolveContextRef(item.contextRefs, convProjectId, rawFile.path);
+          let feStatus: import("../../shared/types.js").FileEditStatus;
+          let failureReason: string | undefined;
+          let baseSnapshotId: string | undefined;
+          let baseContentHash: string | undefined;
+
+          if (resolution.status === "needs_context") {
+            feStatus = "needs_context";
+            failureReason = `No full-file context for "${rawFile.path}". Add the file to context and retry.`;
+          } else if (resolution.status === "ambiguous_context") {
+            feStatus = "ambiguous_context";
+            failureReason = `Multiple snapshots found for "${rawFile.path}". Remove duplicates and retry.`;
+          } else {
+            const verification = verifyBaseSnapshot(resolution.ref);
+            if (!verification.ok) {
+              feStatus = verification.status === "needs_context" ? "needs_context" : "failed";
+              failureReason = verification.reason;
+            } else {
+              feStatus = "ready";
+              baseSnapshotId = resolution.ref.id;
+              baseContentHash = resolution.ref.contentHash;
+            }
+          }
+
+          const fe: import("../../shared/types.js").FileEdit = {
+            id: feId,
+            proposalId,
+            relativePath: rawFile.path,
+            targetResourcePath: targetResult.resourcePath,
+            targetContentHash: targetResult.contentHash,
+            status: feStatus,
+            ...(failureReason !== undefined && { failureReason }),
+            ...(baseSnapshotId !== undefined && { baseSnapshotId }),
+            ...(baseContentHash !== undefined && { baseContentHash }),
+            createdAt: now,
+            updatedAt: now,
+          };
+          fileEdits.push(fe);
+        }
+
+        if (!proposalSaveFailed && fileEdits.length > 0) {
+          const overallStatus = computeProposalStatus(fileEdits);
+          const proposal: import("../../shared/types.js").EditProposal = {
+            id: proposalId,
+            conversationId,
+            messageId: msgId,
+            projectId: convProjectId,
+            status: overallStatus,
+            summary: parsedProposal.summary,
+            ...(parsedProposal.explanation !== undefined && { explanation: parsedProposal.explanation }),
+            rawProposalJson: rawProposalFenceJson!,
+            fileEdits,
+            createdAt: now,
+            updatedAt: now,
+          };
+          try {
+            db.saveProposal(true, proposal);
+            // Push proposal to renderer
+            this.send(EDIT_IPC.PROPOSAL_UPDATE, proposal);
+          } catch {
+            // Proposal save failed — delete the assistant message we already inserted
+            db.deleteMessage(true, conversationId, msgId);
+            // Fall back to plain message
+            const fallbackMsg: ChatMessage = {
+              id: randomUUID(),
+              conversationId,
+              role: "assistant",
+              content: fullText,
+              createdAt: now,
+              model: profile.model,
+              durationMs,
+              agentProfileId: profile.id,
+              agentNameSnapshot: profile.name,
+              modelSnapshot: profile.model,
+            };
+            db.insertMessage(true, fallbackMsg);
+            assistantMsg = fallbackMsg;
+          }
+        } else {
+          // Couldn't build file edits — fall back to plain message, delete partial msg
+          db.deleteMessage(true, conversationId, msgId);
+          const fallbackMsg: ChatMessage = {
+            id: randomUUID(),
+            conversationId,
+            role: "assistant",
+            content: fullText,
+            createdAt: now,
+            model: profile.model,
+            durationMs,
+            agentProfileId: profile.id,
+            agentNameSnapshot: profile.name,
+            modelSnapshot: profile.model,
+          };
+          db.insertMessage(true, fallbackMsg);
+          assistantMsg = fallbackMsg;
+        }
+      } else {
+        // --- Plain assistant message ---
+        assistantMsg = {
+          id: randomUUID(),
+          conversationId,
+          role: "assistant",
+          content: fullText,
+          createdAt: now,
+          model: profile.model,
+          durationMs,
+          agentProfileId: profile.id,
+          agentNameSnapshot: profile.name,
+          modelSnapshot: profile.model,
+        };
+        db.insertMessage(true, assistantMsg);
+      }
+
+      db.updateConversation(true, conversationId, { updatedAt: now });
       db.touchAgentProfileLastUsed(true, profile.id);
       db.updateAgentProfileStatus(true, profile.id, "connected");
 
       db.updateQueueItem(true, conversationId, item.id, {
         status: "completed",
-        completedAt: Date.now(),
+        completedAt: now,
       });
       db.pruneQueueHistory(true, conversationId);
 

@@ -4,6 +4,7 @@ import { getDb } from "./database/db.js";
 import { SecretStore } from "./secret-store/secrets.js";
 import { registerHandlers } from "./ipc/handlers.js";
 import { sweepOrphanedSnapshots } from "./queue/QueueManager.js";
+import { sweepWriteJournal } from "./project-files/edit-service.js";
 
 const dataDir =
   process.env["FORGE_DATA_DIR"] ?? app.getPath("userData");
@@ -65,6 +66,7 @@ app.whenReady().then(() => {
   // DB must be initialised first so getAllMessages works.
   void database;
   try { sweepOrphanedSnapshots(); } catch { /* non-fatal */ }
+  try { sweepWriteJournal(); } catch { /* non-fatal */ }
 
   createWindow(secrets, database);
 

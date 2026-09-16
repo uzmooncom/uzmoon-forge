@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import type { ChatMessage, Attachment, ContextRef } from "../../../shared/types.js";
+import type { ChatMessage, Attachment, ContextRef, EditProposal, FileEdit } from "../../../shared/types.js";
+import { DiffReviewModal } from "../../project/DiffReviewModal.js";
 import { fileEmoji, truncFilename, formatTime } from "../helpers.js";
 import { CopyIcon, CheckIcon, ReplyIcon, EditIcon, RetryIcon } from "../icons.js";
 import { MessageImage } from "./MessageImage.js";
@@ -478,6 +479,140 @@ function AgentAvatar({ isError }: { isError: boolean }) {
   );
 }
 
+// ── ProposalCard ─────────────────────────────────────────────────────────
+
+function ProposalStatusBadge({ status }: { status: EditProposal["status"] }) {
+  const map: Record<string, { label: string; cls: string }> = {
+    ready:             { label: "Ready",            cls: "bg-green-900/50 text-green-300/80 border-green-700/30" },
+    needs_context:     { label: "Needs context",    cls: "bg-amber-900/50 text-amber-300/80 border-amber-700/30" },
+    ambiguous_context: { label: "Ambiguous",        cls: "bg-amber-900/50 text-amber-300/80 border-amber-700/30" },
+    applied:           { label: "Applied",          cls: "bg-blue-900/50 text-blue-300/80 border-blue-700/30" },
+    partiallyApplied:  { label: "Partial",          cls: "bg-blue-900/30 text-blue-300/60 border-blue-700/20" },
+    rejected:          { label: "Rejected",         cls: "bg-gray-800/60 text-gray-400/70 border-gray-700/30" },
+    stale:             { label: "Stale",             cls: "bg-orange-900/50 text-orange-300/80 border-orange-700/30" },
+    failed:            { label: "Failed",            cls: "bg-red-900/50 text-red-300/80 border-red-700/30" },
+    cancelled:         { label: "Cancelled",         cls: "bg-gray-800/60 text-gray-400/70 border-gray-700/30" },
+    draft:             { label: "Draft",             cls: "bg-gray-800/60 text-gray-400/70 border-gray-700/30" },
+  };
+  const cfg = map[status] ?? map["failed"]!;
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${cfg.cls}`}>
+      {cfg.label}
+    </span>
+  );
+}
+
+function ProposalFileLine({ fe }: { fe: FileEdit }) {
+  const dot: Record<FileEdit["status"], string> = {
+    ready:             "bg-green-400",
+    needs_context:     "bg-amber-400",
+    ambiguous_context: "bg-amber-400",
+    stale:             "bg-orange-400",
+    applied:           "bg-blue-400",
+    rejected:          "bg-gray-500",
+    failed:            "bg-red-400",
+    missing:           "bg-red-400",
+  };
+  return (
+    <div className="flex items-center gap-2 py-0.5">
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dot[fe.status] ?? "bg-gray-500"}`} />
+      <span
+        className="text-[11px] text-white/55 truncate"
+        style={{ fontFamily: "ui-monospace, monospace" }}
+        title={fe.relativePath}
+      >
+        {fe.relativePath}
+      </span>
+      {fe.failureReason && (
+        <span className="text-[10px] text-amber-400/60 shrink-0 truncate max-w-[160px]" title={fe.failureReason}>
+          — {fe.failureReason}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function ProposalCard({ proposalId }: { proposalId: string }) {
+  const [proposal, setProposal] = useState<EditProposal | null>(null);
+  const [showModal, setShowModal] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    void (async () => {
+      const p = await window.forgeApi.fileEditing.getProposal(proposalId);
+      setProposal(p);
+      setLoading(false);
+    })();
+  }, [proposalId]);
+
+  // Subscribe to live updates — keyed on proposalId (stable, from prop)
+  useEffect(() => {
+    if (!proposal) return;
+    const currentId = proposal.id;
+    const unsub = window.forgeApi.fileEditing.onProposalUpdate((updated) => {
+      if (updated.id === currentId) setProposal(updated);
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [proposalId]);
+
+  if (loading || !proposal) return null;
+
+  const canReview = proposal.status !== "rejected" && proposal.status !== "cancelled";
+
+  return (
+    <>
+      <div className="mt-3 rounded-lg border border-white/8 bg-white/3 overflow-hidden">
+        {/* Card header */}
+        <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-white/6">
+          <div className="flex items-center gap-2">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" className="text-white/40 shrink-0">
+              <path d="M3 2h7l3 3v9H3V2z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+              <path d="M10 2v3h3" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+              <path d="M6 7h4M6 9.5h4M6 12h2" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+            </svg>
+            <span className="text-[12px] text-white/75 font-medium leading-tight">{proposal.summary}</span>
+          </div>
+          <ProposalStatusBadge status={proposal.status} />
+        </div>
+
+        {/* File list */}
+        <div className="px-3.5 py-2">
+          {proposal.fileEdits.map((fe) => (
+            <ProposalFileLine key={fe.id} fe={fe} />
+          ))}
+        </div>
+
+        {/* Actions */}
+        {canReview && (
+          <div className="flex items-center gap-2 px-3.5 py-2 border-t border-white/5">
+            <button
+              onClick={() => setShowModal(true)}
+              className="text-[12px] px-3 py-1.5 rounded bg-blue-600/70 hover:bg-blue-500/70 text-white font-medium transition-colors"
+            >
+              Review Changes
+            </button>
+            {proposal.status === "needs_context" && (
+              <span className="text-[11px] text-amber-400/70">
+                Add missing files to context before applying
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {showModal && (
+        <DiffReviewModal
+          proposal={proposal}
+          onClose={() => setShowModal(false)}
+          onProposalUpdate={setProposal}
+        />
+      )}
+    </>
+  );
+}
+
 // ── Main component ─────────────────────────────────────────────────────────
 
 export function MessageBubble({
@@ -521,6 +656,9 @@ export function MessageBubble({
   // Assistant (and error) messages are NOT wrapped in a rounded bubble.
   // They are rendered as content directly on the workspace, with only a small
   // identity row (agent name + model) above the text.
+  // Read proposalId from the extension field stored on the message
+  const proposalId = (msg as unknown as Record<string, unknown>)["proposalId"] as string | undefined;
+
   if (!isUser) {
     return (
       <div className="group flex flex-col gap-0 py-3 px-1">
@@ -554,6 +692,11 @@ export function MessageBubble({
               <MarkdownContent content={msg.content} />
             )}
           </div>
+        )}
+
+        {/* Proposal card (shown when this message contains a file edit proposal) */}
+        {proposalId && isAssistant && !isError && (
+          <ProposalCard proposalId={proposalId} />
         )}
 
         {/* Action bar */}

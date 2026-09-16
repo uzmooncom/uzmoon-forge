@@ -13,6 +13,9 @@ import type {
   Attachment,
   QueueItem,
   Project,
+  EditProposal,
+  AppliedEdit,
+  WriteJournalEntry,
 } from "../../shared/types.js";
 
 // ── Store shape ────────────────────────────────────────────────────────────
@@ -39,6 +42,13 @@ interface Store {
   attachments: Record<string, Attachment>;
   /** Per-conversation message queues */
   queues: Record<string, ConvQueue>;
+  // ── V0.3: Safe File Editing ────────────────────────────────────────────
+  /** EditProposals keyed by proposal id */
+  proposals: Record<string, EditProposal>;
+  /** AppliedEdits keyed by appliedEdit id */
+  editHistory: Record<string, AppliedEdit>;
+  /** In-flight write journal entries keyed by entry id */
+  writeJournal: Record<string, WriteJournalEntry>;
 }
 
 const DEFAULT_STORE: Store = {
@@ -50,6 +60,9 @@ const DEFAULT_STORE: Store = {
   messagesByConv: {},
   attachments: {},
   queues: {},
+  proposals: {},
+  editHistory: {},
+  writeJournal: {},
 };
 
 // ── Singleton ──────────────────────────────────────────────────────────────
@@ -76,6 +89,9 @@ function load(): Store {
       messagesByConv: raw.messagesByConv ?? {},
       attachments: raw.attachments ?? {},
       queues: raw.queues ?? {},
+      proposals: raw.proposals ?? {},
+      editHistory: raw.editHistory ?? {},
+      writeJournal: raw.writeJournal ?? {},
     };
 
     // ── One-time migration: AgentConfig → AgentProfile ─────────────────
@@ -744,4 +760,96 @@ export function touchProjectLastOpened(_db: true, id: string): void {
   if (!p) return;
   p.lastOpenedAt = Date.now();
   persist();
+}
+
+// ── Edit Proposals (V0.3) ──────────────────────────────────────────────────
+
+export function saveProposal(_db: true, proposal: EditProposal): void {
+  store().proposals[proposal.id] = proposal;
+  persist();
+}
+
+export function getProposal(_db: true, id: string): EditProposal | null {
+  const p = store().proposals[id];
+  return p ? structuredClone(p) : null;
+}
+
+export function listProposalsForConversation(_db: true, conversationId: string): EditProposal[] {
+  return structuredClone(
+    Object.values(store().proposals)
+      .filter((p) => p.conversationId === conversationId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+  );
+}
+
+export function updateProposal(
+  _db: true,
+  id: string,
+  patch: Partial<Omit<EditProposal, "id" | "createdAt">>
+): EditProposal | null {
+  const s = store();
+  const p = s.proposals[id];
+  if (!p) return null;
+  Object.assign(p, patch);
+  p.updatedAt = Date.now();
+  persist();
+  return structuredClone(p);
+}
+
+/**
+ * For rollback only — removes a proposal that failed to persist consistently.
+ * Never call this for user-driven rejection (use updateProposal with status=rejected).
+ */
+export function deleteProposal(_db: true, id: string): void {
+  delete store().proposals[id];
+  persist();
+}
+
+// ── Applied Edit History (V0.3) ────────────────────────────────────────────
+
+export function saveAppliedEdit(_db: true, edit: AppliedEdit): void {
+  store().editHistory[edit.id] = edit;
+  persist();
+}
+
+export function getAppliedEdit(_db: true, id: string): AppliedEdit | null {
+  const e = store().editHistory[id];
+  return e ? structuredClone(e) : null;
+}
+
+export function listAppliedEditsForProject(_db: true, projectId: string): AppliedEdit[] {
+  return structuredClone(
+    Object.values(store().editHistory)
+      .filter((e) => e.projectId === projectId)
+      .sort((a, b) => b.appliedAt - a.appliedAt)
+  );
+}
+
+export function updateAppliedEdit(
+  _db: true,
+  id: string,
+  patch: Partial<Omit<AppliedEdit, "id">>
+): AppliedEdit | null {
+  const s = store();
+  const e = s.editHistory[id];
+  if (!e) return null;
+  Object.assign(e, patch);
+  persist();
+  return structuredClone(e);
+}
+
+// ── Write Journal (V0.3) ───────────────────────────────────────────────────
+
+export function addWriteJournalEntry(_db: true, entry: WriteJournalEntry): void {
+  store().writeJournal[entry.id] = entry;
+  persist();
+}
+
+export function removeWriteJournalEntry(_db: true, id: string): void {
+  delete store().writeJournal[id];
+  persist();
+}
+
+export function listWriteJournalEntries(_db: true): WriteJournalEntry[] {
+  return structuredClone(Object.values(store().writeJournal));
 }

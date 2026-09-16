@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -23,6 +23,9 @@ import type {
   SnapshotResult,
   SnapshotError,
   FolderContextPreview,
+  EditProposal,
+  AppliedEdit,
+  PreflightResult,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -335,6 +338,42 @@ const forgeApi = {
     ) => cb(state);
     ipcRenderer.on(IPC.QUEUE_STATE, listener);
     return () => ipcRenderer.removeListener(IPC.QUEUE_STATE, listener);
+  },
+
+  // ── Safe File Editing (V0.3) ──────────────────────────────────────────────
+  fileEditing: {
+    getProposal: (proposalId: string): Promise<EditProposal | null> =>
+      ipcRenderer.invoke(EDIT_IPC.PROPOSAL_GET, proposalId),
+
+    listProposals: (conversationId: string): Promise<EditProposal[]> =>
+      ipcRenderer.invoke(EDIT_IPC.PROPOSAL_LIST, conversationId),
+
+    rejectProposal: (proposalId: string, fileEditIds?: string[]): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(EDIT_IPC.PROPOSAL_REJECT, proposalId, fileEditIds),
+
+    readProposalTarget: (proposalId: string, fileEditId: string): Promise<{ ok: true; content: string } | { ok: false; error: string }> =>
+      ipcRenderer.invoke(EDIT_IPC.PROPOSAL_READ_TARGET, proposalId, fileEditId),
+
+    preflightCheck: (proposalId: string, selectedFileEditIds: string[]): Promise<PreflightResult[]> =>
+      ipcRenderer.invoke(EDIT_IPC.PREFLIGHT_CHECK, proposalId, selectedFileEditIds),
+
+    applySelected: (
+      proposalId: string,
+      selectedFileEditIds: string[]
+    ): Promise<{ ok: boolean; appliedEditIds?: string[]; preflightFailures?: PreflightResult[]; error?: string }> =>
+      ipcRenderer.invoke(EDIT_IPC.APPLY_SELECTED, proposalId, selectedFileEditIds),
+
+    undoApply: (appliedEditId: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(EDIT_IPC.UNDO_APPLY, appliedEditId),
+
+    listEditHistory: (projectId: string): Promise<AppliedEdit[]> =>
+      ipcRenderer.invoke(EDIT_IPC.EDIT_HISTORY_LIST, projectId),
+
+    onProposalUpdate: (cb: (proposal: EditProposal) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, proposal: EditProposal) => cb(proposal);
+      ipcRenderer.on(EDIT_IPC.PROPOSAL_UPDATE, listener);
+      return () => ipcRenderer.removeListener(EDIT_IPC.PROPOSAL_UPDATE, listener);
+    },
   },
 
   // ── Clipboard ──────────────────────────────────────────────────────────────

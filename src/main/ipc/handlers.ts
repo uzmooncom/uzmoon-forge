@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } fr
 import { randomUUID } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -16,6 +16,7 @@ import type {
   Project,
   DirectoryStatus,
 } from "../../shared/types.js";
+import * as editService from "../project-files/edit-service.js";
 import * as projectFiles from "../project-files/service.js";
 import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
@@ -732,4 +733,270 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   ipcMain.handle("clipboard:write", (_e: IpcMainInvokeEvent, text: string) => {
     clipboard.writeText(text);
   });
+
+  // ── Safe File Editing (V0.3) ───────────────────────────────────────────────
+
+  /** Apply lock: prevents concurrent writes to the same file */
+  const applyLock = new Map<string, true>();
+
+  ipcMain.handle(
+    EDIT_IPC.PROPOSAL_GET,
+    (_e: IpcMainInvokeEvent, proposalId: string): import("../../shared/types.js").EditProposal | null => {
+      return db.getProposal(database, proposalId);
+    }
+  );
+
+  ipcMain.handle(
+    EDIT_IPC.PROPOSAL_LIST,
+    (_e: IpcMainInvokeEvent, conversationId: string): import("../../shared/types.js").EditProposal[] => {
+      return db.listProposalsForConversation(database, conversationId);
+    }
+  );
+
+  ipcMain.handle(
+    EDIT_IPC.PROPOSAL_REJECT,
+    (
+      _e: IpcMainInvokeEvent,
+      proposalId: string,
+      fileEditIds?: string[]
+    ): { ok: boolean; error?: string } => {
+      const proposal = db.getProposal(database, proposalId);
+      if (!proposal) return { ok: false, error: "Proposal not found" };
+
+      if (!fileEditIds || fileEditIds.length === 0) {
+        const updated = db.updateProposal(database, proposalId, { status: "rejected", updatedAt: Date.now() });
+        if (!updated) return { ok: false, error: "Failed to update proposal" };
+        mainSender.send(EDIT_IPC.PROPOSAL_UPDATE, updated);
+        return { ok: true };
+      }
+
+      const updatedFileEdits = proposal.fileEdits.map((fe) => {
+        if (fileEditIds.includes(fe.id)) {
+          return { ...fe, status: "rejected" as const, updatedAt: Date.now() };
+        }
+        return fe;
+      });
+      const newStatus = editService.computeProposalStatus(updatedFileEdits);
+      const updated = db.updateProposal(database, proposalId, {
+        fileEdits: updatedFileEdits,
+        status: newStatus,
+        updatedAt: Date.now(),
+      });
+      if (!updated) return { ok: false, error: "Failed to update proposal" };
+      mainSender.send(EDIT_IPC.PROPOSAL_UPDATE, updated);
+      return { ok: true };
+    }
+  );
+
+  ipcMain.handle(
+    EDIT_IPC.PROPOSAL_READ_TARGET,
+    (
+      _e: IpcMainInvokeEvent,
+      proposalId: string,
+      fileEditId: string
+    ): { ok: true; content: string } | { ok: false; error: string } => {
+      const proposal = db.getProposal(database, proposalId);
+      if (!proposal) return { ok: false, error: "Proposal not found" };
+      const fe = proposal.fileEdits.find((f) => f.id === fileEditId);
+      if (!fe) return { ok: false, error: "File edit not found" };
+      const content = editService.readProposalTarget(fe.targetResourcePath);
+      if (content === null) return { ok: false, error: "Proposal target resource not found" };
+      return { ok: true, content };
+    }
+  );
+
+  ipcMain.handle(
+    EDIT_IPC.PREFLIGHT_CHECK,
+    (
+      _e: IpcMainInvokeEvent,
+      proposalId: string,
+      selectedFileEditIds: string[]
+    ): import("../../shared/types.js").PreflightResult[] => {
+      const proposal = db.getProposal(database, proposalId);
+      if (!proposal) return [];
+      const project = db.getProject(database, proposal.projectId);
+      if (!project) return [];
+      return editService.preflightFileEdits(project.workingDirectory, proposal, selectedFileEditIds);
+    }
+  );
+
+  ipcMain.handle(
+    EDIT_IPC.APPLY_SELECTED,
+    async (
+      _e: IpcMainInvokeEvent,
+      proposalId: string,
+      selectedFileEditIds: string[]
+    ): Promise<{ ok: boolean; appliedEditIds?: string[]; preflightFailures?: import("../../shared/types.js").PreflightResult[]; error?: string }> => {
+      const proposal = db.getProposal(database, proposalId);
+      if (!proposal) return { ok: false, error: "Proposal not found" };
+      const project = db.getProject(database, proposal.projectId);
+      if (!project) return { ok: false, error: "Project not found" };
+
+      if (!selectedFileEditIds || selectedFileEditIds.length === 0) {
+        return { ok: false, error: "No file edits selected" };
+      }
+
+      // Acquire apply locks for all target files
+      const lockKeys: string[] = [];
+      for (const feId of selectedFileEditIds) {
+        const fe = proposal.fileEdits.find((f) => f.id === feId);
+        if (fe) lockKeys.push(`${proposal.projectId}:${fe.relativePath}`);
+      }
+      for (const key of lockKeys) {
+        if (applyLock.has(key)) {
+          return { ok: false, error: `File is already being written: ${key.split(":")[1] ?? key}` };
+        }
+      }
+      for (const key of lockKeys) applyLock.set(key, true);
+
+      try {
+        // Phase 1: Preflight ALL files before writing ANY
+        const preflightResults = editService.preflightFileEdits(
+          project.workingDirectory,
+          proposal,
+          selectedFileEditIds
+        );
+        const failures = preflightResults.filter((r) => !r.ok);
+        if (failures.length > 0) {
+          return { ok: false, preflightFailures: failures };
+        }
+
+        // Phase 2: Apply each file edit
+        const appliedEditIds: string[] = [];
+        const appliedEditsThisRun: import("../../shared/types.js").AppliedEdit[] = [];
+        let firstError: string | null = null;
+
+        for (const feId of selectedFileEditIds) {
+          const fe = proposal.fileEdits.find((f) => f.id === feId);
+          if (!fe) continue;
+
+          const proposedContent = editService.readProposalTarget(fe.targetResourcePath);
+          if (proposedContent === null) {
+            firstError = `Proposal target resource missing for ${fe.relativePath}`;
+            break;
+          }
+
+          const targetAbsPath = path.join(project.workingDirectory, fe.relativePath);
+          const appliedEditId = randomUUID();
+
+          const backupResult = editService.createBackupSnapshot(appliedEditId, targetAbsPath);
+          if (!backupResult.ok) {
+            firstError = `Backup failed for ${fe.relativePath}: ${backupResult.error}`;
+            break;
+          }
+
+          const writeResult = editService.writeFileAtomicWithProject(
+            project.workingDirectory,
+            project.id,
+            fe.relativePath,
+            proposedContent,
+            fe.targetContentHash
+          );
+          if (!writeResult.ok) {
+            try { if (fs.existsSync(backupResult.backupPath)) fs.unlinkSync(backupResult.backupPath); } catch { /* ignore */ }
+            firstError = `Write failed for ${fe.relativePath}: ${writeResult.error}`;
+            break;
+          }
+
+          const appliedEdit: import("../../shared/types.js").AppliedEdit = {
+            id: appliedEditId,
+            proposalId,
+            fileEditId: feId,
+            conversationId: proposal.conversationId,
+            projectId: proposal.projectId,
+            relativePath: fe.relativePath,
+            backupResourcePath: backupResult.backupPath,
+            backupContentHash: backupResult.contentHash,
+            appliedContentHash: writeResult.actualHash,
+            appliedAt: Date.now(),
+          };
+          db.saveAppliedEdit(database, appliedEdit);
+          appliedEditsThisRun.push(appliedEdit);
+          appliedEditIds.push(appliedEditId);
+        }
+
+        // Update FileEdit statuses in DB
+        const updatedFileEdits = proposal.fileEdits.map((fe) => {
+          if (appliedEditsThisRun.some((ae) => ae.fileEditId === fe.id)) {
+            return { ...fe, status: "applied" as const, updatedAt: Date.now() };
+          }
+          if (firstError && selectedFileEditIds.includes(fe.id) && !appliedEditsThisRun.some((ae) => ae.fileEditId === fe.id)) {
+            return { ...fe, status: "failed" as const, failureReason: firstError, updatedAt: Date.now() };
+          }
+          return fe;
+        });
+        const newStatus = editService.computeProposalStatus(updatedFileEdits);
+        const updatedProposal = db.updateProposal(database, proposalId, {
+          fileEdits: updatedFileEdits,
+          status: newStatus,
+          updatedAt: Date.now(),
+        });
+        if (updatedProposal) mainSender.send(EDIT_IPC.PROPOSAL_UPDATE, updatedProposal);
+
+        if (firstError) return { ok: false, error: firstError, appliedEditIds };
+        return { ok: true, appliedEditIds };
+      } finally {
+        for (const key of lockKeys) applyLock.delete(key);
+      }
+    }
+  );
+
+  ipcMain.handle(
+    EDIT_IPC.UNDO_APPLY,
+    async (
+      _e: IpcMainInvokeEvent,
+      appliedEditId: string
+    ): Promise<{ ok: boolean; error?: string }> => {
+      const appliedEdit = db.getAppliedEdit(database, appliedEditId);
+      if (!appliedEdit) return { ok: false, error: "Applied edit not found" };
+      if (appliedEdit.undoneAt) return { ok: false, error: "This edit has already been undone" };
+
+      const project = db.getProject(database, appliedEdit.projectId);
+      if (!project) return { ok: false, error: "Project not found" };
+
+      const lockKey = `${appliedEdit.projectId}:${appliedEdit.relativePath}`;
+      if (applyLock.has(lockKey)) return { ok: false, error: "File is currently being written" };
+      applyLock.set(lockKey, true);
+
+      try {
+        const result = editService.restoreFromBackup(
+          project.workingDirectory,
+          project.id,
+          appliedEdit.relativePath,
+          appliedEdit.backupResourcePath,
+          appliedEdit.backupContentHash
+        );
+        if (!result.ok) return { ok: false, error: result.error };
+
+        db.updateAppliedEdit(database, appliedEditId, { undoneAt: Date.now() });
+
+        const proposal = db.getProposal(database, appliedEdit.proposalId);
+        if (proposal) {
+          const updatedFileEdits = proposal.fileEdits.map((fe) => {
+            if (fe.id === appliedEdit.fileEditId) {
+              return { ...fe, status: "stale" as const, failureReason: "Edit was undone", updatedAt: Date.now() };
+            }
+            return fe;
+          });
+          const newStatus = editService.computeProposalStatus(updatedFileEdits);
+          const updatedProposal = db.updateProposal(database, appliedEdit.proposalId, {
+            fileEdits: updatedFileEdits,
+            status: newStatus,
+            updatedAt: Date.now(),
+          });
+          if (updatedProposal) mainSender.send(EDIT_IPC.PROPOSAL_UPDATE, updatedProposal);
+        }
+        return { ok: true };
+      } finally {
+        applyLock.delete(lockKey);
+      }
+    }
+  );
+
+  ipcMain.handle(
+    EDIT_IPC.EDIT_HISTORY_LIST,
+    (_e: IpcMainInvokeEvent, projectId: string): import("../../shared/types.js").AppliedEdit[] => {
+      return db.listAppliedEditsForProject(database, projectId);
+    }
+  );
 }

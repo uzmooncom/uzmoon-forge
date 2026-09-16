@@ -419,6 +419,170 @@ export interface SendMessageWithContextRequest extends SendMessageRequest {
   }>;
 }
 
+// ── Safe File Editing (V0.3) ─────────────────────────────────────────────
+
+/**
+ * Status of a single file edit within a proposal.
+ * - ready            — base snapshot verified, can be applied
+ * - needs_context    — no full-file ContextRef found; user must add it
+ * - ambiguous_context — multiple matching ContextRefs; user must disambiguate
+ * - stale            — target file changed since proposal was generated
+ * - applied          — already applied to disk
+ * - rejected         — user rejected this specific file edit
+ * - failed           — apply failed (I/O error, preflight failure)
+ * - missing          — proposal target resource file is gone
+ */
+export type FileEditStatus =
+  | "ready"
+  | "needs_context"
+  | "ambiguous_context"
+  | "stale"
+  | "applied"
+  | "rejected"
+  | "failed"
+  | "missing";
+
+/** One file modification within an EditProposal */
+export interface FileEdit {
+  id: string;
+  proposalId: string;
+  /** Relative path from project root */
+  relativePath: string;
+  /** Absolute path to the resource file holding proposed content (dataDir/proposals/...) */
+  targetResourcePath: string;
+  /** SHA-256 hash of the proposed content as stored in targetResourcePath */
+  targetContentHash: string;
+  /** ContextRef.id of the verified base snapshot (set when status=ready) */
+  baseSnapshotId?: string;
+  /** SHA-256 of base file content at proposal time (from ContextRef.contentHash) */
+  baseContentHash?: string;
+  status: FileEditStatus;
+  /** Human-readable reason for the current status (non-ready states) */
+  failureReason?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Overall status of an EditProposal.
+ * - draft             — being assembled (transient, never persisted durably)
+ * - ready             — all file edits are ready or rejected; can be applied
+ * - needs_context     — at least one edit is needs_context
+ * - ambiguous_context — at least one edit is ambiguous_context
+ * - partiallyApplied  — some applied, some not yet
+ * - applied           — all selected edits applied
+ * - rejected          — user rejected the whole proposal
+ * - stale             — one or more target files changed
+ * - failed            — apply failed
+ * - cancelled         — conversation deleted or otherwise invalidated
+ */
+export type EditProposalStatus =
+  | "draft"
+  | "ready"
+  | "needs_context"
+  | "ambiguous_context"
+  | "partiallyApplied"
+  | "applied"
+  | "rejected"
+  | "stale"
+  | "failed"
+  | "cancelled";
+
+/** An AI-generated proposal to edit one or more files */
+export interface EditProposal {
+  id: string;
+  conversationId: string;
+  /** The assistant ChatMessage.id that contained the proposal fence */
+  messageId: string;
+  projectId: string;
+  status: EditProposalStatus;
+  /** Short summary from the model's proposal */
+  summary: string;
+  /** Longer explanation from the model's proposal */
+  explanation?: string;
+  /** The raw JSON fence block (stripped from ChatMessage.content) */
+  rawProposalJson: string;
+  /** Individual file edits */
+  fileEdits: FileEdit[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** One successful apply of a FileEdit to disk */
+export interface AppliedEdit {
+  id: string;
+  proposalId: string;
+  fileEditId: string;
+  conversationId: string;
+  projectId: string;
+  relativePath: string;
+  /** Absolute path to the backup resource in dataDir/backups/ */
+  backupResourcePath: string;
+  /** SHA-256 hash of the backup (original) content */
+  backupContentHash: string;
+  /** SHA-256 hash of the content that was written */
+  appliedContentHash: string;
+  appliedAt: number;
+  /** Set when the edit was undone */
+  undoneAt?: number;
+}
+
+/**
+ * Write journal entry — tracks in-flight atomic temp files.
+ * Temp files live in the project directory (same parent dir as target)
+ * so fs.renameSync can be atomic. Journal lives in dataDir.
+ */
+export interface WriteJournalEntry {
+  id: string;
+  projectId: string;
+  /** Path relative to project root, e.g. "src/.forge-tmp-a1b2c3" */
+  tempRelativePath: string;
+  /** Path relative to project root, e.g. "src/auth.ts" */
+  targetRelativePath: string;
+  createdAt: number;
+}
+
+/** Preflight check result for a single file edit */
+export interface PreflightResult {
+  fileEditId: string;
+  relativePath: string;
+  ok: boolean;
+  /** Why preflight failed (if ok=false) */
+  reason?: string;
+}
+
+/** Result of APPLY_SELECTED */
+export interface ApplyResult {
+  ok: boolean;
+  /** Applied edit IDs for successful files */
+  appliedEditIds?: string[];
+  /** Per-file preflight failures (if any) */
+  preflightFailures?: PreflightResult[];
+  error?: string;
+}
+
+/** IPC channels for V0.3 file editing */
+export const EDIT_IPC = {
+  /** Get full proposal by id */
+  PROPOSAL_GET: "proposal:get",
+  /** List proposals for a conversation */
+  PROPOSAL_LIST: "proposal:list",
+  /** Reject a proposal (or specific fileEditIds within it) */
+  PROPOSAL_REJECT: "proposal:reject",
+  /** Read the current content of a proposal target resource (for diff display) */
+  PROPOSAL_READ_TARGET: "proposal:readTarget",
+  /** Preflight check without writing */
+  PREFLIGHT_CHECK: "edit:preflightCheck",
+  /** Apply selected file edits */
+  APPLY_SELECTED: "edit:applySelected",
+  /** Undo an applied edit */
+  UNDO_APPLY: "edit:undoApply",
+  /** List applied edit history for a project */
+  EDIT_HISTORY_LIST: "edit:historyList",
+  /** Push from main when a proposal's status changes */
+  PROPOSAL_UPDATE: "proposal:update",
+} as const;
+
 /** Folder context preview result */
 export interface FolderContextPreview {
   ok: true;
