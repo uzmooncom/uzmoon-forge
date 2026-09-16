@@ -29,6 +29,59 @@ interface Services {
   database: true;
 }
 
+// ── Per-project file watchers ─────────────────────────────────────────────────
+// One watcher per project root. Debounced 1.5 s to coalesce rapid save events.
+// On any change: evict in-memory index and trigger async rebuild so the next
+// search_code or search_files call sees up-to-date paths.
+
+const projectWatchers = new Map<string, fs.FSWatcher>();
+const watcherDebounces = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Start (or restart) a watcher for the given project. Idempotent. */
+function ensureProjectWatcher(
+  projectId: string,
+  projectRoot: string
+): void {
+  if (projectWatchers.has(projectId)) return; // already watching
+
+  let watcher: fs.FSWatcher;
+  try {
+    watcher = fs.watch(
+      projectRoot,
+      { recursive: true, persistent: false },
+      () => {
+        // Debounce: wait 1.5s of quiet before rebuilding
+        const existing = watcherDebounces.get(projectId);
+        if (existing) clearTimeout(existing);
+        const timer = setTimeout(() => {
+          watcherDebounces.delete(projectId);
+          projectFiles.evictIndex(projectId);
+          projectFiles.buildIndex(projectId, projectRoot);
+        }, 1500);
+        watcherDebounces.set(projectId, timer);
+      }
+    );
+  } catch {
+    // fs.watch not supported on this platform/path — non-fatal
+    return;
+  }
+
+  watcher.on("error", () => {
+    // Watcher errored (e.g. project dir deleted) — clean up
+    stopProjectWatcher(projectId);
+  });
+
+  projectWatchers.set(projectId, watcher);
+}
+
+/** Stop and clean up a project watcher. */
+function stopProjectWatcher(projectId: string): void {
+  const timer = watcherDebounces.get(projectId);
+  if (timer) { clearTimeout(timer); watcherDebounces.delete(projectId); }
+  const watcher = projectWatchers.get(projectId);
+  if (watcher) { try { watcher.close(); } catch { /* best-effort */ } projectWatchers.delete(projectId); }
+}
+
 // ── Attachment constants ──────────────────────────────────────────────────
 
 const ALLOWED_MIME = new Set([
@@ -686,14 +739,16 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     }
   );
 
-  /** Trigger index build (non-blocking from renderer perspective). */
+  /** Trigger async index build + start file watcher for incremental updates. */
   ipcMain.handle(
     PROJECT_FILE_IPC.PROJECT_INDEX_BUILD,
     (_e: IpcMainInvokeEvent, projectId: string) => {
       const project = db.getProject(database, projectId);
       if (!project) return;
-      // Build is synchronous but fast enough for initial call
+      // Async non-blocking build (setImmediate-chunked in service.ts)
       projectFiles.buildIndex(projectId, project.workingDirectory);
+      // Start watcher so file creates/modifies/deletes trigger incremental rebuild
+      ensureProjectWatcher(projectId, project.workingDirectory);
     }
   );
 

@@ -20,7 +20,7 @@ import {
   isGitignored,
   isDirIgnored,
 } from "./eligibility.js";
-import { searchFiles, getIndexStatus, buildIndex } from "./service.js";
+import { getAllIndexedPaths, getIndexStatus, buildIndex } from "./service.js";
 
 // ── Result types ────────────────────────────────────────────────────────────
 
@@ -87,8 +87,6 @@ export function searchCode(
   }
 
   // Use indexed file list — never re-walk the filesystem for discovery
-  // searchFiles with an empty query is not useful; instead enumerate the index entries
-  // We use a broad search to get all indexed paths, then filter by content
   const allFiles = getIndexedPaths(projectId, projectRoot);
 
   const matches: CodeSearchMatch[] = [];
@@ -188,26 +186,19 @@ export function searchCode(
 
 /**
  * Get all indexed file paths for a project.
- * Uses the existing in-memory index from service.ts.
- * Falls back to a bounded filesystem walk if index is not yet ready.
+ * Uses getAllIndexedPaths() from service.ts — direct index access, no query tricks.
+ * Falls back to a bounded filesystem walk if the index is not yet available.
  */
 function getIndexedPaths(projectId: string, projectRoot: string): string[] {
   const status = getIndexStatus(projectId);
 
   if (status.state === "ready" || status.state === "indexing") {
-    // Use index: searchFiles with a very broad query won't work,
-    // so we use a workaround: search with "/" which matches all paths.
-    // The actual filtering is done per-file in searchCode.
-    // Better: directly use the index data via a path-only search.
-    // Since service.ts doesn't export the raw entries, we use a broad path query.
-    const results = searchFiles(projectId, projectRoot, "/", 50000);
-    const paths = results.map((r) => r.relativePath);
-    // searchFiles returns up to limit; for search_code we need all files.
-    // If the index has more files, do a second broader search.
-    return paths;
+    // Direct index access — returns all paths, no query matching
+    const paths = getAllIndexedPaths(projectId, projectRoot);
+    if (paths.length > 0) return paths;
   }
 
-  // Index not ready — do a bounded walk for search_code
+  // Index not yet populated — do a bounded walk for this search call
   return boundedWalk(projectRoot, projectRoot, 0, []);
 }
 

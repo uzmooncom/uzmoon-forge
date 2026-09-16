@@ -292,17 +292,91 @@ export function readSnapshot(snapshotPath: string): string | null {
 // ── File search index ───────────────────────────────────────────────────────
 
 const MAX_INDEX_FILES = 50_000;
+/** How many directories to process per setImmediate tick during async build */
+const DIRS_PER_TICK = 20;
 
-function buildIndexRecursive(
+// ── Index cache persistence ──────────────────────────────────────────────────
+
+interface IndexCacheFile {
+  version: 1;
+  projectRoot: string;
+  builtAt: number;
+  entries: IndexEntry[];
+}
+
+function indexCachePath(projectId: string): string {
+  const dataDir = db.getDataDir();
+  const cacheDir = path.join(dataDir, "index-cache");
+  if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+  // Use a sanitized projectId as filename
+  const safe = projectId.replace(/[^a-zA-Z0-9-]/g, "_");
+  return path.join(cacheDir, `${safe}.json`);
+}
+
+function saveIndexCache(projectId: string, idx: ProjectIndex): void {
+  try {
+    const cache: IndexCacheFile = {
+      version: 1,
+      projectRoot: idx.projectRoot,
+      builtAt: idx.builtAt,
+      entries: idx.entries,
+    };
+    fs.writeFileSync(indexCachePath(projectId), JSON.stringify(cache), "utf8");
+  } catch {
+    // Best-effort — cache write failure is non-fatal
+  }
+}
+
+/**
+ * Load cached index entries, validating each entry's mtime against disk.
+ * Entries whose mtime no longer matches are dropped (will be re-indexed).
+ * Returns null if cache is missing, corrupt, or stale (wrong projectRoot).
+ */
+function loadIndexCache(
+  projectId: string,
+  projectRoot: string
+): IndexEntry[] | null {
+  try {
+    const raw = fs.readFileSync(indexCachePath(projectId), "utf8");
+    const cache = JSON.parse(raw) as IndexCacheFile;
+    if (cache.version !== 1) return null;
+    if (path.resolve(cache.projectRoot) !== path.resolve(projectRoot)) return null;
+
+    // Validate mtime for each cached entry — drop stale/missing ones
+    const valid: IndexEntry[] = [];
+    for (const entry of cache.entries) {
+      try {
+        const absPath = path.join(projectRoot, entry.relativePath);
+        const stat = fs.statSync(absPath);
+        if (Math.abs(stat.mtimeMs - entry.modifiedAt) < 2) {
+          // mtime matches within 2ms tolerance (FAT32 has 2s granularity but we
+          // only target modern filesystems; use 2ms to catch float rounding)
+          valid.push(entry);
+        }
+        // else: file modified since cache — drop, will be re-indexed
+      } catch {
+        // File deleted since cache — drop
+      }
+    }
+    return valid;
+  } catch {
+    return null;
+  }
+}
+
+// ── Recursive index walk helpers ─────────────────────────────────────────────
+
+function collectDirFiles(
   root: string,
-  current: string,
+  dirPath: string,
   entries: IndexEntry[],
+  pendingDirs: string[],
   count: { n: number }
 ): void {
   if (count.n >= MAX_INDEX_FILES) return;
   let dirEntries: fs.Dirent[];
   try {
-    dirEntries = fs.readdirSync(current, { withFileTypes: true });
+    dirEntries = fs.readdirSync(dirPath, { withFileTypes: true });
   } catch {
     return;
   }
@@ -310,13 +384,13 @@ function buildIndexRecursive(
   for (const dirent of dirEntries) {
     if (count.n >= MAX_INDEX_FILES) break;
     const name = dirent.name;
-    const absPath = path.join(current, name);
+    const absPath = path.join(dirPath, name);
     const relPath = path.relative(root, absPath).replace(/\\/g, "/");
 
     if (dirent.isDirectory()) {
       if (isDirIgnored(name)) continue;
       if (isGitignored(root, relPath)) continue;
-      buildIndexRecursive(root, absPath, entries, count);
+      pendingDirs.push(absPath);
     } else if (dirent.isFile()) {
       if (isSensitive(name)) continue;
       if (isGitignored(root, relPath)) continue;
@@ -336,28 +410,66 @@ function buildIndexRecursive(
   }
 }
 
+/**
+ * Build the in-memory index asynchronously — yields every DIRS_PER_TICK
+ * directories so the Electron main thread is never blocked for more than
+ * a few milliseconds at a time.
+ *
+ * Uses the persistent cache for validation: entries whose mtime matches
+ * the cached value are reused without re-reading, making restarts fast.
+ *
+ * If the index is already being built (state === "indexing"), returns
+ * immediately — only one build per project runs at a time.
+ */
 export function buildIndex(projectId: string, projectRoot: string): void {
   const existing = indexes.get(projectId);
   if (existing?.state === "indexing") return;
 
+  // Seed with validated cache entries so searches can start immediately
+  const cachedEntries = loadIndexCache(projectId, projectRoot) ?? [];
+
   const idx: ProjectIndex = {
-    entries: [],
+    entries: [...cachedEntries],
     projectRoot,
     builtAt: 0,
-    state: "indexing",
+    // Mark ready immediately with cached data so code search can begin;
+    // we'll overwrite entries once the full async walk finishes
+    state: cachedEntries.length > 0 ? "ready" : "indexing",
   };
   indexes.set(projectId, idx);
 
-  // Run synchronously (blocking) for small projects; acceptable for initial build
-  try {
-    const count = { n: 0 };
-    buildIndexRecursive(projectRoot, projectRoot, idx.entries, count);
-    idx.state = "ready";
-    idx.builtAt = Date.now();
-  } catch (err) {
-    idx.state = "error";
-    idx.error = err instanceof Error ? err.message : "Unknown error";
+  // Async walk — yields to event loop every DIRS_PER_TICK directories
+  const freshEntries: IndexEntry[] = [];
+  const count = { n: 0 };
+  const pendingDirs: string[] = [projectRoot];
+
+  // Mark indexing for full rebuild pass
+  idx.state = "indexing";
+
+  function tick(): void {
+    // Process a batch of directories per tick
+    let processed = 0;
+    while (pendingDirs.length > 0 && processed < DIRS_PER_TICK) {
+      const dir = pendingDirs.shift()!;
+      collectDirFiles(projectRoot, dir, freshEntries, pendingDirs, count);
+      processed++;
+    }
+
+    if (pendingDirs.length === 0 || count.n >= MAX_INDEX_FILES) {
+      // Walk complete — commit fresh entries
+      idx.entries = freshEntries;
+      idx.state = "ready";
+      idx.builtAt = Date.now();
+      // Persist to disk for fast restart
+      saveIndexCache(projectId, idx);
+    } else {
+      // Yield to event loop, then continue
+      setImmediate(tick);
+    }
   }
+
+  // Kick off first tick on next event loop iteration
+  setImmediate(tick);
 }
 
 export function getIndexStatus(projectId: string): {
@@ -382,9 +494,29 @@ export function evictIndex(projectId: string): void {
 }
 
 /**
+ * Return all indexed relative paths for a project.
+ * Used by search-code.ts instead of the old searchFiles("/") hack.
+ * If the index is not yet built, triggers an async build and returns
+ * whatever is available so far (cached entries or empty).
+ */
+export function getAllIndexedPaths(
+  projectId: string,
+  projectRoot: string
+): string[] {
+  let idx = indexes.get(projectId);
+  if (!idx) {
+    // Trigger async build — will return cached entries immediately
+    buildIndex(projectId, projectRoot);
+    idx = indexes.get(projectId);
+  }
+  if (!idx || idx.entries.length === 0) return [];
+  return idx.entries.map((e) => e.relativePath);
+}
+
+/**
  * Search the in-memory index for files matching the query.
  * Query is matched against filename and relativePath (case-insensitive).
- * If the index is not yet built, triggers a build first.
+ * If the index is not yet built, triggers an async build first.
  */
 export function searchFiles(
   projectId: string,
@@ -393,11 +525,11 @@ export function searchFiles(
   limit = 50
 ): ProjectFileEntry[] {
   let idx = indexes.get(projectId);
-  if (!idx || idx.state === "idle") {
+  if (!idx) {
     buildIndex(projectId, projectRoot);
     idx = indexes.get(projectId);
   }
-  if (!idx || idx.state === "error" || idx.entries.length === 0) return [];
+  if (!idx || idx.entries.length === 0) return [];
 
   const q = query.toLowerCase().trim();
   if (!q) return [];
