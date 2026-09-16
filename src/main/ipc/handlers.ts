@@ -865,6 +865,7 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
         const appliedEditIds: string[] = [];
         const appliedEditsThisRun: import("../../shared/types.js").AppliedEdit[] = [];
         let firstError: string | null = null;
+        let rollbackFailures: string[] = [];
 
         for (const feId of selectedFileEditIds) {
           const fe = proposal.fileEdits.find((f) => f.id === feId);
@@ -893,6 +894,7 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
             fe.targetContentHash
           );
           if (!writeResult.ok) {
+            // Discard unused backup for this file
             try { if (fs.existsSync(backupResult.backupPath)) fs.unlinkSync(backupResult.backupPath); } catch { /* ignore */ }
             firstError = `Write failed for ${fe.relativePath}: ${writeResult.error}`;
             break;
@@ -915,13 +917,43 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
           appliedEditIds.push(appliedEditId);
         }
 
+        // If any write failed, attempt to rollback already-written files
+        if (firstError && appliedEditsThisRun.length > 0) {
+          rollbackFailures = [];
+          for (const ae of appliedEditsThisRun) {
+            const rbResult = editService.restoreFromBackup(
+              project.workingDirectory,
+              project.id,
+              ae.relativePath,
+              ae.backupResourcePath,
+              ae.backupContentHash,
+              ae.appliedContentHash
+            );
+            if (rbResult.ok) {
+              // Mark as rolled back — update undoneAt so it's not shown as undo-able
+              db.updateAppliedEdit(database, ae.id, { undoneAt: Date.now() });
+            } else {
+              rollbackFailures.push(ae.relativePath);
+            }
+          }
+        }
+
         // Update FileEdit statuses in DB
         const updatedFileEdits = proposal.fileEdits.map((fe) => {
+          if (firstError) {
+            // On failure, mark all selected as failed (rollback attempted)
+            if (selectedFileEditIds.includes(fe.id)) {
+              const rbFailed = rollbackFailures.includes(fe.relativePath);
+              const wasWritten = appliedEditsThisRun.some((ae) => ae.fileEditId === fe.id);
+              if (wasWritten && rbFailed) {
+                return { ...fe, status: "failed" as const, failureReason: `Write succeeded but rollback failed — file may be in inconsistent state`, updatedAt: Date.now() };
+              }
+              return { ...fe, status: "failed" as const, failureReason: firstError ?? "Apply failed", updatedAt: Date.now() };
+            }
+            return fe;
+          }
           if (appliedEditsThisRun.some((ae) => ae.fileEditId === fe.id)) {
             return { ...fe, status: "applied" as const, updatedAt: Date.now() };
-          }
-          if (firstError && selectedFileEditIds.includes(fe.id) && !appliedEditsThisRun.some((ae) => ae.fileEditId === fe.id)) {
-            return { ...fe, status: "failed" as const, failureReason: firstError, updatedAt: Date.now() };
           }
           return fe;
         });
@@ -933,7 +965,12 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
         });
         if (updatedProposal) mainSender.send(EDIT_IPC.PROPOSAL_UPDATE, updatedProposal);
 
-        if (firstError) return { ok: false, error: firstError, appliedEditIds };
+        if (firstError) {
+          const rbMsg = rollbackFailures.length > 0
+            ? ` (rollback failed for: ${rollbackFailures.join(", ")})`
+            : appliedEditsThisRun.length > 0 ? " (already-written files rolled back)" : "";
+          return { ok: false, error: firstError + rbMsg };
+        }
         return { ok: true, appliedEditIds };
       } finally {
         for (const key of lockKeys) applyLock.delete(key);
@@ -964,7 +1001,8 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
           project.id,
           appliedEdit.relativePath,
           appliedEdit.backupResourcePath,
-          appliedEdit.backupContentHash
+          appliedEdit.backupContentHash,
+          appliedEdit.appliedContentHash
         );
         if (!result.ok) return { ok: false, error: result.error };
 

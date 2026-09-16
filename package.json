@@ -20,6 +20,7 @@
     "electron:rebuild": "electron-rebuild --version $(node_modules/.bin/electron --version | sed s/v//) --module-dir node_modules/.pnpm/better-sqlite3@11.10.0/node_modules/better-sqlite3 2>/dev/null || true"
   },
   "dependencies": {
+    "diff": "^9.0.0",
     "electron-squirrel-startup": "^1.0.1",
     "highlight.js": "^11.12.0",
     "rehype-sanitize": "^6.0.0"

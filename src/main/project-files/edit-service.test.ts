@@ -403,7 +403,8 @@ describe("createBackupSnapshot / restoreFromBackup", () => {
       "proj-1",
       "target.ts",
       backupResult.backupPath,
-      backupResult.contentHash
+      backupResult.contentHash,
+      undefined // no stale-undo guard for this test (file was manually overwritten)
     );
     expect(restoreResult.ok).toBe(true);
     expect(fs.readFileSync(targetPath, "utf8")).toBe(originalContent);
@@ -415,7 +416,7 @@ describe("createBackupSnapshot / restoreFromBackup", () => {
     const backupResult = createBackupSnapshot("ae-2", targetPath);
     expect(backupResult.ok).toBe(true);
     if (!backupResult.ok) return;
-    const result = restoreFromBackup(tmpDir, "proj-1", "f.ts", backupResult.backupPath, "wrong-hash");
+    const result = restoreFromBackup(tmpDir, "proj-1", "f.ts", backupResult.backupPath, "wrong-hash", undefined);
     expect(result.ok).toBe(false);
   });
 });

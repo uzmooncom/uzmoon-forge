@@ -14,6 +14,7 @@
 import { randomUUID, createHash } from "crypto";
 import fs from "fs";
 import path from "path";
+import { diffLines } from "diff";
 import type {
   ContextRef,
   EditProposal,
@@ -468,8 +469,30 @@ export function restoreFromBackup(
   projectId: string,
   targetRelativePath: string,
   backupPath: string,
-  expectedBackupHash: string
-): { ok: true; restoredHash: string } | { ok: false; error: string } {
+  expectedBackupHash: string,
+  /**
+   * The SHA-256 hash of the content written by Apply.
+   * If provided, the current file on disk must still match this hash
+   * (i.e. nobody externally modified the file since Apply).
+   * Pass undefined only for legacy callers — stale-undo guard is skipped.
+   */
+  appliedContentHash: string | undefined
+): { ok: true; restoredHash: string } | { ok: false; error: string; stale?: true } {
+  // Stale-undo guard: verify current file still matches what was written at Apply time
+  if (appliedContentHash !== undefined) {
+    const currentResult = computeCurrentHash(projectRoot, targetRelativePath);
+    if (!currentResult.ok) {
+      return { ok: false, error: `Cannot read current file for undo: ${currentResult.error}` };
+    }
+    if (currentResult.hash !== appliedContentHash) {
+      return {
+        ok: false,
+        error: `Undo blocked: the file has been modified since the edit was applied. Re-add the file to context if you want to continue editing.`,
+        stale: true,
+      };
+    }
+  }
+
   const backupContent = readBackup(backupPath);
   if (backupContent === null) return { ok: false, error: "Backup file not found or outside backup directory" };
 
@@ -568,32 +591,20 @@ export interface DiffStats {
 
 /**
  * Compute line-level diff statistics between base and proposed content.
- * Simple LCS-free approach: split into lines, count additions/removals.
+ * Uses the `diff` library (Myers algorithm) for correctness.
+ * Handles CRLF, repeated lines, empty files, and final-newline differences.
  */
 export function computeDiffStats(baseContent: string, proposedContent: string): DiffStats {
-  const baseLines = new Set(baseContent.split("\n"));
-  const propLines = new Set(proposedContent.split("\n"));
-  const baseArr = baseContent.split("\n");
-  const propArr = proposedContent.split("\n");
-
-  const inBoth = new Set<string>();
-  for (const line of baseLines) {
-    if (propLines.has(line)) inBoth.add(line);
-  }
-
+  const changes = diffLines(baseContent, proposedContent, { newlineIsToken: false });
   let linesAdded = 0;
   let linesRemoved = 0;
   let linesUnchanged = 0;
-
-  // Count by membership (approximate — not a real diff, but good enough for stats)
-  for (const line of propArr) {
-    if (baseLines.has(line)) linesUnchanged++;
-    else linesAdded++;
+  for (const change of changes) {
+    const count = change.count ?? 0;
+    if (change.added) linesAdded += count;
+    else if (change.removed) linesRemoved += count;
+    else linesUnchanged += count;
   }
-  for (const line of baseArr) {
-    if (!propLines.has(line)) linesRemoved++;
-  }
-
   return { linesAdded, linesRemoved, linesUnchanged };
 }
 

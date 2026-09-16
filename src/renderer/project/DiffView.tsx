@@ -1,10 +1,14 @@
 /**
  * DiffView.tsx — side-by-side unified diff renderer for file edit proposals.
  * Renders a line-by-line diff between base content and proposed content.
+ *
+ * Uses the `diff` library (Myers algorithm) as the canonical diff engine.
+ * Handles CRLF, repeated lines, empty files, and final-newline differences correctly.
  */
 import React, { useMemo } from "react";
+import { diffLines } from "diff";
 
-// ── Simple line diff ────────────────────────────────────────────────────────
+// ── Line diff ───────────────────────────────────────────────────────────────
 
 type LineOp = "equal" | "add" | "remove";
 
@@ -16,47 +20,33 @@ interface DiffLine {
 }
 
 /**
- * Compute a simple patience-style line diff.
- * Not a full LCS — uses a greedy matching approach that handles
- * most real code changes well.
+ * Compute a line diff using the `diff` library (Myers algorithm).
+ * Correctly handles CRLF, repeated lines, empty files, and final-newline differences.
  */
 function computeLineDiff(base: string, proposed: string): DiffLine[] {
-  const baseLines = base.split("\n");
-  const propLines = proposed.split("\n");
-
-  // Build LCS table (standard DP)
-  const m = baseLines.length;
-  const n = propLines.length;
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-
-  for (let i = m - 1; i >= 0; i--) {
-    for (let j = n - 1; j >= 0; j--) {
-      if (baseLines[i] === propLines[j]) {
-        dp[i]![j] = (dp[i + 1]?.[j + 1] ?? 0) + 1;
-      } else {
-        dp[i]![j] = Math.max(dp[i + 1]?.[j] ?? 0, dp[i]?.[j + 1] ?? 0);
-      }
-    }
-  }
-
-  // Traceback
+  const changes = diffLines(base, proposed, { newlineIsToken: false });
   const result: DiffLine[] = [];
-  let i = 0;
-  let j = 0;
   let baseLineNo = 1;
   let propLineNo = 1;
 
-  while (i < m || j < n) {
-    if (i < m && j < n && baseLines[i] === propLines[j]) {
-      result.push({ op: "equal", text: baseLines[i]!, baseLineNo: baseLineNo++, propLineNo: propLineNo++ });
-      i++;
-      j++;
-    } else if (j < n && (i >= m || (dp[i]?.[j + 1] ?? 0) >= (dp[i + 1]?.[j] ?? 0))) {
-      result.push({ op: "add", text: propLines[j]!, propLineNo: propLineNo++ });
-      j++;
+  for (const change of changes) {
+    // Each change.value may span multiple lines
+    const rawLines = change.value.split("\n");
+    // diffLines includes a trailing empty string if value ends with "\n" — drop it
+    if (rawLines[rawLines.length - 1] === "") rawLines.pop();
+
+    if (change.added) {
+      for (const text of rawLines) {
+        result.push({ op: "add", text, propLineNo: propLineNo++ });
+      }
+    } else if (change.removed) {
+      for (const text of rawLines) {
+        result.push({ op: "remove", text, baseLineNo: baseLineNo++ });
+      }
     } else {
-      result.push({ op: "remove", text: baseLines[i]!, baseLineNo: baseLineNo++ });
-      i++;
+      for (const text of rawLines) {
+        result.push({ op: "equal", text, baseLineNo: baseLineNo++, propLineNo: propLineNo++ });
+      }
     }
   }
 
