@@ -82,11 +82,37 @@ export interface DiffReviewModalProps {
   onProposalUpdate?: (proposal: EditProposal) => void;
 }
 
+type FileEditReviewability = "loading" | "reviewable" | "review_error";
+
 interface FileEditDiffState {
   loading: boolean;
   proposedContent: string | null;
   baseContent: string | null;
   error: string | null;
+  /** Canonical reviewability determined by successful IPC load. */
+  reviewability: FileEditReviewability;
+}
+
+/**
+ * Returns true when the file's domain status AND its runtime reviewability
+ * both allow selection. This is the canonical reviewability/applyability gate.
+ *
+ * Domain status (canSelectEdit) checks persisted fields.
+ * Reviewability checks whether PROPOSAL_READ_TARGET actually succeeded at
+ * runtime — i.e. the base snapshot file is present and readable right now.
+ * A file may have status=ready+baseSnapshotId but the snapshot file could
+ * have been deleted since; in that case reviewability="review_error".
+ */
+function isEffectivelySelectable(
+  fe: FileEdit,
+  diffStates: Record<string, FileEditDiffState>
+): boolean {
+  if (!canSelectEdit(fe)) return false;
+  const ds = diffStates[fe.id];
+  // While loading we conservatively keep it selected (was pre-selected by domain gate).
+  // Once load completes the result is definitive.
+  if (!ds || ds.reviewability === "loading") return true;
+  return ds.reviewability === "reviewable";
 }
 
 export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffReviewModalProps) {
@@ -126,7 +152,13 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
 
     setDiffStates((prev) => ({
       ...prev,
-      [activeFileId]: { loading: true, proposedContent: null, baseContent: null, error: null },
+      [activeFileId]: {
+        loading: true,
+        proposedContent: null,
+        baseContent: null,
+        error: null,
+        reviewability: "loading",
+      },
     }));
 
     void (async (feCapture: FileEdit, capturedFileId: string) => {
@@ -134,6 +166,7 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
       // The handler reads the base from the captured snapshot (ContextRef).
       const result = await window.forgeApi.fileEditing.readProposalTarget(proposal.id, feCapture.id);
       if (!result.ok) {
+        // Mark review_error and immediately deselect this file.
         setDiffStates((prev) => ({
           ...prev,
           [capturedFileId]: {
@@ -141,8 +174,16 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
             proposedContent: null,
             baseContent: null,
             error: result.error,
+            reviewability: "review_error",
           },
         }));
+        // Deselect: user cannot apply a file they cannot review.
+        setSelectedIds((prev) => {
+          if (!prev.has(capturedFileId)) return prev;
+          const next = new Set(prev);
+          next.delete(capturedFileId);
+          return next;
+        });
         return;
       }
 
@@ -153,6 +194,7 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
           proposedContent: result.proposedContent,
           baseContent: result.baseContent,
           error: null,
+          reviewability: "reviewable",
         },
       }));
     })(fe, activeFileId);
@@ -160,7 +202,7 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
 
   const handleToggleSelect = useCallback((feId: string) => {
     const fe = (proposal.fileEdits as FileEdit[]).find((f: FileEdit) => f.id === feId);
-    if (!fe || !canSelectEdit(fe)) return;
+    if (!fe || !isEffectivelySelectable(fe, diffStates)) return;
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(feId)) next.delete(feId);
@@ -225,10 +267,13 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
 
   const activeFe = (proposal.fileEdits as FileEdit[]).find((f: FileEdit) => f.id === activeFileId);
   const diffState = activeFileId ? diffStates[activeFileId] : null;
-  const readyCount = (proposal.fileEdits as FileEdit[]).filter((f: FileEdit) => canSelectEdit(f)).length;
-  const selectedReadyCount = Array.from(selectedIds).filter((id) =>
-    (proposal.fileEdits as FileEdit[]).find((f: FileEdit) => f.id === id && canSelectEdit(f))
+  const readyCount = (proposal.fileEdits as FileEdit[]).filter(
+    (f: FileEdit) => isEffectivelySelectable(f, diffStates)
   ).length;
+  const selectedReadyCount = Array.from(selectedIds).filter((id) => {
+    const f = (proposal.fileEdits as FileEdit[]).find((fe: FileEdit) => fe.id === id);
+    return f && isEffectivelySelectable(f, diffStates);
+  }).length;
 
   return (
     <div
@@ -265,7 +310,7 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
             {(proposal.fileEdits as FileEdit[]).map((fe: FileEdit) => {
               const isActive = fe.id === activeFileId;
               const isSelected = selectedIds.has(fe.id);
-              const selectable = canSelectEdit(fe);
+              const selectable = isEffectivelySelectable(fe, diffStates);
               return (
                 <button
                   key={fe.id}

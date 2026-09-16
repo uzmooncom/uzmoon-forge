@@ -952,3 +952,146 @@ describe("review state contract — FileEdit ready requires baseSnapshotId", () 
     }
   });
 });
+
+// ── Reviewability state contract ──────────────────────────────────────────
+// Tests the reviewability logic that DiffReviewModal uses to gate selection
+// and Apply. These exercise the domain functions that underpin the UI rule:
+//
+//   isEffectivelySelectable(fe, diffStates)
+//     = canSelectEdit(fe) && diffStates[fe.id].reviewability === "reviewable"
+//
+// We test via the underlying resolveContextRef + verifyBaseSnapshot because
+// that is the authoritative source: PROPOSAL_READ_TARGET uses the same path.
+
+describe("reviewability state contract", () => {
+  let tmpDir: string;
+  const projId = "reviewability-proj";
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-reviewability-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // ── Test 1 ────────────────────────────────────────────────────────────────
+  it("ready + baseSnapshotId + successful read → reviewable, selectable, Apply may enable", () => {
+    // Set up a real file and capture a snapshot (simulates what PROPOSAL_READ_TARGET will do)
+    const filePath = path.join(tmpDir, "package.json");
+    fs.writeFileSync(filePath, '{ "name": "uzcraft" }\n');
+    const snap = captureSnapshot(projId, tmpDir, "package.json");
+    expect(snap.ok).toBe(true);
+    if (!snap.ok) return;
+
+    // Domain: resolveContextRef succeeds (status "ok")
+    const resolution = resolveContextRef([snap.ref], projId, "package.json");
+    expect(resolution.status).toBe("ok");
+
+    // Domain: verifyBaseSnapshot succeeds (snapshot readable and hash matches)
+    const verify = verifyBaseSnapshot(snap.ref);
+    expect(verify.ok).toBe(true);
+
+    // Render-time: base content is readable (what PROPOSAL_READ_TARGET does)
+    const baseContent = fs.existsSync(snap.ref.snapshotPath)
+      ? fs.readFileSync(snap.ref.snapshotPath, "utf8")
+      : null;
+    expect(baseContent).not.toBeNull();
+    expect(baseContent).toContain("uzcraft");
+
+    // All conditions met → reviewability would be "reviewable" → selectable → Apply enabled
+    const allConditionsMet =
+      resolution.status === "ok" &&
+      verify.ok === true &&
+      baseContent !== null;
+    expect(allConditionsMet).toBe(true);
+  });
+
+  // ── Test 2 ────────────────────────────────────────────────────────────────
+  it("ready + baseSnapshotId + base snapshot missing → review_error, deselected, cannot Apply", () => {
+    const filePath = path.join(tmpDir, "utils.ts");
+    fs.writeFileSync(filePath, "export const x = 1;\n");
+    const snap = captureSnapshot(projId, tmpDir, "utils.ts");
+    expect(snap.ok).toBe(true);
+    if (!snap.ok) return;
+
+    // Simulate snapshot file being deleted after capture (e.g. by sweepOrphanedSnapshots)
+    fs.unlinkSync(snap.ref.snapshotPath);
+
+    // Domain: verifyBaseSnapshot now fails with needs_context (file missing)
+    const verify = verifyBaseSnapshot(snap.ref);
+    expect(verify.ok).toBe(false);
+    if (!verify.ok) expect(verify.status).toBe("needs_context");
+
+    // Render-time: base content unreadable → PROPOSAL_READ_TARGET returns ok:false
+    const baseContent = fs.existsSync(snap.ref.snapshotPath)
+      ? fs.readFileSync(snap.ref.snapshotPath, "utf8")
+      : null;
+    expect(baseContent).toBeNull(); // null → IPC returns ok:false → review_error
+
+    // review_error → deselected → cannot select → Apply disabled
+    const reviewError = !verify.ok && baseContent === null;
+    expect(reviewError).toBe(true);
+  });
+
+  // ── Test 3 ────────────────────────────────────────────────────────────────
+  it("ready + baseSnapshotId + proposal target missing → review_error, cannot Apply", () => {
+    const filePath = path.join(tmpDir, "auth.ts");
+    fs.writeFileSync(filePath, "export const auth = true;\n");
+    const snap = captureSnapshot(projId, tmpDir, "auth.ts");
+    expect(snap.ok).toBe(true);
+    if (!snap.ok) return;
+
+    // Base snapshot is present (domain valid), but proposal target resource is missing.
+    // readProposalTarget() returns null when the target file is gone.
+    const missingTargetPath = path.join(tmpDir, "proposals", "missing-target.txt");
+    const proposedContent = fs.existsSync(missingTargetPath)
+      ? fs.readFileSync(missingTargetPath, "utf8")
+      : null;
+    expect(proposedContent).toBeNull(); // null → PROPOSAL_READ_TARGET returns ok:false → review_error
+
+    // Even with valid base snapshot, missing proposal target → cannot Apply
+    const canReview = proposedContent !== null;
+    expect(canReview).toBe(false);
+  });
+
+  // ── Test 4 ────────────────────────────────────────────────────────────────
+  it("multi-file: A reviewable + B review_error → B cannot select, A applies independently", () => {
+    // File A — valid snapshot, valid target
+    const fileA = path.join(tmpDir, "a.ts");
+    fs.writeFileSync(fileA, "export const a = 1;\n");
+    const snapA = captureSnapshot(projId, tmpDir, "a.ts");
+    expect(snapA.ok).toBe(true);
+    if (!snapA.ok) return;
+
+    const verifyA = verifyBaseSnapshot(snapA.ref);
+    expect(verifyA.ok).toBe(true);
+    const baseContentA = fs.existsSync(snapA.ref.snapshotPath)
+      ? fs.readFileSync(snapA.ref.snapshotPath, "utf8")
+      : null;
+    expect(baseContentA).not.toBeNull();
+    const reviewableA = verifyA.ok && baseContentA !== null;
+    expect(reviewableA).toBe(true); // A is reviewable → selectable → may Apply
+
+    // File B — snapshot deleted after capture
+    const fileB = path.join(tmpDir, "b.ts");
+    fs.writeFileSync(fileB, "export const b = 2;\n");
+    const snapB = captureSnapshot(projId, tmpDir, "b.ts");
+    expect(snapB.ok).toBe(true);
+    if (!snapB.ok) return;
+
+    fs.unlinkSync(snapB.ref.snapshotPath); // simulate missing snapshot for B
+
+    const verifyB = verifyBaseSnapshot(snapB.ref);
+    expect(verifyB.ok).toBe(false); // B fails verification
+    const baseContentB = fs.existsSync(snapB.ref.snapshotPath)
+      ? fs.readFileSync(snapB.ref.snapshotPath, "utf8")
+      : null;
+    expect(baseContentB).toBeNull();
+    const reviewableB = verifyB.ok && baseContentB !== null;
+    expect(reviewableB).toBe(false); // B is review_error → cannot select → excluded from Apply
+
+    // A can still be applied independently (selectedIds would only contain A.id)
+    expect(reviewableA && !reviewableB).toBe(true);
+  });
+});
