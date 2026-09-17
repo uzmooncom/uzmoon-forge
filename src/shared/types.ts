@@ -690,6 +690,8 @@ export interface RequestContextLedger {
   manualRefIds: string[];
   /** Files the agent autonomously read */
   agentReadRefs: AgentReadRef[];
+  /** Commands the agent ran via run_command tool */
+  commandEvidenceRefs: CommandEvidenceRef[];
   /** Ordered log of all tool invocations */
   toolActivity: ToolActivityEntry[];
   createdAt: number;
@@ -817,6 +819,20 @@ export type ForgeFailureCode =
   | "DUPLICATE_FINAL_MESSAGE"
   | "STALE_BASE_WRITE"
   | "RESOURCE_GC_VIOLATION"
+  // ── Command Execution failure codes ───────────────────────────────────
+  | "COMMAND_CWD_ESCAPE"
+  | "COMMAND_SPAWN_FAILED"
+  | "COMMAND_TIMEOUT"
+  | "COMMAND_POLICY_BLOCK"
+  | "COMMAND_DUPLICATE_SPAWN"
+  | "COMMAND_INVALID_TRUST"
+  | "COMMAND_SECRET_ENV_LEAK"
+  | "COMMAND_OUTPUT_OVERFLOW"
+  | "COMMAND_INVALID_STATE_TRANSITION"
+  | "COMMAND_PROCESS_ORPHAN"
+  | "COMMAND_BUDGET_EXCEEDED"
+  | "COMMAND_APPROVAL_BYPASS"
+  | "COMMAND_SOURCE_WRITE_BYPASS"
   | "UNKNOWN";
 
 /** Severity levels for invariants and incidents */
@@ -836,7 +852,8 @@ export type IncidentCategory =
   | "PROVIDER"
   | "INDEXING"
   | "IPC_ROUTING"
-  | "SECURITY_INVARIANT";
+  | "SECURITY_INVARIANT"
+  | "COMMAND_EXECUTION";
 
 /** A canonical incident record — stored locally, never sent without opt-in */
 export interface ForgeIncident {
@@ -892,7 +909,19 @@ export interface TraceEvent {
     | "RUN_COMPLETED"
     | "RUN_FAILED"
     | "RUN_CANCELLED"
-    | "INVARIANT_VIOLATION";
+    | "INVARIANT_VIOLATION"
+    // ── Command execution trace events ────────────────────────────────
+    | "COMMAND_PROPOSED"
+    | "COMMAND_POLICY_EVALUATED"
+    | "COMMAND_APPROVED"
+    | "COMMAND_REJECTED"
+    | "COMMAND_SPAWNED"
+    | "COMMAND_OUTPUT_RECEIVED"
+    | "COMMAND_COMPLETED"
+    | "COMMAND_CANCELLED"
+    | "COMMAND_TIMED_OUT"
+    | "COMMAND_TRUST_GRANTED"
+    | "COMMAND_TRUST_INVALIDATED";
   /** Structured metadata — no secrets, no raw content, no absolute paths */
   meta: Record<string, unknown>;
   /** Optional tool call ID for tool events */
@@ -949,6 +978,272 @@ export interface AppSettings {
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   incidentSharingEnabled: false,
 };
+
+// ── Safe Terminal / Command Execution (V1) ──────────────────────────────
+
+/**
+ * Source of a command request.
+ * - "user" — typed directly by the user in the terminal panel
+ * - "agent" — requested by the Agent via run_command tool
+ */
+export type CommandSource = "user" | "agent";
+
+/**
+ * Risk classification assigned by deterministic CommandPolicy.
+ * Never assigned by LLM. AI cost = 0.
+ */
+export type CommandRiskClass =
+  | "verification"       // safe verification (typecheck, test, lint, build)
+  | "read_only"          // reading without side effects
+  | "project_script"     // package.json scripts (pnpm run X)
+  | "mutation"           // writes/deletes files but not source-write bypass
+  | "network"            // curl, wget, fetch-like
+  | "remote_execution"   // npx, pnpm dlx, yarn dlx, bunx — arbitrary remote code
+  | "package_install"    // pnpm add, npm install, pip install
+  | "shell_interpreter"  // bash -c, sh, node -e, python -c — escape classes
+  | "source_write_bypass"// sed -i, awk -i, perl -i — direct source mutation
+  | "git"                // any git subcommand (blocked in V1)
+  | "destructive"        // rm -rf, format, wipe-class
+  | "unknown";           // unrecognized — ASK
+
+/**
+ * Policy decision with full context for UI rendering and reliability audit.
+ * Deterministic: same (projectId, spec, trustState) → same decision. No LLM.
+ */
+export interface CommandPolicyDecision {
+  decision: "allow" | "ask" | "block";
+  riskClass: CommandRiskClass;
+  /** Typed reason code for reliability fingerprinting and UI display */
+  reasonCode:
+    | "TRUSTED_EXACT_MATCH"
+    | "TRUSTED_SCRIPT_HASH_MATCH"
+    | "TRUSTED_SCRIPT_HASH_CHANGED"
+    | "BLOCKED_SHELL_INTERPRETER"
+    | "BLOCKED_SOURCE_WRITE_BYPASS"
+    | "BLOCKED_GIT"
+    | "BLOCKED_REMOTE_EXECUTION"
+    | "BLOCKED_DESTRUCTIVE"
+    | "BLOCKED_UNKNOWN_EXECUTABLE"
+    | "ASK_PACKAGE_INSTALL"
+    | "ASK_NETWORK"
+    | "ASK_MUTATION"
+    | "ASK_PROJECT_SCRIPT"
+    | "ASK_VERIFICATION"
+    | "ASK_READ_ONLY"
+    | "ASK_UNKNOWN";
+  /** If a trust rule matched, its ID */
+  trustRuleId?: string;
+}
+
+/**
+ * Structured command specification — what actually gets executed.
+ * argv[] is used directly. shell:false always. No interpolation.
+ */
+export interface CommandSpec {
+  /** Executable name or path (never a shell) */
+  executable: string;
+  /** Ordered argument list — no shell operators */
+  args: string[];
+  /** Relative path within project root for cwd. "" or "." = project root */
+  cwdRelative: string;
+  /** Optional human-readable purpose from Agent. Never used for security decisions. */
+  purpose?: string;
+  /** Timeout in milliseconds (bounded by COMMAND_LIMITS.MAX_TIMEOUT_MS) */
+  timeoutMs?: number;
+}
+
+/**
+ * Authorization state of a CommandExecution.
+ */
+export type CommandAuthorizationState =
+  | "pending"          // not yet decided
+  | "approved_once"    // user approved for this run only
+  | "trusted"          // matched an exact trust rule
+  | "rejected"         // user or policy rejected
+  | "blocked_by_policy"; // deterministic policy block
+
+/**
+ * Lifecycle state of a CommandExecution.
+ * State machine:
+ *   proposed → awaiting_approval → queued → running → succeeded/failed/timed_out
+ *                                │
+ *                                └→ rejected (user/policy)
+ *   Any active state → cancelled (user Stop or Agent cancel)
+ *   On main-process restart: running/queued → cancelled (startup reconciliation)
+ */
+export type CommandState =
+  | "proposed"          // created, policy evaluating or trust check pending
+  | "awaiting_approval" // policy=ask, waiting for user decision
+  | "queued"            // approved, waiting for concurrency slot
+  | "running"           // process spawned
+  | "succeeded"         // process exited 0
+  | "failed"            // process exited non-zero or spawn error
+  | "cancelled"         // cancelled by user, Agent stop, or app shutdown
+  | "timed_out"         // exceeded timeoutMs
+  | "blocked";          // deterministic policy block (never queued)
+
+/** Set of terminal CommandState values */
+export const COMMAND_TERMINAL_STATES = new Set<CommandState>([
+  "succeeded", "failed", "cancelled", "timed_out", "blocked",
+]);
+
+/**
+ * Metadata about captured command output.
+ */
+export interface CommandOutputMetadata {
+  totalBytesReceived: number;
+  /** true if output exceeded MAX_OUTPUT_BYTES and was truncated */
+  truncated: boolean;
+  stdoutBytes: number;
+  stderrBytes: number;
+  /** Number of output chunks emitted via IPC */
+  chunkCount: number;
+}
+
+/**
+ * A trust rule for an exact command (or project script + content hash).
+ * "Always allow this exact command" creates one of these.
+ */
+export interface CommandTrustRule {
+  id: string;
+  projectId: string;
+  /** Normalized spec identity: `executable ++ " " ++ args.join(" ") ++ " (cwd=" ++ cwdRelative ++ ")"` */
+  normalizedSpec: string;
+  /** SHA-256 hex of the package.json script body at trust time (for script commands) */
+  scriptContentHash?: string;
+  /** The raw script body captured at trust time for display */
+  scriptBodySnapshot?: string;
+  createdAt: number;
+  lastUsedAt?: number;
+  /** How many times this rule has matched and auto-approved */
+  useCount: number;
+}
+
+/**
+ * Evidence reference stored in RequestContextLedger for commands run during an AgentRun.
+ * Process handles are never persisted — only serializable evidence.
+ */
+export interface CommandEvidenceRef {
+  commandId: string;
+  executable: string;
+  args: string[];
+  cwdRelative: string;
+  exitCode: number | null;
+  state: CommandState;
+  /** SHA-256 hex of the sanitized output used as model evidence */
+  outputHash?: string;
+  /** Bounded sanitized output visible to the model */
+  modelOutput: string;
+  /** Human summary e.g. "pnpm test — 3 failures" */
+  outputSummary: string;
+  durationMs?: number;
+  executedAt: number;
+}
+
+/**
+ * Full canonical command execution domain record.
+ * Persisted to DB (serializable only — no process handles).
+ */
+export interface CommandExecution {
+  id: string;
+  projectId: string;
+  /** Set when command originates from an AgentRun */
+  conversationId?: string;
+  requestId?: string;
+  /** The QueueItem.id that triggered this (for agent commands) */
+  queueItemId?: string;
+  source: CommandSource;
+  spec: CommandSpec;
+  /** Deterministic display string — what user sees in UI and approval card */
+  displayCommand: string;
+  policyDecision: CommandPolicyDecision;
+  authorizationState: CommandAuthorizationState;
+  state: CommandState;
+  /** The absolute resolved cwd used for spawn (never sent to renderer) */
+  // Not persisted in DB — re-resolved at spawn time
+  // resolvedCwd: string;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
+  /** Process exit code (null if cancelled/timed-out before exit) */
+  exitCode?: number | null;
+  /** Signal that terminated process (e.g. "SIGTERM") */
+  signal?: string;
+  outputMetadata?: CommandOutputMetadata;
+  /** Failure code for reliability/incident pipeline */
+  failureCode?: ForgeFailureCode;
+}
+
+/** Bounded output page returned for UI rendering or model consumption */
+export interface CommandOutputPage {
+  commandId: string;
+  /** ANSI-stripped safe text */
+  text: string;
+  truncated: boolean;
+  totalBytes: number;
+}
+
+/**
+ * Centralized command limits — no magic numbers in implementation code.
+ */
+export const COMMAND_LIMITS = {
+  /** Max args per command */
+  MAX_ARGS: 64,
+  /** Max length of a single argument */
+  MAX_ARG_LENGTH: 4096,
+  /** Max length of cwdRelative */
+  MAX_CWD_LENGTH: 1024,
+  /** Max length of purpose string */
+  MAX_PURPOSE_LENGTH: 512,
+  /** Max commands an Agent may request per AgentRun */
+  MAX_COMMANDS_PER_AGENT_RUN: 10,
+  /** Default command timeout in ms */
+  DEFAULT_TIMEOUT_MS: 120_000,
+  /** Maximum command timeout in ms (2 hours) */
+  MAX_TIMEOUT_MS: 7_200_000,
+  /** Minimum command timeout in ms */
+  MIN_TIMEOUT_MS: 1_000,
+  /** Max raw output bytes accumulated in memory per command */
+  MAX_OUTPUT_BYTES: 512 * 1024,
+  /** Max sanitized output bytes sent to model as evidence */
+  MAX_MODEL_OUTPUT_BYTES: 8 * 1024,
+  /** Head bytes retained when output is truncated (2KB) */
+  OUTPUT_HEAD_BYTES: 2 * 1024,
+  /** Tail bytes retained when output is truncated (8KB) */
+  OUTPUT_TAIL_BYTES: 8 * 1024,
+  /** Max history records per project */
+  MAX_HISTORY_PER_PROJECT: 500,
+  /** Max concurrent running commands per project */
+  MAX_CONCURRENT_PER_PROJECT: 3,
+  /** Output IPC batch interval in ms */
+  OUTPUT_BATCH_INTERVAL_MS: 100,
+  /** Output IPC batch size trigger in bytes */
+  OUTPUT_BATCH_SIZE_BYTES: 4096,
+  /** Max rows returned by commands:list */
+  MAX_LIST_RESULTS: 100,
+  /** Max bytes per paged output read */
+  OUTPUT_PAGE_BYTES: 32 * 1024,
+} as const;
+
+/** IPC channels for Safe Terminal V1 */
+export const COMMAND_IPC = {
+  // Invoked by renderer → main
+  LIST:           "commands:list",
+  GET:            "commands:get",
+  RUN_USER:       "commands:runUser",
+  APPROVE:        "commands:approve",
+  REJECT:         "commands:reject",
+  CANCEL:         "commands:cancel",
+  READ_OUTPUT:    "commands:readOutput",
+  LIST_TRUST:     "commands:listTrust",
+  REVOKE_TRUST:   "commands:revokeTrust",
+  RUNTIME_STATE:  "commands:runtimeState",
+  // Pushed from main → renderer
+  STATE_CHANGE:   "commands:stateChange",
+  OUTPUT_CHUNK:   "commands:outputChunk",
+  COMPLETE:       "commands:complete",
+} as const;
 
 /** V0.9 IPC channels for settings */
 export const SETTINGS_IPC = {

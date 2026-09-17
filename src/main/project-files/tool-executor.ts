@@ -17,7 +17,9 @@ import {
   type SearchCodeArgs,
   type ReadFileArgs,
   type ReadFileRangeArgs,
+  type RunCommandArgs,
 } from "../agent-client/tool-types.js";
+import type { CommandEvidenceRef } from "../../shared/types.js";
 import * as service from "./service.js";
 import { searchCode } from "./search-code.js";
 
@@ -36,6 +38,8 @@ export interface ToolExecutionResult {
   result: ForgeToolResult;
   /** Populated when read_file succeeds — to be appended to ledger */
   agentReadRef?: AgentReadRef;
+  /** Populated when run_command succeeds — to be appended to ledger */
+  commandEvidenceRef?: CommandEvidenceRef;
   /** Milliseconds elapsed executing the tool */
   durationMs: number;
 }
@@ -92,6 +96,9 @@ export async function executeProjectTool(
       break;
     case "read_file_range":
       result = await handleReadFileRange(call, validation.args as ReadFileRangeArgs, ctx);
+      break;
+    case "run_command":
+      result = await handleRunCommand(call, validation.args as RunCommandArgs, ctx);
       break;
   }
 
@@ -491,6 +498,160 @@ function sanitizeError(error: string): string {
   return error.replace(/\/[^\s"']+/g, "<path>").slice(0, 200);
 }
 
+
+// ── run_command handler ─────────────────────────────────────────────────────
+
+async function handleRunCommand(
+  call: ForgeToolCall,
+  args: RunCommandArgs,
+  ctx: ToolExecutionContext
+): Promise<Omit<ToolExecutionResult, "durationMs">> {
+  // Lazy import to avoid circular dependency
+  const { propose } = await import("../commands/command-manager.js");
+  const { COMMAND_TERMINAL_STATES } = await import("../../shared/types.js");
+  const { buildEvidenceRef } = await import("../commands/command-manager.js");
+
+  let record;
+  try {
+    record = propose({
+      projectId: ctx.projectId,
+      projectRoot: ctx.projectRoot,
+      spec: {
+        executable: args.executable,
+        args: args.args,
+        cwdRelative: args.cwdRelative,
+        ...(args.purpose !== undefined && { purpose: args.purpose }),
+        ...(args.timeoutMs !== undefined && { timeoutMs: args.timeoutMs }),
+      },
+      source: "agent",
+      conversationId: ctx.conversationId,
+      requestId: ctx.requestId,
+    });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return {
+      result: {
+        callId: call.callId,
+        toolName: call.name,
+        ok: false,
+        errorCode: "COMMAND_POLICY_BLOCK",
+        errorMessage: `Command blocked by policy: ${message.slice(0, 120)}`,
+      },
+    };
+  }
+
+  // Blocked by policy immediately
+  if (record.state === "blocked") {
+    return {
+      result: {
+        callId: call.callId,
+        toolName: call.name,
+        ok: false,
+        errorCode: "COMMAND_POLICY_BLOCK",
+        errorMessage: `Command blocked by policy: ${record.displayCommand}`,
+      },
+    };
+  }
+
+  // Awaiting user approval — return immediately with pending status
+  if (record.state === "awaiting_approval") {
+    return {
+      result: {
+        callId: call.callId,
+        toolName: call.name,
+        ok: true,
+        data: {
+          commandId: record.id,
+          status: "awaiting_approval",
+          displayCommand: record.displayCommand,
+          message: "Command is awaiting user approval. Re-call with the same commandId once approved, or wait for approval.",
+        },
+      },
+    };
+  }
+
+  // Auto-approved (trusted/approved_once) — wait for completion
+  const MAX_WAIT_MS = (args.timeoutMs ?? 60_000) + 5_000;
+  const POLL_INTERVAL_MS = 200;
+  const { getCommand } = await import("../commands/command-manager.js");
+
+  const deadline = Date.now() + MAX_WAIT_MS;
+  let finalRecord = record;
+
+  while (!COMMAND_TERMINAL_STATES.has(finalRecord.state)) {
+    if (Date.now() >= deadline) break;
+    await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL_MS));
+    const latest = getCommand(record.id);
+    if (latest) finalRecord = latest;
+  }
+
+  if (!COMMAND_TERMINAL_STATES.has(finalRecord.state)) {
+    return {
+      result: {
+        callId: call.callId,
+        toolName: call.name,
+        ok: false,
+        errorCode: "COMMAND_TIMEOUT",
+        errorMessage: `Command timed out after ${MAX_WAIT_MS}ms: ${finalRecord.displayCommand}`,
+      },
+    };
+  }
+
+  const evidenceRef = buildEvidenceRef(record.id);
+
+  if (finalRecord.state === "cancelled") {
+    return {
+      result: {
+        callId: call.callId,
+        toolName: call.name,
+        ok: false,
+        errorCode: "COMMAND_CANCELLED",
+        errorMessage: `Command was cancelled: ${finalRecord.displayCommand}`,
+      },
+      ...(evidenceRef !== null && { commandEvidenceRef: evidenceRef }),
+    };
+  }
+
+  if (finalRecord.state !== "succeeded") {
+    const exitStr = finalRecord.exitCode !== undefined ? ` (exit ${finalRecord.exitCode})` : "";
+    return {
+      result: {
+        callId: call.callId,
+        toolName: call.name,
+        ok: false,
+        errorCode: "COMMAND_FAILED",
+        errorMessage: `Command failed${exitStr}: ${finalRecord.displayCommand}`,
+        data: evidenceRef ? {
+          commandId: record.id,
+          exitCode: finalRecord.exitCode,
+          outputSummary: evidenceRef.outputSummary,
+          modelOutput: evidenceRef.modelOutput,
+        } : undefined,
+      },
+      ...(evidenceRef !== null && { commandEvidenceRef: evidenceRef }),
+    };
+  }
+
+  return {
+    result: {
+      callId: call.callId,
+      toolName: call.name,
+      ok: true,
+      data: evidenceRef ? {
+        commandId: record.id,
+        exitCode: finalRecord.exitCode ?? 0,
+        durationMs: finalRecord.durationMs,
+        outputSummary: evidenceRef.outputSummary,
+        modelOutput: evidenceRef.modelOutput,
+      } : {
+        commandId: record.id,
+        exitCode: finalRecord.exitCode ?? 0,
+      },
+    },
+    ...(evidenceRef !== null && { commandEvidenceRef: evidenceRef }),
+  };
+}
+
 /**
  * Generate a stable tool activity result summary string.
  */
@@ -522,6 +683,11 @@ export function buildResultSummary(toolName: string, result: ForgeToolResult): s
       const start = data["startLine"] as number;
       const end = data["endLine"] as number;
       return `lines ${start}–${end}`;
+    }
+    case "run_command": {
+      const exitCode = data["exitCode"] as number | undefined;
+      const exitStr = exitCode !== undefined ? ` exit ${exitCode}` : "";
+      return `${exitStr}`;
     }
     default:
       return "ok";

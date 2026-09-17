@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -32,6 +32,9 @@ import type {
   ForgeToolResult,
   ConvRuntimeState,
   ForgeIncident,
+  CommandExecution,
+  CommandTrustRule,
+  CommandOutputPage,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -431,6 +434,73 @@ const forgeApi = {
       ipcRenderer.invoke(SETTINGS_IPC.GET),
     setSettings: (patch: Partial<import("../shared/types.js").AppSettings>): Promise<import("../shared/types.js").AppSettings> =>
       ipcRenderer.invoke(SETTINGS_IPC.SET, patch),
+  },
+
+  // ── Safe Terminal V1 — Commands ─────────────────────────────────────────
+  commands: {
+    /** List commands, optionally filtered by project and/or conversation */
+    list: (projectId?: string, conversationId?: string): Promise<CommandExecution[]> =>
+      ipcRenderer.invoke(COMMAND_IPC.LIST, projectId, conversationId),
+
+    /** Get a single command by ID */
+    get: (commandId: string): Promise<CommandExecution | null> =>
+      ipcRenderer.invoke(COMMAND_IPC.GET, commandId),
+
+    /** User-initiated command run (project mode only) */
+    runUser: (opts: {
+      projectId: string;
+      projectRoot: string;
+      executable: string;
+      args: string[];
+      cwdRelative: string;
+      conversationId?: string;
+    }): Promise<CommandExecution> =>
+      ipcRenderer.invoke(COMMAND_IPC.RUN_USER, opts),
+
+    /** Approve a command awaiting user decision */
+    approve: (commandId: string, mode: "once" | "trust"): Promise<CommandExecution | null> =>
+      ipcRenderer.invoke(COMMAND_IPC.APPROVE, commandId, mode),
+
+    /** Reject a command awaiting user decision */
+    reject: (commandId: string): Promise<CommandExecution | null> =>
+      ipcRenderer.invoke(COMMAND_IPC.REJECT, commandId),
+
+    /** Cancel an active command */
+    cancel: (commandId: string): Promise<CommandExecution | null> =>
+      ipcRenderer.invoke(COMMAND_IPC.CANCEL, commandId),
+
+    /** Read paged output for a command */
+    readOutput: (commandId: string, offsetBytes?: number, limitBytes?: number): Promise<CommandOutputPage> =>
+      ipcRenderer.invoke(COMMAND_IPC.READ_OUTPUT, commandId, offsetBytes, limitBytes),
+
+    /** List trust rules for a project */
+    listTrust: (projectId: string): Promise<CommandTrustRule[]> =>
+      ipcRenderer.invoke(COMMAND_IPC.LIST_TRUST, projectId),
+
+    /** Revoke a trust rule */
+    revokeTrust: (ruleId: string): Promise<void> =>
+      ipcRenderer.invoke(COMMAND_IPC.REVOKE_TRUST, ruleId),
+
+    /** Subscribe to command state changes (all commands, all projects) */
+    onStateChange: (cb: (cmd: CommandExecution) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, cmd: CommandExecution) => cb(cmd);
+      ipcRenderer.on(COMMAND_IPC.STATE_CHANGE, listener);
+      return () => ipcRenderer.removeListener(COMMAND_IPC.STATE_CHANGE, listener);
+    },
+
+    /** Subscribe to incremental output chunks */
+    onOutputChunk: (cb: (payload: { commandId: string; kind: "stdout" | "stderr"; text: string }) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { commandId: string; kind: "stdout" | "stderr"; text: string }) => cb(payload);
+      ipcRenderer.on(COMMAND_IPC.OUTPUT_CHUNK, listener);
+      return () => ipcRenderer.removeListener(COMMAND_IPC.OUTPUT_CHUNK, listener);
+    },
+
+    /** Subscribe to command completion (final state) */
+    onComplete: (cb: (payload: { commandId: string; record: CommandExecution }) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { commandId: string; record: CommandExecution }) => cb(payload);
+      ipcRenderer.on(COMMAND_IPC.COMPLETE, listener);
+      return () => ipcRenderer.removeListener(COMMAND_IPC.COMPLETE, listener);
+    },
   },
 
   // ── Reliability (V0.9) ────────────────────────────────────────────────────

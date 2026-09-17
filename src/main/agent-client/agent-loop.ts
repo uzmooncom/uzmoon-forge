@@ -30,6 +30,7 @@ import type {
   ForgeToolCall,
   ForgeToolResult,
   AgentReadRef,
+  CommandEvidenceRef,
   ToolActivityEntry,
   NormalizedAgentDecision,
   AgentRun,
@@ -113,6 +114,8 @@ export interface AgentLoopResult {
   agentReadRefs: AgentReadRef[];
   /** All tool invocations in order */
   toolActivity: ToolActivityEntry[];
+  /** Commands run via run_command tool */
+  commandEvidenceRefs?: CommandEvidenceRef[];
   /** Final AgentRun state record */
   agentRun: AgentRun;
 }
@@ -473,6 +476,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
   // Accumulated results
   const agentReadRefs: AgentReadRef[] = [];
+  const commandEvidenceRefs: CommandEvidenceRef[] = [];
   const toolActivity: ToolActivityEntry[] = [];
 
   // Working message history (extended with assistant/tool turns)
@@ -621,12 +625,16 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         try { tracer?.emit(requestId, "TOOL_STARTED", { toolName: call.name, callId: call.callId }); } catch { /* */ }
 
         const execResult = await executeProjectTool(call, ctx);
-        const { result, agentReadRef, durationMs } = execResult;
+        const { result, agentReadRef, commandEvidenceRef, durationMs } = execResult;
 
         if (agentReadRef) {
           agentReadRefs.push(agentReadRef);
           run.readByteCount += agentReadRef.size;
           try { tracer?.emit(requestId, "FILE_READ", { relativePath: agentReadRef.relativePath, size: agentReadRef.size, fullFile: agentReadRef.fullFile }); } catch { /* */ }
+        }
+
+        if (commandEvidenceRef) {
+          commandEvidenceRefs.push(commandEvidenceRef);
         }
 
         const activity: ToolActivityEntry = {
@@ -776,6 +784,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     proposalFenceRaw,
     stepCount: run.toolStepCount,
     agentReadRefs,
+    commandEvidenceRefs,
     toolActivity,
     agentRun: run,
   };

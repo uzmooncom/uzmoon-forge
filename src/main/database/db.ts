@@ -18,6 +18,11 @@ import type {
   AppliedEdit,
   WriteJournalEntry,
   RequestContextLedger,
+  CommandExecution,
+  CommandState,
+  CommandTrustRule,
+  CommandOutputMetadata,
+  ForgeFailureCode,
 } from "../../shared/types.js";
 import { DEFAULT_APP_SETTINGS } from "../../shared/types.js";
 
@@ -57,6 +62,13 @@ interface Store {
   requestLedgers: Record<string, RequestContextLedger>;
   // ── V0.9 addendum: App Settings ───────────────────────────────────────
   appSettings: AppSettings;
+  // ── V1: Safe Terminal ─────────────────────────────────────────────────
+  /** CommandExecution records keyed by id */
+  commands: Record<string, CommandExecution>;
+  /** Command output text keyed by commandId (stored separately to avoid bloating main store) */
+  commandOutputs: Record<string, string>;
+  /** CommandTrustRules keyed by id */
+  trustRules: Record<string, CommandTrustRule>;
 }
 
 const DEFAULT_STORE: Store = {
@@ -73,6 +85,9 @@ const DEFAULT_STORE: Store = {
   proposals: {},
   editHistory: {},
   writeJournal: {},
+  commands: {},
+  commandOutputs: {},
+  trustRules: {},
 };
 
 // ── Singleton ──────────────────────────────────────────────────────────────
@@ -104,6 +119,9 @@ function load(): Store {
       writeJournal: raw.writeJournal ?? {},
       requestLedgers: raw.requestLedgers ?? {},
       appSettings: raw.appSettings ?? { ...DEFAULT_APP_SETTINGS },
+      commands: raw.commands ?? {},
+      commandOutputs: raw.commandOutputs ?? {},
+      trustRules: raw.trustRules ?? {},
     };
 
     // ── One-time migration: AgentConfig → AgentProfile ─────────────────
@@ -939,3 +957,115 @@ export function setAppSettings(_db: true, settings: Partial<AppSettings>): AppSe
   save(s);
   return structuredClone(updated);
 }
+
+// ── Command Executions (V1: Safe Terminal) ─────────────────────────────────
+
+export function insertCommand(_db: true, cmd: CommandExecution): void {
+  store().commands[cmd.id] = structuredClone(cmd);
+  persist();
+}
+
+export function getCommand(_db: true, id: string): CommandExecution | null {
+  const c = store().commands[id];
+  return c ? structuredClone(c) : null;
+}
+
+export function updateCommand(
+  _db: true,
+  id: string,
+  patch: Partial<{
+    state: CommandState;
+    authorizationState: CommandExecution["authorizationState"];
+    startedAt: number;
+    completedAt: number;
+    durationMs: number;
+    exitCode: number | undefined;
+    signal: string;
+    outputMetadata: CommandOutputMetadata;
+    failureCode: ForgeFailureCode;
+  }>
+): CommandExecution | null {
+  const s = store();
+  const c = s.commands[id];
+  if (!c) return null;
+  Object.assign(c, patch);
+  persist();
+  return structuredClone(c);
+}
+
+export function listCommands(
+  _db: true,
+  projectId?: string,
+  conversationId?: string
+): CommandExecution[] {
+  let results = Object.values(store().commands);
+  if (projectId !== undefined) results = results.filter((c) => c.projectId === projectId);
+  if (conversationId !== undefined) results = results.filter((c) => c.conversationId === conversationId);
+  return structuredClone(
+    results
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, COMMAND_MAX_LIST)
+  );
+}
+
+const COMMAND_MAX_LIST = 500;
+
+/** Prune old terminal commands beyond MAX_HISTORY_PER_PROJECT per project */
+export function pruneCommandHistory(_db: true, projectId: string): void {
+  const s = store();
+  const all = Object.values(s.commands)
+    .filter((c) => c.projectId === projectId)
+    .sort((a, b) => b.createdAt - a.createdAt);
+  if (all.length <= 500) return;
+  const toDelete = all.slice(500);
+  for (const c of toDelete) {
+    delete s.commands[c.id];
+    delete s.commandOutputs[c.id];
+  }
+  persist();
+}
+
+// ── Command Output (stored separately) ────────────────────────────────────
+
+export function setCommandOutputText(_db: true, commandId: string, text: string): void {
+  store().commandOutputs[commandId] = text;
+  persist();
+}
+
+export function getCommandOutputText(_db: true, commandId: string): string | null {
+  return store().commandOutputs[commandId] ?? null;
+}
+
+// ── Command Trust Rules (V1: Safe Terminal) ────────────────────────────────
+
+export function insertTrustRule(_db: true, rule: CommandTrustRule): void {
+  store().trustRules[rule.id] = structuredClone(rule);
+  persist();
+}
+
+export function getTrustRule(_db: true, id: string): CommandTrustRule | null {
+  const r = store().trustRules[id];
+  return r ? structuredClone(r) : null;
+}
+
+export function listTrustRules(_db: true, projectId: string): CommandTrustRule[] {
+  return structuredClone(
+    Object.values(store().trustRules)
+      .filter((r) => r.projectId === projectId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+  );
+}
+
+export function deleteTrustRule(_db: true, id: string): void {
+  delete store().trustRules[id];
+  persist();
+}
+
+export function touchTrustRuleUsed(_db: true, ruleId: string): void {
+  const r = store().trustRules[ruleId];
+  if (!r) return;
+  r.lastUsedAt = Date.now();
+  r.useCount = (r.useCount ?? 0) + 1;
+  persist();
+}
+

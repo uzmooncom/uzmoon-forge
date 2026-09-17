@@ -68,7 +68,8 @@ export type KnownToolName =
   | "search_files"
   | "search_code"
   | "read_file"
-  | "read_file_range";
+  | "read_file_range"
+  | "run_command";
 
 export const KNOWN_TOOL_NAMES = new Set<string>([
   "list_directory",
@@ -76,9 +77,18 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   "search_code",
   "read_file",
   "read_file_range",
+  "run_command",
 ]);
 
 // ── Validation result ───────────────────────────────────────────────────────
+
+export interface RunCommandArgs {
+  executable: string;
+  args: string[];
+  cwdRelative: string;
+  purpose?: string;
+  timeoutMs?: number;
+}
 
 export interface ValidationOk {
   ok: true;
@@ -88,7 +98,8 @@ export interface ValidationOk {
     | SearchFilesArgs
     | SearchCodeArgs
     | ReadFileArgs
-    | ReadFileRangeArgs;
+    | ReadFileRangeArgs
+    | RunCommandArgs;
 }
 
 export interface ValidationError {
@@ -135,6 +146,9 @@ export function validateToolCall(call: ForgeToolCall): ValidationResult {
       return validateReadFile(args);
     case "read_file_range":
       return validateReadFileRange(args);
+    case "run_command":
+      return validateRunCommand(args);
+
   }
 }
 
@@ -276,6 +290,78 @@ function validateReadFileRange(args: Record<string, unknown>): ValidationResult 
   };
 }
 
+// ── run_command validator ──────────────────────────────────────────────────
+
+/**
+ * Validate run_command arguments from model.
+ * Strips shell operators and validates against COMMAND_LIMITS before handing off.
+ */
+function validateRunCommand(args: unknown): ValidationResult {
+  if (typeof args !== "object" || args === null) {
+    return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "run_command: args must be an object" };
+  }
+  const a = args as Record<string, unknown>;
+
+  // executable — single token, no slashes for remote risk, no shell operators
+  const executable = a["executable"];
+  if (typeof executable !== "string" || executable.trim().length === 0) {
+    return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "run_command: executable must be a non-empty string" };
+  }
+  const SHELL_OP_RE = /[|;&><`$(){}[\]*?\\]/;
+  if (SHELL_OP_RE.test(executable)) {
+    return { ok: false, errorCode: "SHELL_OPERATOR_REJECTED", errorMessage: "run_command: executable must not contain shell operators" };
+  }
+
+  // args — array of strings, each without shell operators
+  const argList = a["args"];
+  if (!Array.isArray(argList)) {
+    return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "run_command: args must be an array" };
+  }
+  for (const item of argList) {
+    if (typeof item !== "string") {
+      return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "run_command: each arg must be a string" };
+    }
+  }
+
+  // cwd_relative — string, no absolute path, no traversal
+  const cwdRelative = a["cwd_relative"];
+  if (typeof cwdRelative !== "string") {
+    return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "run_command: cwd_relative must be a string" };
+  }
+  if (typeof cwdRelative === "string" && (cwdRelative.startsWith("/") || cwdRelative.includes("\\"))) {
+    return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "run_command: cwd_relative must be a relative path" };
+  }
+
+  // purpose — optional string
+  const purpose = a["purpose"];
+  if (purpose !== undefined && typeof purpose !== "string") {
+    return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "run_command: purpose must be a string" };
+  }
+
+  // timeout_ms — optional integer, bounded
+  const timeoutMsRaw = a["timeout_ms"];
+  let timeoutMs: number | undefined;
+  if (timeoutMsRaw !== undefined) {
+    if (typeof timeoutMsRaw !== "number" || !Number.isInteger(timeoutMsRaw)) {
+      return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "run_command: timeout_ms must be an integer" };
+    }
+    // Clamp to allowed range
+    const MAX_TIMEOUT = 300_000;
+    const MIN_TIMEOUT = 1_000;
+    timeoutMs = Math.max(MIN_TIMEOUT, Math.min(MAX_TIMEOUT, timeoutMsRaw));
+  }
+
+  const runArgs: RunCommandArgs = {
+    executable: executable.trim(),
+    args: argList as string[],
+    cwdRelative: cwdRelative.trim(),
+    ...(purpose !== undefined && { purpose: purpose as string }),
+    ...(timeoutMs !== undefined && { timeoutMs }),
+  };
+
+  return { ok: true, toolName: "run_command", args: runArgs };
+}
+
 // ── Provider tool definition serialization ──────────────────────────────────
 
 /** OpenAI function/tool definition shape */
@@ -411,6 +497,51 @@ const TOOL_DEFS: Array<{
         },
       },
       required: ["path", "startLine", "endLine"],
+    },
+  },
+  {
+    name: "run_command",
+    description:
+      "Propose a safe terminal command for execution within the project directory. " +
+      "The command is evaluated by a deterministic policy engine (no AI classifier). " +
+      "High-risk commands pause for user approval; trusted commands run immediately. " +
+      "Shell operators (|, &&, ;, >, <, $()) are NEVER allowed — pass a single executable with an explicit args list. " +
+      "Use this to run tests, type-check, lint, build, or inspect package scripts. " +
+      "Remote execution (curl, wget, npx, bunx) is blocked by policy. " +
+      "Returns a CommandEvidenceRef when the command completes. " +
+      "IMPORTANT: do not call run_command in a loop — wait for the result before continuing.",
+    parameters: {
+      type: "object",
+      properties: {
+        executable: {
+          type: "string",
+          description:
+            "Executable name (e.g. 'pnpm', 'node', 'python3'). Must be a single token — no paths, no shell operators.",
+        },
+        args: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Ordered argument list. Each element is a distinct argument — no shell quoting needed.",
+        },
+        cwd_relative: {
+          type: "string",
+          description:
+            "Working directory relative to project root (e.g. '' for root, 'packages/api' for a workspace package). Must not escape the project root.",
+        },
+        purpose: {
+          type: "string",
+          description: "One-sentence explanation of why this command is needed. Shown to the user in the approval UI.",
+        },
+        timeout_ms: {
+          type: "integer",
+          description:
+            "Optional timeout in milliseconds. Defaults to 60000 (60s). Maximum is 300000 (5min). Command is killed on timeout.",
+          minimum: 1000,
+          maximum: 300000,
+        },
+      },
+      required: ["executable", "args", "cwd_relative"],
     },
   },
 ];

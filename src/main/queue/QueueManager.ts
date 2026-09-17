@@ -931,6 +931,7 @@ Rules:
       agentProfileId: profile.id,
       manualRefIds: (item.contextRefs ?? []).map((r) => r.id),
       agentReadRefs: [],
+      commandEvidenceRefs: [],
       toolActivity: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -1000,13 +1001,14 @@ Rules:
       fullText = loopResult.finalText;
       const loopProposalFenceRaw = loopResult.proposalFenceRaw;
 
-      // Populate ledger with agent read refs
+      // Populate ledger with agent read refs and command evidence
       ledger.agentReadRefs = loopResult.agentReadRefs;
+      ledger.commandEvidenceRefs = loopResult.commandEvidenceRefs ?? [];
       ledger.toolActivity = loopResult.toolActivity;
       ledger.updatedAt = Date.now();
 
       // Persist ledger if any tool activity occurred
-      if (loopResult.agentReadRefs.length > 0 || loopResult.toolActivity.length > 0) {
+      if (loopResult.agentReadRefs.length > 0 || (loopResult.commandEvidenceRefs ?? []).length > 0 || loopResult.toolActivity.length > 0) {
         try { db.saveLedger(true, ledger); } catch { /* best effort */ }
       }
 

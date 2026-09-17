@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } fr
 import { randomUUID, createHash } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -23,6 +23,7 @@ import * as db from "../database/db.js";
 import { testConnection } from "../agent-client/client.js";
 import { queueManager, cancelStream, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots } from "../queue/QueueManager.js";
 import { tryGetIncidentRecorder, assertInvariant } from "../reliability/index.js";
+import * as commandManager from "../commands/command-manager.js";
 import { buildGitHubIssuePayload } from "../reliability/sanitizer.js";
 void sweepOrphanedSnapshots; // imported for startup use — called from main.ts
 
@@ -1315,5 +1316,97 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     SETTINGS_IPC.SET,
     (_e: IpcMainInvokeEvent, patch: Partial<import("../../shared/types.js").AppSettings>) =>
       db.setAppSettings(true, patch)
+  );
+
+  // ── Safe Terminal V1 — Command IPC ────────────────────────────────────────
+  //
+  // NOTE: COMMAND_IPC.STATE_CHANGE, OUTPUT_CHUNK, COMPLETE are pushed from
+  //       command-manager (main→renderer), so they are NOT registered here.
+
+  ipcMain.handle(
+    COMMAND_IPC.LIST,
+    (
+      _e: IpcMainInvokeEvent,
+      projectId?: string,
+      conversationId?: string
+    ) => commandManager.listCommands(projectId, conversationId)
+  );
+
+  ipcMain.handle(
+    COMMAND_IPC.GET,
+    (_e: IpcMainInvokeEvent, commandId: string) =>
+      commandManager.getCommand(commandId)
+  );
+
+  ipcMain.handle(
+    COMMAND_IPC.APPROVE,
+    (_e: IpcMainInvokeEvent, commandId: string, mode: "once" | "trust") =>
+      commandManager.approveCommand(commandId, mode)
+  );
+
+  ipcMain.handle(
+    COMMAND_IPC.REJECT,
+    (_e: IpcMainInvokeEvent, commandId: string) =>
+      commandManager.rejectCommand(commandId)
+  );
+
+  ipcMain.handle(
+    COMMAND_IPC.CANCEL,
+    (_e: IpcMainInvokeEvent, commandId: string) =>
+      commandManager.cancelCommand(commandId)
+  );
+
+  ipcMain.handle(
+    COMMAND_IPC.READ_OUTPUT,
+    (_e: IpcMainInvokeEvent, commandId: string, offsetBytes?: number, limitBytes?: number) =>
+      commandManager.readCommandOutput(commandId, offsetBytes, limitBytes)
+  );
+
+  ipcMain.handle(
+    COMMAND_IPC.LIST_TRUST,
+    (_e: IpcMainInvokeEvent, projectId: string) =>
+      commandManager.listTrustRules(projectId)
+  );
+
+  ipcMain.handle(
+    COMMAND_IPC.REVOKE_TRUST,
+    (_e: IpcMainInvokeEvent, ruleId: string) => {
+      commandManager.revokeTrustRule(ruleId);
+    }
+  );
+
+  ipcMain.handle(
+    COMMAND_IPC.RUNTIME_STATE,
+    (_e: IpcMainInvokeEvent, projectId: string) =>
+      commandManager.listCommands(projectId)
+  );
+
+  // RUN_USER: user-initiated command from renderer (project mode only)
+  ipcMain.handle(
+    COMMAND_IPC.RUN_USER,
+    (
+      _e: IpcMainInvokeEvent,
+      opts: {
+        projectId: string;
+        projectRoot: string;
+        executable: string;
+        args: string[];
+        cwdRelative: string;
+        conversationId?: string;
+      }
+    ) => {
+      const spec: import("../../shared/types.js").CommandSpec = {
+        executable: opts.executable,
+        args: opts.args,
+        cwdRelative: opts.cwdRelative,
+      };
+      return commandManager.propose({
+        projectId: opts.projectId,
+        projectRoot: opts.projectRoot,
+        spec,
+        source: "user",
+        ...(opts.conversationId !== undefined && { conversationId: opts.conversationId }),
+      });
+    }
   );
 }

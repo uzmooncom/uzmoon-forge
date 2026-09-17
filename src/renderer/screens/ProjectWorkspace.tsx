@@ -11,6 +11,7 @@ import { FileExplorer } from "../project/FileExplorer.js";
 import { FilePreview } from "../project/FilePreview.js";
 import { QuickOpen } from "../project/QuickOpen.js";
 import ChatScreen from "./ChatScreen.js";
+import { TerminalPanel } from "../project/TerminalPanel.js";
 
 // ── Icons ──────────────────────────────────────────────────────────────────
 
@@ -62,6 +63,16 @@ function CloseIcon({ size = 11 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
       <path d="M3 3l10 10M13 3L3 13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function TerminalIcon({ size = 13 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none">
+      <rect x="1.5" y="1.5" width="13" height="13" rx="2" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M4.5 6l3 2.5-3 2.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9 11h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   );
 }
@@ -165,6 +176,9 @@ const EXPLORER_MAX_WIDTH = 340;
 const PREVIEW_DEFAULT_WIDTH = 360;
 const PREVIEW_MIN_WIDTH = 240;
 const PREVIEW_MAX_WIDTH = 600;
+const TERMINAL_DEFAULT_WIDTH = 280;
+const TERMINAL_MIN_WIDTH = 220;
+const TERMINAL_MAX_WIDTH = 500;
 
 // ── ProjectWorkspace ────────────────────────────────────────────────────────
 
@@ -186,6 +200,10 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
   const [explorerWidth, setExplorerWidth] = useState(EXPLORER_DEFAULT_WIDTH);
   const [previewWidth, setPreviewWidth] = useState(PREVIEW_DEFAULT_WIDTH);
 
+  // Terminal panel
+  const [showTerminal, setShowTerminal] = useState(false);
+  const [terminalWidth, setTerminalWidth] = useState(TERMINAL_DEFAULT_WIDTH);
+
   // Preview state
   const [previewPath, setPreviewPath] = useState<string | null>(null);
 
@@ -206,6 +224,7 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
   // Resizer drag state
   const explorerResizing = useRef(false);
   const previewResizing = useRef(false);
+  const terminalResizing = useRef(false);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);
 
@@ -245,6 +264,13 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
     e.preventDefault();
   };
 
+  const startTerminalResize = (e: React.MouseEvent) => {
+    terminalResizing.current = true;
+    dragStartX.current = e.clientX;
+    dragStartWidth.current = terminalWidth;
+    e.preventDefault();
+  };
+
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       if (explorerResizing.current) {
@@ -256,7 +282,7 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
         setPreviewWidth(Math.min(PREVIEW_MAX_WIDTH, Math.max(PREVIEW_MIN_WIDTH, dragStartWidth.current + delta)));
       }
     };
-    const onUp = () => { explorerResizing.current = false; previewResizing.current = false; };
+    const onUp = () => { explorerResizing.current = false; previewResizing.current = false; terminalResizing.current = false; };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
@@ -461,6 +487,15 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
           <SearchIcon size={13} />
         </button>
 
+        {/* Terminal toggle */}
+        <button
+          onClick={() => setShowTerminal((v) => !v)}
+          className={`p-1.5 rounded-lg transition-colors ${showTerminal ? "text-white/60 bg-white/8" : "text-white/30 hover:text-white/50 hover:bg-white/5"}`}
+          title="Toggle terminal panel (&#x2318;&#x60;)"
+        >
+          <TerminalIcon size={13} />
+        </button>
+
         <div className="flex items-center gap-1.5 min-w-0 flex-1 ml-1">
           <span className={dirStatus === "missing" ? "text-amber-400/60" : "text-white/30"}>
             <FolderIcon size={13} />
@@ -557,6 +592,27 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
               relativePath={previewPath}
               onClose={handleClosePreview}
               onAddContext={handleAddContext}
+            />
+          </div>
+        )}
+        {/* Terminal resize handle */}
+        {showTerminal && (
+          <div
+            className="flex-shrink-0 w-[3px] cursor-col-resize hover:bg-blue-500/30 transition-colors bg-transparent"
+            onMouseDown={startTerminalResize}
+          />
+        )}
+
+        {/* Terminal Panel */}
+        {showTerminal && (
+          <div
+            className="flex-shrink-0 overflow-hidden"
+            style={{ width: terminalWidth }}
+          >
+            <TerminalPanel
+              projectId={project.id}
+              projectRoot={project.workingDirectory}
+              onClose={() => setShowTerminal(false)}
             />
           </div>
         )}

@@ -350,6 +350,143 @@ export const INV_STREAM_EVENT_ROUTING = define({
   maxHealingLevel: 2,
 });
 
+
+// -- COMMAND EXECUTION invariants ─────────────────────────────────────────────
+
+export const INV_COMMAND_CWD_WITHIN_PROJECT = define({
+  id: "COMMAND_CWD_WITHIN_PROJECT",
+  description:
+    "Every spawned command must have its resolved cwd strictly within the project " +
+    "working directory. Commands with cwd outside the project tree must never spawn.",
+  category: "COMMAND_EXECUTION",
+  severity: "critical",
+  maxHealingLevel: 1,
+});
+
+export const INV_COMMAND_REQUIRES_AUTHORIZATION = define({
+  id: "COMMAND_REQUIRES_AUTHORIZATION",
+  description:
+    "A command must not transition from 'queued' to 'running' unless its " +
+    "authorizationState is 'approved'. Agent-blocked and user-rejected commands " +
+    "must never execute.",
+  category: "COMMAND_EXECUTION",
+  severity: "critical",
+  maxHealingLevel: 1,
+});
+
+export const INV_COMMAND_START_ONCE = define({
+  id: "COMMAND_START_ONCE",
+  description:
+    "A command must start exactly once. A command that is already running or " +
+    "has reached a terminal state must never be re-spawned.",
+  category: "AGENT_RUNTIME",
+  severity: "critical",
+  maxHealingLevel: 1,
+});
+
+export const INV_COMMAND_IDENTITY_IMMUTABLE = define({
+  id: "COMMAND_IDENTITY_IMMUTABLE",
+  description:
+    "A command's executable, args, and cwdRelative are immutable after creation. " +
+    "No approval or trust rule may alter what the command actually runs.",
+  category: "COMMAND_EXECUTION",
+  severity: "critical",
+  maxHealingLevel: 1,
+});
+
+export const INV_COMMAND_RESULT_OWNERSHIP = define({
+  id: "COMMAND_RESULT_OWNERSHIP",
+  description:
+    "Command output and execution results belong to the project that spawned the " +
+    "command. Cross-project result contamination is forbidden.",
+  category: "COMMAND_EXECUTION",
+  severity: "high",
+  maxHealingLevel: 2,
+});
+
+export const INV_COMMAND_CANCEL_IS_TERMINAL = define({
+  id: "COMMAND_CANCEL_IS_TERMINAL",
+  description:
+    "Once a command reaches a terminal state (succeeded, failed, timed_out, " +
+    "cancelled, blocked), it must never transition to any other state.",
+  category: "AGENT_RUNTIME",
+  severity: "high",
+  maxHealingLevel: 2,
+});
+
+export const INV_COMMAND_OUTPUT_BOUNDED = define({
+  id: "COMMAND_OUTPUT_BOUNDED",
+  description:
+    "Total command output captured must never exceed MAX_OUTPUT_BYTES. " +
+    "Output overflow must be truncated, never cause memory exhaustion.",
+  category: "COMMAND_EXECUTION",
+  severity: "high",
+  maxHealingLevel: 2,
+});
+
+export const INV_COMMAND_MODEL_OUTPUT_SANITIZED = define({
+  id: "COMMAND_MODEL_OUTPUT_SANITIZED",
+  description:
+    "Command output sent to the AI model must be sanitized: secrets redacted, " +
+    "ANSI codes stripped, and bounded to MAX_MODEL_OUTPUT_BYTES.",
+  category: "SECURITY_INVARIANT",
+  severity: "critical",
+  maxHealingLevel: 1,
+});
+
+export const INV_COMMAND_TRUST_STILL_VALID = define({
+  id: "COMMAND_TRUST_STILL_VALID",
+  description:
+    "A trust rule applied at spawn time must still match the current command spec. " +
+    "A changed script body must not inherit a trust rule for the old body.",
+  category: "COMMAND_EXECUTION",
+  severity: "high",
+  maxHealingLevel: 2,
+});
+
+export const INV_COMMAND_AGENT_NO_SHELL = define({
+  id: "COMMAND_AGENT_NO_SHELL",
+  description:
+    "Commands proposed or approved via run_command must never use shell:true, " +
+    "shell composition operators (|, &, ;, &&, ||), or shell interpolation. " +
+    "Every executable token must be a safe literal.",
+  category: "COMMAND_EXECUTION",
+  severity: "critical",
+  maxHealingLevel: 1,
+});
+
+export const INV_COMMAND_AGENT_NO_SOURCE_WRITE_BYPASS = define({
+  id: "COMMAND_AGENT_NO_SOURCE_WRITE_BYPASS",
+  description:
+    "Agent-proposed commands must not use source-write-bypass executables " +
+    "(sed -i, awk -i, perl -i). All source mutations require the diff-review pipeline.",
+  category: "COMMAND_EXECUTION",
+  severity: "critical",
+  maxHealingLevel: 1,
+});
+
+export const INV_COMMAND_PROCESS_RELEASED = define({
+  id: "COMMAND_PROCESS_RELEASED",
+  description:
+    "After a command reaches a terminal state, its child process resources " +
+    "(file descriptors, stdio streams, AbortController) must be released. " +
+    "Process handles must not leak across commands.",
+  category: "COMMAND_EXECUTION",
+  severity: "high",
+  maxHealingLevel: 2,
+});
+
+export const INV_COMMAND_NO_PROVIDER_SECRET_ENV = define({
+  id: "COMMAND_NO_PROVIDER_SECRET_ENV",
+  description:
+    "Provider API keys and secrets from the secret store must never appear in " +
+    "the environment of a spawned command process. Command envs are sanitized " +
+    "before spawn and must not inherit forge process credentials.",
+  category: "SECURITY_INVARIANT",
+  severity: "critical",
+  maxHealingLevel: 1,
+});
+
 // ── InvariantMonitor ──────────────────────────────────────────────────────────
 
 /** Called when a violation is detected — plug in to the incident pipeline */
