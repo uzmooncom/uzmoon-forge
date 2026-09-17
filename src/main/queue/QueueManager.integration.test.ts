@@ -692,21 +692,20 @@ describe("deleteOrphanedSnapshots — additional edge cases", () => {
 
 import { createProject, getMessagesByConversation, getProposal } from "../database/db.js";
 
-const FIXTURE_RESPONSE = `I'll update the name field in your package.json for you.
-
-\`\`\`forge_edit_proposal
-{
-  "summary": "Rename package from uzcraft to uzcraft-app",
-  "files": [
-    {
-      "path": "package.json",
-      "content": "{\\n  \\"name\\": \\"uzcraft-app\\",\\n  \\"version\\": \\"0.1.0\\"\\n}\\n"
-    }
-  ]
-}
-\`\`\`
-
-The diff will show the name field changing from "uzcraft" to "uzcraft-app". Review and apply when ready.`;
+// V0.6: project-mode responses must use forge_final envelope.
+// forge_edit_proposal is embedded after forge_final in the same response.
+const FIXTURE_PROPOSAL_JSON = JSON.stringify({
+  summary: "Rename package from uzcraft to uzcraft-app",
+  files: [{ path: "package.json", content: '{"name":"uzcraft-app","version":"0.1.0"}\n' }],
+});
+const FIXTURE_RESPONSE = [
+  "```forge_final",
+  JSON.stringify({ content: "I'll update the name field in your package.json for you.\n\nThe diff will show the name field changing from \"uzcraft\" to \"uzcraft-app\". Review and apply when ready." }),
+  "```",
+  "```forge_edit_proposal",
+  FIXTURE_PROPOSAL_JSON,
+  "```",
+].join("\n");
 
 describe("forge_edit_proposal — full pipeline fixture test", () => {
   it("proposal is persisted and assistantMessage.proposalId is populated", async () => {
@@ -842,7 +841,10 @@ describe("forge capability — no full-file context", () => {
     });
 
     // Transport: model responds without a proposal (correct behavior for no-full-ctx)
-    mockMakeRequest.mockResolvedValueOnce("Tam dosya içeriğini context'e ekleyin, ardından değişikliği önerebilirim.");
+    // V0.6: project-mode requires forge_final envelope
+    mockMakeRequest.mockResolvedValueOnce(
+      ["```forge_final", JSON.stringify({ content: "Tam dosya içeriğini context'e ekleyin, ardından değişikliği önerebilirim." }), "```"].join("\n")
+    );
 
     const convId = "conv-no-full-ctx";
     createConversation(true, {
@@ -902,7 +904,10 @@ describe("forge capability — question with full-file context", () => {
     if (!snapResult.ok) return;
 
     // Model answers normally — no fence
-    mockMakeRequest.mockResolvedValueOnce("Bu dosya proje yapılandırmasını içerir. 'name' alanı paketi tanımlar.");
+    // V0.6: project-mode requires forge_final envelope
+    mockMakeRequest.mockResolvedValueOnce(
+      ["```forge_final", JSON.stringify({ content: "Bu dosya proje yapılandırmasını içerir. 'name' alanı paketi tanımlar." }), "```"].join("\n")
+    );
 
     const convId = "conv-question-ctx";
     createConversation(true, {
@@ -954,7 +959,10 @@ describe("forge capability — partial/line-range context", () => {
     expect(snapResult.ok).toBe(true);
     if (!snapResult.ok) return;
 
-    mockMakeRequest.mockResolvedValueOnce("Tam dosya içeriği gerekli, lütfen dosyanın tamamını context'e ekleyin.");
+    // V0.6: project-mode requires forge_final envelope
+    mockMakeRequest.mockResolvedValueOnce(
+      ["```forge_final", JSON.stringify({ content: "Tam dosya içeriği gerekli, lütfen dosyanın tamamını context'e ekleyin." }), "```"].join("\n")
+    );
 
     const convId = "conv-partial-ctx";
     createConversation(true, {
@@ -1031,8 +1039,9 @@ describe("forge capability — multi-block proposal rejection", () => {
     expect(snapResult.ok).toBe(true);
     if (!snapResult.ok) return;
 
-    // Model returns TWO forge_edit_proposal blocks — invalid
-    const multiBlockResponse = [
+    // Model returns TWO forge_edit_proposal blocks inside forge_final — invalid (multi-block)
+    // V0.6: forge_final is required; multi-block proposals are still detected after the loop extracts them.
+    const multiBlockProposals = [
       "Birinci öneri:",
       "```forge_edit_proposal",
       '{ "summary": "first", "files": [{"path": "a.json", "content": "{}"}] }',
@@ -1041,6 +1050,12 @@ describe("forge capability — multi-block proposal rejection", () => {
       "```forge_edit_proposal",
       '{ "summary": "second", "files": [{"path": "a.json", "content": "{}"}] }',
       "```",
+    ].join("\n");
+    const multiBlockResponse = [
+      "```forge_final",
+      JSON.stringify({ content: "İki öneri hazırladım." }),
+      "```",
+      multiBlockProposals,
     ].join("\n");
 
     mockMakeRequest.mockResolvedValueOnce(multiBlockResponse);

@@ -16,7 +16,7 @@ import type { QueueItem, ChatMessage, Conversation, ContextRef, ToolActivityEntr
 import * as db from "../database/db.js";
 import { classifyError } from "../agent-client/client.js";
 import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
-import { runAgentLoop } from "../agent-client/agent-loop.js";
+import { runAgentLoop, AgentLoopError } from "../agent-client/agent-loop.js";
 import { readSnapshot } from "../project-files/service.js";
 import {
   extractProposalFence,
@@ -807,7 +807,33 @@ Rules:
 - Never request sensitive files (e.g. .env, private keys).
 - Terminal, shell, and command execution are unavailable — do not claim commands were executed.
 - If a tool call fails, explain the limitation to the user rather than guessing.
-</forge_project_tools>`
+</forge_project_tools>
+
+<forge_agent_protocol>
+You are executing one Uzmoon Forge Agent run for the user's Project request.
+
+In EVERY response you MUST return exactly one of:
+
+1. A forge_tool action when you need project information:
+\`\`\`forge_tool
+{"name": "tool_name", "arguments": {}}
+\`\`\`
+
+2. A forge_final response when you have enough information to answer:
+\`\`\`forge_final
+{"content": "Your complete answer here."}
+\`\`\`
+
+You may include a forge_edit_proposal block in the SAME response as forge_final when proposing file changes.
+
+Rules:
+- NEVER return naked explanatory prose as your only output.
+- NEVER say "let me check" or "I will inspect" without using a forge_tool action.
+- NEVER end a response with planning narration.
+- Use forge_final only when the original user request has actually been answered completely.
+- Continue autonomously until you can provide a complete answer, a valid proposal, or encounter a real blocker.
+- Do not expose forge_tool, forge_final, forge_edit_proposal syntax in user-facing content.
+</forge_agent_protocol>`
       : undefined;
 
     // Create RequestContextLedger for this request
@@ -829,7 +855,7 @@ Rules:
         cfg,
         apiKey,
         messages: contextMessages,
-        system: forgeSystemPrompt,  // string | undefined — AgentLoopOptions.system is string | undefined
+        system: forgeSystemPrompt,
         projectId: convForSystem?.projectId ?? "",
         projectRoot: (() => {
           const proj = convForSystem?.projectId ? db.getProject(true, convForSystem.projectId) : null;
@@ -837,6 +863,7 @@ Rules:
         })(),
         requestId,
         conversationId,
+        isProjectMode: isProjectConversation,
         signal,
         onChunk: (chunk) => {
           this.send(IPC.CHAT_STREAM_CHUNK, { streamId, chunk });
@@ -869,6 +896,7 @@ Rules:
       });
 
       fullText = loopResult.finalText;
+      const loopProposalFenceRaw = loopResult.proposalFenceRaw;
 
       // Populate ledger with agent read refs
       ledger.agentReadRefs = loopResult.agentReadRefs;
@@ -887,10 +915,14 @@ Rules:
       const now = Date.now();
 
       // ── Proposal detection ─────────────────────────────────────────────────
-      // If the model included a forge_edit_proposal fence, save as proposal.
-      // Otherwise save as a plain assistant message.
+      // The agent loop extracts forge_edit_proposal from the forge_final turn.
+      // loopProposalFenceRaw contains the full fence block if one was present.
+      // We also run extractProposalFence as a fallback for global-chat mode where
+      // there is no forge_final envelope and the model embeds the proposal in prose.
       let assistantMsg: ChatMessage;
-      const rawProposalFenceJson = extractProposalFence(fullText);
+      const rawProposalFenceJson = loopProposalFenceRaw
+        ? extractProposalFence(loopProposalFenceRaw)
+        : extractProposalFence(fullText);
       const conv = db.getConversation(true, conversationId);
       const convProjectId = conv?.projectId;
 
@@ -1121,7 +1153,18 @@ Rules:
       activeStreams.delete(streamId);
       convToStream.delete(conversationId);
 
-      if (err instanceof Error && err.message === "cancelled") {
+      // ── CANCELLED ──────────────────────────────────────────────────────────
+      // AgentLoopError("CANCELLED") or legacy Error("cancelled") — clean stop.
+      // Do NOT persist any intermediate narration as a Chat message.
+      // If fullText has actual content (from a partial final), persist it; otherwise
+      // send a cancelled signal with no message.
+      const isCancelled =
+        (err instanceof AgentLoopError && err.code === "CANCELLED") ||
+        (err instanceof Error && err.message === "cancelled");
+
+      if (isCancelled) {
+        // Per spec §39: do not fabricate a final answer; do not persist narration.
+        // Only persist if we actually had a confirmed final answer started.
         if (fullText.trim()) {
           const partialMsg: ChatMessage = {
             id: randomUUID(),
@@ -1162,7 +1205,50 @@ Rules:
         return;
       }
 
-      // Real error
+      // ── AgentLoopError — typed runtime failures ────────────────────────────
+      // Map each failure code to a coherent user-visible error message.
+      // No intermediate narration is persisted — only one error ChatMessage.
+      if (err instanceof AgentLoopError) {
+        let errorContent: string;
+        switch (err.code) {
+          case "PROTOCOL_RECOVERY_EXHAUSTED":
+            errorContent = "Could not complete this Agent run. The model did not provide a valid response after several attempts. Please try again.";
+            break;
+          case "BUDGET_FINALIZATION_FAILED":
+            errorContent = "Could not complete this Agent run. The tool step budget was exhausted before a final answer could be produced. Please try again.";
+            break;
+          case "PROVIDER_ERROR":
+            errorContent = "Connection error. Please check your Agent configuration and try again.";
+            break;
+          case "INVALID_STATE_TRANSITION":
+            errorContent = "An internal runtime error occurred. Please try again.";
+            break;
+          default:
+            errorContent = "Could not complete this Agent run. Please try again.";
+        }
+
+        const agentLoopErrorMsg: ChatMessage = {
+          id: randomUUID(),
+          conversationId,
+          role: "error",
+          content: errorContent,
+          createdAt: Date.now(),
+          isError: true,
+          agentProfileId: profile.id,
+        };
+        db.insertMessage(true, agentLoopErrorMsg);
+        this.send(IPC.CHAT_STREAM_ERROR, { streamId, message: agentLoopErrorMsg, queueItemId: item.id });
+        db.updateQueueItem(true, conversationId, item.id, {
+          status: "failed",
+          completedAt: Date.now(),
+          lastError: errorContent,
+        });
+        db.setQueuePaused(true, conversationId, true);
+        this.pushQueueState(conversationId);
+        return;
+      }
+
+      // ── Generic / unexpected errors ────────────────────────────────────────
       const result = classifyError(err);
       let errorContent = result.message;
       if (err instanceof Error && err.message === "image_unsupported") {

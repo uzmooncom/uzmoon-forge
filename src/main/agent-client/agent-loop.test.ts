@@ -48,6 +48,7 @@ function makeBaseOpts(overrides: Partial<Parameters<typeof runAgentLoop>[0]> = {
     projectRoot: "/projects/proj-1",
     requestId: "req-1",
     conversationId: "conv-1",
+    isProjectMode: false, // Global Chat — naked prose accepted as final (backward compat)
     onChunk: vi.fn(),
     onToolStart: vi.fn(),
     onToolEnd: vi.fn(),

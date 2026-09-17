@@ -688,6 +688,70 @@ export interface NormalizedAgentResponse {
   toolCalls?: ForgeToolCall[];
 }
 
+/**
+ * V0.6 — Canonical normalized decision returned by normalizeDecision().
+ * Every provider turn (native or fallback) resolves to exactly one of these.
+ * The agent loop acts on the kind — never on raw text heuristics.
+ */
+export type NormalizedAgentDecision =
+  | {
+      kind: "tool_calls";
+      calls: ForgeToolCall[];
+    }
+  | {
+      /**
+       * Terminal turn. `content` is the user-visible prose (forge_final envelope stripped).
+       * `proposalFenceRaw` is the raw forge_edit_proposal JSON if one was present.
+       */
+      kind: "final";
+      content: string;
+      proposalFenceRaw?: string;
+    }
+  | {
+      /**
+       * Protocol violation: naked prose, empty response, malformed envelope, etc.
+       * `recoverable` means a correction injection should be attempted.
+       */
+      kind: "invalid";
+      reason: string;
+      recoverable: boolean;
+    };
+
+/**
+ * V0.6 — Agent run state machine states.
+ * Transitions are strictly validated by the runtime.
+ */
+export type AgentRunState =
+  | "queued"
+  | "starting"
+  | "waiting_for_model"
+  | "processing_turn"
+  | "executing_tools"
+  | "continuing"
+  | "finalizing"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+/**
+ * V0.6 — In-memory record for one logical Agent run.
+ * Not persisted — ephemeral per request. RequestContextLedger holds the durable record.
+ */
+export interface AgentRun {
+  requestId: string;
+  conversationId: string;
+  projectId: string;
+  agentProfileId: string;
+  state: AgentRunState;
+  startedAt: number;
+  completedAt?: number;
+  toolStepCount: number;
+  recoveryCount: number;
+  readByteCount: number;
+  failureCode?: string;
+  failureMessage?: string;
+}
+
 /** IPC channels for V0.4 agent tool ledger */
 export const AGENT_TOOL_IPC = {
   /** Get the RequestContextLedger for a given requestId */

@@ -125,8 +125,6 @@ function ToolActivityRow({ entry }: { entry: LiveToolEntry }) {
 
 export function StreamingBubble({ text }: { text: string }) {
   const [toolEntries, setToolEntries] = useState<LiveToolEntry[]>([]);
-  /** Transient caption from intermediate (non-terminal) model narration */
-  const [activityCaption, setActivityCaption] = useState<string>("");
   /** Set to track which dedupe keys we've already shown — prevents duplicate rows */
   const seenDedupeKeys = useRef<Set<string>>(new Set());
 
@@ -140,8 +138,6 @@ export function StreamingBubble({ text }: { text: string }) {
         if (prev.find((e) => e.callId === call.callId)) return prev;
         if (seenDedupeKeys.current.has(dedupeKey)) return prev;
         seenDedupeKeys.current.add(dedupeKey);
-        // Clear activity caption once a real tool starts
-        setActivityCaption("");
         return [...prev, {
           callId: call.callId,
           name: call.name,
@@ -161,20 +157,9 @@ export function StreamingBubble({ text }: { text: string }) {
       ));
     });
 
-    const unsubActivity = window.forgeApi.agentTools.onActivityText((payload) => {
-      // Show up to 80 chars of the intermediate narration as a transient caption.
-      // This is NOT a chat message — just a status hint during multi-turn exploration.
-      const trimmed = payload.text.trim();
-      if (trimmed) {
-        const caption = trimmed.length > 80 ? trimmed.slice(0, 77) + "…" : trimmed;
-        setActivityCaption(caption);
-      }
-    });
-
     return () => {
       unsubStart();
       unsubEnd();
-      unsubActivity();
     };
   }, []);
 
@@ -200,15 +185,7 @@ export function StreamingBubble({ text }: { text: string }) {
           {toolEntries.map((entry) => (
             <ToolActivityRow key={entry.callId} entry={entry} />
           ))}
-          {/* Transient activity caption (intermediate narration from model) */}
-          {!hasText && activityCaption && (
-            <div className="flex items-center gap-1.5 py-0.5">
-              <span className="flex-shrink-0 text-blue-400/70">
-                <SpinnerIcon size={10} />
-              </span>
-              <span className="text-[11px] text-white/40 truncate italic">{activityCaption}</span>
-            </div>
-          )}
+
         </div>
       )}
 
