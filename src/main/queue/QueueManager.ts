@@ -12,7 +12,7 @@
 import { randomUUID, createHash } from "crypto";
 import { WebContents } from "electron";
 import { IPC, EDIT_IPC } from "../../shared/types.js";
-import type { QueueItem, ChatMessage, Conversation, ContextRef, ToolActivityEntry, RequestContextLedger, ForgeToolCall, ForgeToolResult } from "../../shared/types.js";
+import type { QueueItem, ChatMessage, Conversation, ContextRef, RequestContextLedger, ForgeToolCall, ForgeToolResult } from "../../shared/types.js";
 import * as db from "../database/db.js";
 import { classifyError } from "../agent-client/client.js";
 import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
@@ -877,21 +877,10 @@ Rules:
           this.send(IPC.CHAT_STREAM_TOOL_START, { streamId, requestId, call });
         },
         onToolEnd: (call: ForgeToolCall, result: ForgeToolResult, durationMs: number) => {
+          // Relay IPC event to renderer for live tool-row updates.
+          // ledger.toolActivity is populated from loopResult.toolActivity after the run;
+          // building a duplicate entry here and pushing it is dead code — removed.
           this.send(IPC.CHAT_STREAM_TOOL_END, { streamId, requestId, call, result, durationMs });
-          // Update in-memory ledger
-          const activity: ToolActivityEntry = {
-            id: randomUUID(),
-            requestId,
-            conversationId,
-            toolName: call.name,
-            arguments: call.arguments,
-            resultSummary: result.ok ? "ok" : (result.errorCode ?? "error"),
-            durationMs,
-            ok: result.ok,
-            ...(result.errorCode !== undefined && { errorCode: result.errorCode }),
-            executedAt: Date.now(),
-          };
-          ledger.toolActivity.push(activity);
         },
       });
 

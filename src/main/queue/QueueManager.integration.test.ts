@@ -1097,3 +1097,155 @@ describe("forge capability — multi-block proposal rejection", () => {
     expect(disk).toContain('"x": 1');
   });
 });
+
+// ── DB message invariant tests ────────────────────────────────────────────
+// Req 1: Exactly 1 user + 1 assistant message persisted per AgentRun.
+// Req 3: Raw protocol tokens must never appear in persisted message content.
+
+describe("DB message invariant — one user + one assistant per AgentRun", () => {
+  it("global chat: 1 user + 1 assistant message after plain response", async () => {
+    const convId = "conv-db-inv-global";
+    createConversation(true, {
+      id: convId,
+      title: "DB Invariant Global",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    mockMakeRequest.mockResolvedValueOnce("This is my answer to your question.");
+
+    await queueManager.enqueue({
+      conversationId: convId,
+      content: "Hello",
+      attachmentIds: [],
+      targetAgentProfileId: PROFILE_ID,
+    });
+
+    await waitForQueue(300);
+
+    const msgs = getMessagesByConversation(true, convId);
+    const userMsgs = msgs.filter((m) => m.role === "user");
+    const assistantMsgs = msgs.filter((m) => m.role === "assistant");
+
+    expect(userMsgs).toHaveLength(1);
+    expect(assistantMsgs).toHaveLength(1);
+    // The single assistant message must contain the final answer
+    expect(assistantMsgs[0]!.content).toContain("answer");
+  });
+
+  it("project mode: multi-turn run (tool steps) produces exactly 1 user + 1 assistant message", async () => {
+    const projId = "proj-db-inv-multi";
+    createProject(true, {
+      id: projId,
+      name: "DB Invariant Multi-turn",
+      workingDirectory: projectRoot,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const convId = "conv-db-inv-multi";
+    createConversation(true, {
+      id: convId,
+      title: "DB Inv Multi",
+      projectId: projId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    // Simulate: turn 1 — forge_tool (search); turn 2 — forge_tool (read); turn 3 — forge_final
+    const tool1 = [
+      "```forge_tool",
+      JSON.stringify({ name: "search_files", arguments: { query: "main" } }),
+      "```",
+    ].join("\n");
+    const tool2 = [
+      "```forge_tool",
+      JSON.stringify({ name: "list_directory", arguments: { path: "." } }),
+      "```",
+    ].join("\n");
+    const finalTurn = [
+      "```forge_final",
+      JSON.stringify({ content: "Done. The project has 3 main entry points." }),
+      "```",
+    ].join("\n");
+
+    mockMakeRequest
+      .mockResolvedValueOnce(tool1)
+      .mockResolvedValueOnce(tool2)
+      .mockResolvedValueOnce(finalTurn);
+
+    await queueManager.enqueue({
+      conversationId: convId,
+      content: "How many main entry points?",
+      attachmentIds: [],
+      targetAgentProfileId: PROFILE_ID,
+      projectId: projId,
+    });
+
+    await waitForQueue(400);
+
+    const msgs = getMessagesByConversation(true, convId);
+    const userMsgs = msgs.filter((m) => m.role === "user");
+    const assistantMsgs = msgs.filter((m) => m.role === "assistant");
+
+    // CRITICAL: exactly 1 user and 1 assistant message — no intermediate tool narration persisted
+    expect(userMsgs).toHaveLength(1);
+    expect(assistantMsgs).toHaveLength(1);
+    expect(assistantMsgs[0]!.content).toContain("3 main entry points");
+  });
+
+  it("protocol leak guard: forge_tool, forge_final, callId JSON must not appear in persisted content", async () => {
+    const projId = "proj-protocol-leak";
+    createProject(true, {
+      id: projId,
+      name: "Protocol Leak Guard",
+      workingDirectory: projectRoot,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const convId = "conv-protocol-leak";
+    createConversation(true, {
+      id: convId,
+      title: "Protocol Leak",
+      projectId: projId,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    // Intermediate turn: contains forge_tool fence and callId JSON (never to be seen in DB)
+    const intermediateTurn = [
+      "```forge_tool",
+      JSON.stringify({ name: "search_files", arguments: { query: "index" }, callId: "call_abc123" }),
+      "```",
+    ].join("\n");
+    const finalTurn = [
+      "```forge_final",
+      JSON.stringify({ content: "Here is your answer without any protocol tokens." }),
+      "```",
+    ].join("\n");
+
+    mockMakeRequest
+      .mockResolvedValueOnce(intermediateTurn)
+      .mockResolvedValueOnce(finalTurn);
+
+    await queueManager.enqueue({
+      conversationId: convId,
+      content: "What is the index file?",
+      attachmentIds: [],
+      targetAgentProfileId: PROFILE_ID,
+      projectId: projId,
+    });
+
+    await waitForQueue(400);
+
+    const msgs = getMessagesByConversation(true, convId);
+    const assistantMsgs = msgs.filter((m) => m.role === "assistant");
+    expect(assistantMsgs).toHaveLength(1);
+
+    const content = assistantMsgs[0]!.content;
+    // Raw protocol tokens must never appear in DB-persisted content
+    expect(content).not.toContain("forge_tool");
+    expect(content).not.toContain("forge_final");
+    expect(content).not.toContain("call_abc123");
+    expect(content).toContain("Here is your answer");
+  });
+});

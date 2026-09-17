@@ -121,7 +121,32 @@ function ToolActivityRow({ entry }: { entry: LiveToolEntry }) {
   );
 }
 
+// ── CollapsedToolRow ──────────────────────────────────────────────────────
+
+/** Summary row when many tool entries are collapsed */
+function CollapsedToolRow({ readCount, scanCount, searchCount }: { readCount: number; scanCount: number; searchCount: number }) {
+  const parts: string[] = [];
+  if (readCount > 0) parts.push(`Read ${readCount} file${readCount > 1 ? "s" : ""}`);
+  if (scanCount > 0) parts.push(`Scanned ${scanCount} director${scanCount > 1 ? "ies" : "y"}`);
+  if (searchCount > 0) parts.push(`Searched ${searchCount} time${searchCount > 1 ? "s" : ""}`);
+  const label = parts.length > 0 ? parts.join(" · ") : "Explored project";
+  return (
+    <div className="flex items-center gap-1.5 py-0.5">
+      <span className="flex-shrink-0 text-white/20">
+        <svg width="10" height="10" viewBox="0 0 16 16" fill="none">
+          <circle cx="4" cy="8" r="1.5" fill="currentColor" />
+          <circle cx="8" cy="8" r="1.5" fill="currentColor" />
+          <circle cx="12" cy="8" r="1.5" fill="currentColor" />
+        </svg>
+      </span>
+      <span className="text-[11px] font-mono text-white/25 italic">{label}</span>
+    </div>
+  );
+}
+
 // ── StreamingBubble ────────────────────────────────────────────────────────
+
+const TOOL_COLLAPSE_THRESHOLD = 5;
 
 export function StreamingBubble({ text }: { text: string }) {
   const [toolEntries, setToolEntries] = useState<LiveToolEntry[]>([]);
@@ -166,6 +191,25 @@ export function StreamingBubble({ text }: { text: string }) {
   const hasToolActivity = toolEntries.length > 0;
   const hasText = !!text;
 
+  // When there are many tool entries, collapse middle ones into a summary row.
+  // Show first 2 and last 1; summarize everything in between.
+  const renderToolRows = () => {
+    if (toolEntries.length <= TOOL_COLLAPSE_THRESHOLD) {
+      return toolEntries.map((entry) => <ToolActivityRow key={entry.callId} entry={entry} />);
+    }
+    const head = toolEntries.slice(0, 2);
+    const middle = toolEntries.slice(2, toolEntries.length - 1);
+    const tail = toolEntries.slice(-1);
+    const readCount = middle.filter((e) => e.name === "read_file" || e.name === "read_file_range").length;
+    const scanCount = middle.filter((e) => e.name === "list_directory").length;
+    const searchCount = middle.filter((e) => e.name === "search_files" || e.name === "search_code").length;
+    return [
+      ...head.map((entry) => <ToolActivityRow key={entry.callId} entry={entry} />),
+      <CollapsedToolRow key="__collapsed__" readCount={readCount} scanCount={scanCount} searchCount={searchCount} />,
+      ...tail.map((entry) => <ToolActivityRow key={entry.callId} entry={entry} />),
+    ];
+  };
+
   return (
     <div className="group flex flex-col gap-0 py-3 px-1">
       {/* Forge identity row (matches MessageBubble document-style) */}
@@ -182,10 +226,7 @@ export function StreamingBubble({ text }: { text: string }) {
       {/* Live tool activity */}
       {hasToolActivity && (
         <div className="mb-2 ml-1 border-l border-white/8 pl-3 flex flex-col gap-0">
-          {toolEntries.map((entry) => (
-            <ToolActivityRow key={entry.callId} entry={entry} />
-          ))}
-
+          {renderToolRows()}
         </div>
       )}
 
@@ -193,7 +234,14 @@ export function StreamingBubble({ text }: { text: string }) {
       <div className="text-sm leading-relaxed text-gray-100/90">
         {hasText
           ? <MarkdownContent content={text} />
-          : <TypingDots />}
+          : (
+            <div className="flex flex-col gap-1.5">
+              {!hasToolActivity && (
+                <span className="text-[11px] text-white/25 font-medium tracking-wide uppercase">Working on your request</span>
+              )}
+              <TypingDots />
+            </div>
+          )}
       </div>
     </div>
   );
