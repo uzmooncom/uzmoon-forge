@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { MarkdownContent } from "./MarkdownContent.js";
 
 // ── Icons ──────────────────────────────────────────────────────────────────
@@ -54,60 +54,69 @@ interface LiveToolEntry {
   callId: string;
   name: string;
   arguments: Record<string, unknown>;
-  startedAt: number;
-  durationMs?: number;
-  ok?: boolean;
+  /** Deduplication key — action:path */
+  dedupeKey: string;
   done: boolean;
+  ok?: boolean;
+}
+
+/** Humanize a path for display — strip leading "./" and return basename for long paths */
+function humanPath(raw: string | undefined): string {
+  if (!raw) return "";
+  const p = raw.replace(/^\.\//, "");
+  // Use basename for paths with more than one segment
+  const parts = p.split("/");
+  return parts.length > 2 ? (parts[parts.length - 1] ?? p) : p;
 }
 
 function toolHumanLabel(name: string, args: Record<string, unknown>): string {
   switch (name) {
     case "list_directory": {
       const p = typeof args["path"] === "string" ? args["path"] : "";
-      return `Listing directory${p ? `: ${p}` : ""}`;
+      const hp = humanPath(p);
+      return hp ? `Scanning ${hp}` : "Scanning project structure";
     }
     case "search_files": {
       const q = typeof args["query"] === "string" ? args["query"] : "";
-      return `Searching files: ${q}`;
+      return q ? `Searching for ${q}` : "Searching files";
     }
     case "search_code": {
       const q = typeof args["query"] === "string" ? args["query"] : "";
-      return `Searching code: ${q}`;
+      return q ? `Searching for \`${q}\`` : "Searching code";
     }
     case "read_file": {
       const p = typeof args["path"] === "string" ? args["path"] : "";
-      return `Reading: ${p}`;
+      return p ? `Reading ${humanPath(p)}` : "Reading file";
     }
     case "read_file_range": {
       const p = typeof args["path"] === "string" ? args["path"] : "";
       const start = typeof args["lineStart"] === "number" ? args["lineStart"] : "?";
       const end = typeof args["lineEnd"] === "number" ? args["lineEnd"] : "?";
-      return `Reading ${p} (lines ${start}–${end})`;
+      return p ? `Reading ${humanPath(p)} (lines ${start}–${end})` : "Reading file range";
     }
     default:
       return name;
   }
 }
 
+function toolDedupeKey(name: string, args: Record<string, unknown>): string {
+  const p = typeof args["path"] === "string" ? args["path"] : "";
+  const q = typeof args["query"] === "string" ? args["query"] : "";
+  return `${name}:${p || q}`;
+}
+
 function ToolActivityRow({ entry }: { entry: LiveToolEntry }) {
   const label = toolHumanLabel(entry.name, entry.arguments);
-  const elapsed = entry.durationMs !== undefined
-    ? `${entry.durationMs}ms`
-    : `${Date.now() - entry.startedAt}ms`;
-
   return (
     <div className="flex items-center gap-1.5 py-0.5">
-      <span className={`flex-shrink-0 ${entry.done ? (entry.ok ? "text-white/35" : "text-red-400/60") : "text-blue-400/70"}`}>
+      <span className={`flex-shrink-0 ${entry.done ? (entry.ok ? "text-white/30" : "text-red-400/60") : "text-blue-400/70"}`}>
         {entry.done
           ? (entry.ok ? <CheckSmallIcon size={10} /> : <ErrorSmallIcon size={10} />)
           : <SpinnerIcon size={10} />}
       </span>
-      <span className={`text-[11px] font-mono truncate ${entry.done ? "text-white/35" : "text-white/55"}`}>
+      <span className={`text-[11px] font-mono truncate ${entry.done ? "text-white/30" : "text-white/50"}`}>
         {label}
       </span>
-      {entry.done && (
-        <span className="text-[10px] text-white/20 ml-auto flex-shrink-0">{elapsed}</span>
-      )}
     </div>
   );
 }
@@ -116,38 +125,61 @@ function ToolActivityRow({ entry }: { entry: LiveToolEntry }) {
 
 export function StreamingBubble({ text }: { text: string }) {
   const [toolEntries, setToolEntries] = useState<LiveToolEntry[]>([]);
+  /** Transient caption from intermediate (non-terminal) model narration */
+  const [activityCaption, setActivityCaption] = useState<string>("");
+  /** Set to track which dedupe keys we've already shown — prevents duplicate rows */
+  const seenDedupeKeys = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    // Subscribe to tool activity events
     const unsubStart = window.forgeApi.agentTools.onToolStart((payload) => {
       const { call } = payload;
+      const dedupeKey = toolDedupeKey(call.name, call.arguments);
+
       setToolEntries((prev) => {
-        // Avoid duplicates
+        // Skip if we've already shown this call ID (native duplicates) or same action+path
         if (prev.find((e) => e.callId === call.callId)) return prev;
+        if (seenDedupeKeys.current.has(dedupeKey)) return prev;
+        seenDedupeKeys.current.add(dedupeKey);
+        // Clear activity caption once a real tool starts
+        setActivityCaption("");
         return [...prev, {
           callId: call.callId,
           name: call.name,
           arguments: call.arguments,
-          startedAt: Date.now(),
+          dedupeKey,
           done: false,
         }];
       });
     });
 
     const unsubEnd = window.forgeApi.agentTools.onToolEnd((payload) => {
-      const { call, result, durationMs } = payload;
+      const { call, result } = payload;
       setToolEntries((prev) => prev.map((e) =>
         e.callId === call.callId
-          ? { ...e, done: true, ok: result.ok, durationMs }
+          ? { ...e, done: true, ok: result.ok }
           : e
       ));
+    });
+
+    const unsubActivity = window.forgeApi.agentTools.onActivityText((payload) => {
+      // Show up to 80 chars of the intermediate narration as a transient caption.
+      // This is NOT a chat message — just a status hint during multi-turn exploration.
+      const trimmed = payload.text.trim();
+      if (trimmed) {
+        const caption = trimmed.length > 80 ? trimmed.slice(0, 77) + "…" : trimmed;
+        setActivityCaption(caption);
+      }
     });
 
     return () => {
       unsubStart();
       unsubEnd();
+      unsubActivity();
     };
   }, []);
+
+  const hasToolActivity = toolEntries.length > 0;
+  const hasText = !!text;
 
   return (
     <div className="group flex flex-col gap-0 py-3 px-1">
@@ -163,17 +195,28 @@ export function StreamingBubble({ text }: { text: string }) {
       </div>
 
       {/* Live tool activity */}
-      {toolEntries.length > 0 && (
+      {hasToolActivity && (
         <div className="mb-2 ml-1 border-l border-white/8 pl-3 flex flex-col gap-0">
           {toolEntries.map((entry) => (
             <ToolActivityRow key={entry.callId} entry={entry} />
           ))}
+          {/* Transient activity caption (intermediate narration from model) */}
+          {!hasText && activityCaption && (
+            <div className="flex items-center gap-1.5 py-0.5">
+              <span className="flex-shrink-0 text-blue-400/70">
+                <SpinnerIcon size={10} />
+              </span>
+              <span className="text-[11px] text-white/40 truncate italic">{activityCaption}</span>
+            </div>
+          )}
         </div>
       )}
 
-      {/* Streamed text */}
+      {/* Streamed text — only shown for the terminal (final) turn */}
       <div className="text-sm leading-relaxed text-gray-100/90">
-        {text ? <MarkdownContent content={text} /> : <TypingDots />}
+        {hasText
+          ? <MarkdownContent content={text} />
+          : <TypingDots />}
       </div>
     </div>
   );

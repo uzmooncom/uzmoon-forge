@@ -237,6 +237,8 @@ export const IPC = {
   CHAT_STREAM_TOOL_START: "chat:streamToolStart",
   /** Pushed from main when a tool call completes during agent loop */
   CHAT_STREAM_TOOL_END: "chat:streamToolEnd",
+  /** Pushed from main with intermediate (non-terminal) turn text — transient, never persisted */
+  CHAT_STREAM_ACTIVITY_TEXT: "chat:streamActivityText",
 
   // Queue management
   QUEUE_GET: "queue:get",

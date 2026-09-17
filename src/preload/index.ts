@@ -415,6 +415,13 @@ const forgeApi = {
       ipcRenderer.on(IPC.CHAT_STREAM_TOOL_END, listener);
       return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_TOOL_END, listener);
     },
+
+    /** Transient text from an intermediate (non-terminal) provider turn. Never persisted. */
+    onActivityText: (cb: (payload: { streamId: string; text: string }) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { streamId: string; text: string }) => cb(payload);
+      ipcRenderer.on(IPC.CHAT_STREAM_ACTIVITY_TEXT, listener);
+      return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_ACTIVITY_TEXT, listener);
+    },
   },
 };
 

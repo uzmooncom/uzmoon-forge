@@ -841,6 +841,11 @@ Rules:
         onChunk: (chunk) => {
           this.send(IPC.CHAT_STREAM_CHUNK, { streamId, chunk });
         },
+        onIntermediateText: (text: string) => {
+          // Transient activity label from an intermediate (non-terminal) provider turn.
+          // Sent to the renderer for display-only — never persisted as a Chat message.
+          this.send(IPC.CHAT_STREAM_ACTIVITY_TEXT, { streamId, text });
+        },
         onToolStart: (call: ForgeToolCall) => {
           this.send(IPC.CHAT_STREAM_TOOL_START, { streamId, requestId, call });
         },

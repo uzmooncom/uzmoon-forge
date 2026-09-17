@@ -9,8 +9,14 @@
  * - User stop/cancel (signal.aborted checked before each turn)
  * - Ledger population (AgentReadRef + ToolActivityEntry per tool call)
  *
+ * KEY INVARIANT — Provider turn ≠ Chat message:
+ *   Intermediate turns (those followed by tool calls) must NEVER be forwarded
+ *   to onChunk. Only the terminal turn (the final user-facing answer) is
+ *   streamed via onChunk. Intermediate text is routed to onIntermediateText
+ *   so the UI can show transient activity labels without polluting Chat history.
+ *
  * Does NOT know about IPC, Electron, or the renderer.
- * Callbacks (onChunk, onToolStart, onToolEnd) bridge to the outside world.
+ * Callbacks (onChunk, onToolStart, onToolEnd, onIntermediateText) bridge outside.
  */
 import { randomUUID } from "crypto";
 import type { AgentConfig, ForgeToolCall, ForgeToolResult, AgentReadRef, ToolActivityEntry } from "../../shared/types.js";
@@ -33,8 +39,17 @@ export interface AgentLoopOptions {
   projectRoot: string;
   requestId: string;
   conversationId: string;
-  /** Called for each text chunk streamed from the model */
+  /**
+   * Called with each text chunk of the TERMINAL (final) provider turn only.
+   * Intermediate tool-step turns are buffered internally and never forwarded here.
+   */
   onChunk: (chunk: string) => void;
+  /**
+   * Called once per intermediate (non-terminal) provider turn with the stripped
+   * visible text of that turn. Use this for transient activity labels, NOT for
+   * persisting Chat messages.
+   */
+  onIntermediateText?: (text: string) => void;
   /** Called when a tool call starts (before execution) */
   onToolStart: (call: ForgeToolCall) => void;
   /** Called when a tool call completes */
@@ -53,6 +68,17 @@ export interface AgentLoopResult {
   /** All tool invocations in order */
   toolActivity: ToolActivityEntry[];
 }
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/** Maximum number of premature-completion recovery injections per run. */
+const CONTINUATION_BUDGET = 1;
+
+const CONTINUATION_PROMPT =
+  "AGENT_CONTINUATION: Your previous response appears incomplete — it did not " +
+  "provide a substantive answer to the user's request. If you need more information, " +
+  "call the appropriate project tools now. If you have gathered enough information, " +
+  "provide your complete final answer immediately.";
 
 // ── Forge tool fence parsing ─────────────────────────────────────────────────
 
@@ -91,11 +117,14 @@ function extractForgeFences(text: string): ForgeToolCall[] {
 }
 
 /**
- * Strip forge_tool fences from text (for display — tool result fences remain
- * in the message history sent to the model but are invisible in UI).
+ * Strip forge_tool and forge_tool_result fences from text.
+ * These are internal protocol blocks that must never appear in user-visible content.
  */
 function stripForgeFences(text: string): string {
-  return text.replace(new RegExp(FORGE_TOOL_FENCE_RE.source, "g"), "").trim();
+  return text
+    .replace(new RegExp(FORGE_TOOL_FENCE_RE.source, "g"), "")
+    .replace(/```forge_tool_result\n[\s\S]*?\n```/g, "")
+    .trim();
 }
 
 // ── Build tool result messages ───────────────────────────────────────────────
@@ -127,13 +156,10 @@ function buildToolResultMessages(
         ? JSON.stringify(result.data ?? "")
         : `Error (${result.errorCode ?? "unknown"}): ${result.errorMessage ?? ""}`,
     }));
-    // SimpleMessage.content can be string or content array — use string for tool results
     return [{ role: "user", content: JSON.stringify(blocks) }];
   }
 
   // OpenAI: one tool message per result
-  // We model these as user messages with a structured string since SimpleMessage is user|assistant
-  // The actual OpenAI tool message format is injected via raw content
   return toolResults.map(({ call, result }) => ({
     role: "user" as const,
     content: `[tool_result id="${call.callId}" name="${call.name}"] ${result.ok ? JSON.stringify(result.data ?? "") : `Error: ${result.errorMessage ?? result.errorCode ?? "unknown"}`}`,
@@ -146,7 +172,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   const {
     cfg, apiKey, messages: initialMessages, system,
     projectId, projectRoot, requestId, conversationId,
-    onChunk, onToolStart, onToolEnd, signal,
+    onChunk, onIntermediateText, onToolStart, onToolEnd, signal,
   } = opts;
 
   // Mutable execution context (shared reference — tool executor updates readBytesUsed)
@@ -173,6 +199,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   let stepCount = 0;
   let finalText = "";
   let budgetExhausted = false;
+  let continuationUsed = 0;
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -190,7 +217,10 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     const nativeToolCallsThisTurn: ForgeToolCall[] = [];
     let usedNativeTools = false;
 
-    // Make one model request
+    // Make one model request — buffer chunks internally (do NOT forward yet).
+    // We only forward to onChunk once we confirm this is the terminal turn.
+    let turnChunks = "";
+
     const rawText = await makeRequest({
       cfg,
       apiKey,
@@ -199,8 +229,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       ...(system !== undefined && { system }),
       tools: budgetExhausted ? [] : tools,
       onChunk: (chunk) => {
-        // Forward text chunks to UI; fences are stripped after the turn
-        onChunk(chunk);
+        // Accumulate internally — do NOT forward to caller yet
+        turnChunks += chunk;
       },
       onToolCall: (call) => {
         usedNativeTools = true;
@@ -210,8 +240,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     });
 
     // Determine tool calls for this turn:
-    // Priority 1: native tool calls detected by makeRequest
-    // Priority 2: forge_tool fences in the text
+    // Priority 1: native tool calls detected by makeRequest callbacks
+    // Priority 2: forge_tool fences in the text (fallback protocol)
     let toolCallsThisTurn: ForgeToolCall[];
     if (nativeToolCallsThisTurn.length > 0) {
       usedNativeTools = true;
@@ -221,84 +251,118 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       usedNativeTools = false;
     }
 
-    // Compute the visible text for this turn (strip tool fences)
-    const visibleText = usedNativeTools ? rawText : stripForgeFences(rawText);
+    // Compute the visible text for this turn — always strip forge fences
+    // rawText may be empty string or undefined from mocks — guard with ?? ""
+    const visibleText = stripForgeFences((rawText ?? turnChunks) || "");
 
-    // Record assistant turn in message history
+    // Record assistant turn in message history (raw text for model continuity)
     messages.push({ role: "assistant", content: visibleText || rawText });
 
-    // No tool calls → this is the final response
-    if (toolCallsThisTurn.length === 0 || budgetExhausted) {
-      finalText = visibleText;
-      if (budgetExhausted && toolCallsThisTurn.length > 0) {
-        // Inject budget exhaustion context as a user message and do one more model turn
-        messages.push({
-          role: "user",
-          content: "TOOL_BUDGET_EXHAUSTED: You have reached the maximum number of tool calls allowed for this request. Please synthesize your findings so far and provide your final response without calling any more tools.",
-        });
-        // One final turn to let the model wrap up
-        if (!signal.aborted) {
-          const wrapupText = await makeRequest({
-            cfg, apiKey, messages, stream: true,
-            ...(system !== undefined && { system }),
-            tools: [],
-            onChunk,
-            signal,
-          });
-          finalText = stripForgeFences(wrapupText);
+    // ── Tool-step turn (non-terminal) ────────────────────────────────────────
+    if (toolCallsThisTurn.length > 0 && !budgetExhausted) {
+      // Fire onIntermediateText with stripped visible text (transient activity label)
+      // This is NOT sent to the chat history or persisted as a message.
+      const intermediateLabel = visibleText.trim();
+      if (intermediateLabel && onIntermediateText) {
+        onIntermediateText(intermediateLabel);
+      }
+
+      // Execute tool calls
+      const toolResults: Array<{ call: ForgeToolCall; result: ForgeToolResult }> = [];
+
+      for (const call of toolCallsThisTurn) {
+        if (signal.aborted) throw new Error("cancelled");
+
+        onToolStart(call);
+
+        const execResult = await executeProjectTool(call, ctx);
+        const { result, agentReadRef, durationMs } = execResult;
+
+        if (agentReadRef) {
+          agentReadRefs.push(agentReadRef);
         }
+
+        const activity: ToolActivityEntry = {
+          id: newActivityId(),
+          requestId,
+          conversationId,
+          toolName: call.name,
+          arguments: call.arguments,
+          resultSummary: buildResultSummary(call.name, result),
+          durationMs,
+          ok: result.ok,
+          ...(result.errorCode !== undefined && { errorCode: result.errorCode }),
+          executedAt: Date.now(),
+        };
+        toolActivity.push(activity);
+
+        onToolEnd(call, result, durationMs);
+        toolResults.push({ call, result });
+      }
+
+      // Append tool result messages to history
+      const resultMessages = buildToolResultMessages(cfg.protocol, usedNativeTools, toolResults);
+      messages.push(...resultMessages);
+
+      stepCount++;
+      continue;
+    }
+
+    // ── Budget exhausted with pending tool calls ──────────────────────────────
+    if (budgetExhausted && toolCallsThisTurn.length > 0) {
+      messages.push({
+        role: "user",
+        content: "TOOL_BUDGET_EXHAUSTED: You have reached the maximum number of tool calls allowed for this request. Please synthesize your findings so far and provide your final response without calling any more tools.",
+      });
+
+      if (!signal.aborted) {
+        let wrapupBuffer = "";
+        const wrapupText = await makeRequest({
+          cfg, apiKey, messages, stream: true,
+          ...(system !== undefined && { system }),
+          tools: [],
+          onChunk: (chunk) => {
+            wrapupBuffer += chunk;
+            onChunk(chunk); // terminal — forward directly
+          },
+          signal,
+        });
+        finalText = stripForgeFences(wrapupText || wrapupBuffer);
       }
       break;
     }
 
-    // Execute tool calls
-    const toolResults: Array<{ call: ForgeToolCall; result: ForgeToolResult }> = [];
+    // ── Terminal turn — no tool calls ─────────────────────────────────────────
+    // Check for premature completion: the model ended its turn with completely
+    // empty output after having executed tool steps. This means the model
+    // narrated its intent but forgot to provide an actual answer.
+    // We do NOT use a length heuristic — short answers are valid answers.
+    const hasProposal = visibleText.includes("forge_edit_proposal");
+    const isPremature =
+      !hasProposal &&
+      stepCount > 0 &&
+      visibleText.trim().length === 0 &&
+      continuationUsed < CONTINUATION_BUDGET;
 
-    for (const call of toolCallsThisTurn) {
-      if (signal.aborted) throw new Error("cancelled");
-
-      // Notify UI that a tool is starting
-      onToolStart(call);
-
-      // Execute
-      const execResult = await executeProjectTool(call, ctx);
-      const { result, agentReadRef, durationMs } = execResult;
-
-      // Track read ref if produced
-      if (agentReadRef) {
-        agentReadRefs.push(agentReadRef);
-      }
-
-      // Record tool activity
-      const activity: ToolActivityEntry = {
-        id: newActivityId(),
-        requestId,
-        conversationId,
-        toolName: call.name,
-        arguments: call.arguments,
-        resultSummary: buildResultSummary(call.name, result),
-        durationMs,
-        ok: result.ok,
-        ...(result.errorCode !== undefined && { errorCode: result.errorCode }),
-        executedAt: Date.now(),
-      };
-      toolActivity.push(activity);
-
-      // Notify UI that the tool completed
-      onToolEnd(call, result, durationMs);
-
-      toolResults.push({ call, result });
+    if (isPremature) {
+      // Inject continuation prompt and do one more turn
+      continuationUsed++;
+      messages.push({ role: "user", content: CONTINUATION_PROMPT });
+      // The intermediate text from this non-terminal response is discarded
+      // (it was only brief narration — not worth surfacing)
+      continue;
     }
 
-    // Append tool result messages to history
-    const resultMessages = buildToolResultMessages(
-      cfg.protocol,
-      usedNativeTools,
-      toolResults
-    );
-    messages.push(...resultMessages);
+    // This IS the final answer. Stream the buffered text to the UI.
+    // We replay the full text at once (not per-chunk) because we buffered it.
+    // The streaming effect for intermediate turns is intentionally absent —
+    // users should see tool activity rows, then the final answer appear.
+    if (visibleText) {
+      onChunk(visibleText);
+    }
 
-    stepCount++;
+    finalText = visibleText;
+    break;
   }
 
   return { finalText, stepCount, agentReadRefs, toolActivity };
