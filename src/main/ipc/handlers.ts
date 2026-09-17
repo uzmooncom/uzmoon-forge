@@ -1,5 +1,5 @@
 import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } from "electron";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import path from "path";
 import fs from "fs";
 import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC } from "../../shared/types.js";
@@ -124,6 +124,56 @@ function extForMime(mimeType: string): string {
     "application/zip": "zip", "application/x-tar": "tar", "application/gzip": "gz",
   };
   return map[mimeType] ?? "bin";
+}
+
+
+/**
+ * Canonical immutable resource resolver.
+ *
+ * Given a `resourceId` (FileEdit.baseSnapshotId) and the proposal's projectId,
+ * searches ALL possible owners in priority order:
+ *   1. Manual ContextRefs — stored on ChatMessages in any conversation
+ *   2. AgentReadRefs — stored in RequestContextLedgers (autonomous reads)
+ *
+ * Returns { snapshotPath, contentHash } or null.
+ *
+ * This is the ONLY place where "where is the base snapshot?" is answered.
+ * Both proposal creation (QueueManager) and proposal review (PROPOSAL_READ_TARGET)
+ * ultimately rely on this resolver so they cannot diverge.
+ */
+function resolveImmutableFileResource(
+  resourceId: string,
+  projectId: string,
+  database: true
+): { snapshotPath: string; contentHash: string } | null {
+  if (!resourceId) return null;
+
+  // 1. Search manual ContextRefs across all messages in any conversation
+  const allConversations = db.listConversations(database);
+  for (const conv of allConversations) {
+    const msgs = db.getMessagesByConversation(database, conv.id);
+    for (const msg of msgs) {
+      for (const ref of (msg.contextRefs ?? [])) {
+        if (ref.id === resourceId && ref.projectId === projectId) {
+          return { snapshotPath: ref.snapshotPath, contentHash: ref.contentHash };
+        }
+      }
+    }
+  }
+
+  // 2. Search AgentReadRefs across all RequestContextLedgers
+  //    This is the path taken for autonomously-read files — agentReadRefs live in
+  //    ledgers, NOT in message.contextRefs.
+  const allLedgers = db.getAllLedgers(database);
+  for (const ledger of allLedgers) {
+    for (const ref of ledger.agentReadRefs) {
+      if (ref.id === resourceId && ref.projectId === projectId) {
+        return { snapshotPath: ref.snapshotPath, contentHash: ref.contentHash };
+      }
+    }
+  }
+
+  return null;
 }
 
 export function registerHandlers(services: Services, mainSender: WebContents): void {
@@ -862,20 +912,23 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       if (proposedContent === null)
         return { ok: false, error: "Proposal target resource not found" };
 
-      // Base content (the snapshot captured at request time — the truth for the diff)
-      // baseSnapshotId is the ContextRef.id; we need the snapshotPath from that ref.
-      // The snapshotPath is stored on the ContextRef which lives on the ChatMessage.
-      // Retrieve it by scanning the conversation's message contextRefs.
+      // Base content — resolve via the canonical immutable resource resolver.
+      // This searches BOTH manual ContextRefs (msg.contextRefs) AND autonomous
+      // AgentReadRefs (ledger.agentReadRefs), so autonomous edits work without
+      // requiring the user to manually add the file to context.
       let baseContent: string | null = null;
       if (fe.baseSnapshotId) {
-        // Find the snapshot path from the originating message's contextRefs
-        const messages = db.getMessagesByConversation(database, proposal.conversationId);
-        outer: for (const msg of messages) {
-          for (const ref of (msg.contextRefs ?? [])) {
-            if (ref.id === fe.baseSnapshotId) {
-              baseContent = projectFiles.readSnapshot(ref.snapshotPath);
-              break outer;
+        const resolved = resolveImmutableFileResource(fe.baseSnapshotId, proposal.projectId, database);
+        if (resolved !== null) {
+          // Integrity check: verify snapshot hash before returning content
+          let raw: string | null = null;
+          try { raw = fs.readFileSync(resolved.snapshotPath, "utf8"); } catch { raw = null; }
+          if (raw !== null) {
+            const actualHash = createHash("sha256").update(raw).digest("hex");
+            if (actualHash === resolved.contentHash) {
+              baseContent = raw;
             }
+            // Hash mismatch: leave baseContent null → returns "Base snapshot integrity failed"
           }
         }
       }
@@ -883,7 +936,9 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       if (baseContent === null) {
         return {
           ok: false,
-          error: `Base snapshot not available for "${fe.relativePath}". The file must be added to context before this proposal can be reviewed.`,
+          error: `Base snapshot not available for "${fe.relativePath}". ` +
+            `The base snapshot may have been deleted or corrupted. ` +
+            `Re-read the file in a new message to regenerate the proposal.`,
         };
       }
 

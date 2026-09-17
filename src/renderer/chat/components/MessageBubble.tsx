@@ -468,7 +468,7 @@ function ExploredFilesSection({ msg }: { msg: ChatMessage }) {
                 className="flex items-center gap-1.5 text-[11px] text-white/40 hover:text-white/70 py-0.5 px-1.5 rounded hover:bg-white/5 transition-colors text-left"
               >
                 <FileContextIcon size={10} />
-                <span className="font-mono truncate max-w-[280px]">{ref.relativePath}</span>
+                <span className="font-mono truncate max-w-[280px]" title={ref.relativePath}>{refLabel(ref.relativePath)}</span>
                 {ref.fullFile ? null : (
                   <span className="text-white/20 ml-1">(range)</span>
                 )}

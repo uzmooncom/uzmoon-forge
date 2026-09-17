@@ -60,13 +60,18 @@ interface LiveToolEntry {
   ok?: boolean;
 }
 
-/** Humanize a path for display — strip leading "./" and return basename for long paths */
+/**
+ * Humanize a path for display — returns "parent/basename" for deep paths
+ * so duplicate basenames (e.g. many package.json files) are distinguishable.
+ */
 function humanPath(raw: string | undefined): string {
   if (!raw) return "";
   const p = raw.replace(/^\.\//, "");
-  // Use basename for paths with more than one segment
-  const parts = p.split("/");
-  return parts.length > 2 ? (parts[parts.length - 1] ?? p) : p;
+  const parts = p.split("/").filter(Boolean);
+  if (parts.length <= 1) return p;
+  if (parts.length === 2) return p;
+  // Deep paths: "parent/basename" — enough context without full path
+  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
 }
 
 function toolHumanLabel(name: string, args: Record<string, unknown>): string {
@@ -148,13 +153,17 @@ function CollapsedToolRow({ readCount, scanCount, searchCount }: { readCount: nu
 
 const TOOL_COLLAPSE_THRESHOLD = 5;
 
-export function StreamingBubble({ text }: { text: string }) {
+export function StreamingBubble({ text, streamId }: { text: string; streamId: string }) {
   const [toolEntries, setToolEntries] = useState<LiveToolEntry[]>([]);
   /** Set to track which dedupe keys we've already shown — prevents duplicate rows */
   const seenDedupeKeys = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     const unsubStart = window.forgeApi.agentTools.onToolStart((payload) => {
+      // ── IDENTITY GUARD: only process events for THIS stream ──────────────
+      // Multiple conversations may run concurrently. Without this filter,
+      // Conversation B would display tool rows belonging to Conversation A.
+      if (payload.streamId !== streamId) return;
       const { call } = payload;
       const dedupeKey = toolDedupeKey(call.name, call.arguments);
 
@@ -174,6 +183,8 @@ export function StreamingBubble({ text }: { text: string }) {
     });
 
     const unsubEnd = window.forgeApi.agentTools.onToolEnd((payload) => {
+      // ── IDENTITY GUARD: only process events for THIS stream ──────────────
+      if (payload.streamId !== streamId) return;
       const { call, result } = payload;
       setToolEntries((prev) => prev.map((e) =>
         e.callId === call.callId
@@ -186,7 +197,7 @@ export function StreamingBubble({ text }: { text: string }) {
       unsubStart();
       unsubEnd();
     };
-  }, []);
+  }, [streamId]);
 
   const hasToolActivity = toolEntries.length > 0;
   const hasText = !!text;

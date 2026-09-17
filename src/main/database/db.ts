@@ -899,6 +899,15 @@ export function getLedgersByConversation(_db: true, conversationId: string): Req
  * Used by deleteOrphanedSnapshots to avoid deleting snapshots that are still
  * referenced by agent-read refs from a past request.
  */
+/**
+ * Returns ALL persisted RequestContextLedgers.
+ * Used by the canonical immutable resource resolver to search agentReadRefs
+ * across all past requests when resolving a proposal base snapshot.
+ */
+export function getAllLedgers(_db: true): RequestContextLedger[] {
+  return structuredClone(Object.values(store().requestLedgers));
+}
+
 export function getAllAgentReadRefSnapshotIds(_db: true): Set<string> {
   const ids = new Set<string>();
   for (const ledger of Object.values(store().requestLedgers)) {

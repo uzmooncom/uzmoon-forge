@@ -1240,7 +1240,7 @@ export default function ChatScreen({
             ))}
 
             {/* Streaming bubble */}
-            {streaming && <StreamingBubble text={streaming.text} />}
+            {streaming && <StreamingBubble text={streaming.text} streamId={streaming.streamId} />}
             <div ref={bottomRef} className="h-4" />
           </div>
         </div>
