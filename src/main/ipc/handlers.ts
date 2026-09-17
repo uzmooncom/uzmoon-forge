@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } fr
 import { randomUUID, createHash } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -1302,5 +1302,18 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       if (!recorder) return { total: 0, critical: 0, high: 0, byCategory: {}, knownIssues: 0, oldestSeen: null };
       return recorder.getMetrics() as unknown as Record<string, unknown>;
     }
+  );
+
+  // ── App Settings (V0.9 addendum) ─────────────────────────────────────────
+
+  ipcMain.handle(
+    SETTINGS_IPC.GET,
+    () => db.getAppSettings(true)
+  );
+
+  ipcMain.handle(
+    SETTINGS_IPC.SET,
+    (_e: IpcMainInvokeEvent, patch: Partial<import("../../shared/types.js").AppSettings>) =>
+      db.setAppSettings(true, patch)
   );
 }

@@ -929,6 +929,31 @@ export interface StructuredEditProposal {
   operations: EditOperationIR[];
 }
 
+// ── App Settings ──────────────────────────────────────────────────────────
+
+/**
+ * Persisted application settings (distinct from AgentProfile/AgentConfig).
+ * Stored in DB appSettings field; defaults applied on first read.
+ */
+export interface AppSettings {
+  /**
+   * Incident sharing is OFF by default.
+   * When false: "Get Share Payload" returns null without populating incident data.
+   * When true: sanitized payload is built and returned for user to share.
+   */
+  incidentSharingEnabled: boolean;
+}
+
+export const DEFAULT_APP_SETTINGS: AppSettings = {
+  incidentSharingEnabled: false,
+};
+
+/** V0.9 IPC channels for settings */
+export const SETTINGS_IPC = {
+  GET: "settings:get",
+  SET: "settings:set",
+} as const;
+
 /** V0.9 IPC channels for reliability */
 export const RELIABILITY_IPC = {
   /** Get current incident summary list */

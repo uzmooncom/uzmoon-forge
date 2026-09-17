@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -423,6 +423,14 @@ const forgeApi = {
       return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_TOOL_END, listener);
     },
 
+  },
+
+  // ── App Settings (V0.9 addendum) ──────────────────────────────────────────
+  settings: {
+    getSettings: (): Promise<import("../shared/types.js").AppSettings> =>
+      ipcRenderer.invoke(SETTINGS_IPC.GET),
+    setSettings: (patch: Partial<import("../shared/types.js").AppSettings>): Promise<import("../shared/types.js").AppSettings> =>
+      ipcRenderer.invoke(SETTINGS_IPC.SET, patch),
   },
 
   // ── Reliability (V0.9) ────────────────────────────────────────────────────

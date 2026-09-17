@@ -154,6 +154,15 @@ export class TraceRecorder {
     trace.endedAt = Date.now();
     if (failureCode) trace.failureCode = failureCode;
 
+    // Emit the terminal run event before moving to completed store
+    const terminalKind: TraceEvent["kind"] =
+      outcome === "completed" ? "RUN_COMPLETED" :
+      outcome === "cancelled" ? "RUN_CANCELLED" :
+      "RUN_FAILED";
+    this.emit(requestId, terminalKind, {
+      ...(failureCode !== undefined && { failureCode }),
+    });
+
     this.activeTraces.delete(traceId);
     this.requestToTrace.delete(requestId);
 

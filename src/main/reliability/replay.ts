@@ -75,6 +75,10 @@ export interface ReplayFixture {
   forbiddenContentPatterns?: string[];
   /** Optional invariant assertions at end of replay */
   expectedInvariantViolations?: string[]; // invariantIds expected to trigger
+  /** Expected number of tool steps (TOOL_STARTED events) consumed during replay */
+  expectedToolSteps?: number;
+  /** Expected number of protocol recovery turns triggered */
+  expectedRecoveryCount?: number;
 }
 
 // ── Built-in regression fixtures ──────────────────────────────────────────────
@@ -470,11 +474,20 @@ export class ReplayHarness {
       );
     }
 
-    // Invariant violations that SHOULD have fired
-    if (fixture.expectedInvariantViolations) {
-      for (const inv of fixture.expectedInvariantViolations) {
+    // Invariant violations — check both expected and unexpected
+    {
+      const expectedViolations = fixture.expectedInvariantViolations ?? [];
+      // Violations that SHOULD have fired
+      for (const inv of expectedViolations) {
         if (!actual.invariantViolations.includes(inv)) {
           failures.push(`Expected invariant violation ${inv} did not fire`);
+        }
+      }
+      // Unexpected violations (violations not in the expected list) also fail
+      const expectedSet = new Set(expectedViolations);
+      for (const inv of actual.invariantViolations) {
+        if (!expectedSet.has(inv)) {
+          failures.push(`Unexpected invariant violation: ${inv}`);
         }
       }
     }

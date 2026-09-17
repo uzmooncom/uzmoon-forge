@@ -8,7 +8,7 @@ interface Props {
   onSave: (updated: AgentConfig) => Promise<void>;
 }
 
-type Section = "agent" | "appearance" | "about";
+type Section = "agent" | "appearance" | "privacy" | "about";
 
 export default function SettingsModal({
   config,
@@ -25,6 +25,22 @@ export default function SettingsModal({
   const [isTesting, setIsTesting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
+  const [sharingEnabled, setSharingEnabled] = useState(false);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+
+  useEffect(() => {
+    void window.forgeApi.settings.getSettings().then((s: { incidentSharingEnabled: boolean }) => setSharingEnabled(s.incidentSharingEnabled));
+  }, []);
+
+  const handleSharingToggle = async (v: boolean): Promise<void> => {
+    setSettingsLoading(true);
+    try {
+      await window.forgeApi.settings.setSettings({ incidentSharingEnabled: v });
+      setSharingEnabled(v);
+    } finally {
+      setSettingsLoading(false);
+    }
+  };
 
   useEffect(() => {
     void window.forgeApi.hasSecret(config.id).then(setHasKey);
@@ -84,7 +100,7 @@ export default function SettingsModal({
         <div className="flex min-h-[360px]">
           {/* Sidebar nav */}
           <nav className="w-40 flex-shrink-0 border-r border-[#1a1a1e] p-3 space-y-0.5">
-            {(["agent", "appearance", "about"] as Section[]).map((s) => (
+            {(["agent", "appearance", "privacy", "about"] as Section[]).map((s) => (
               <button
                 key={s}
                 onClick={() => setSection(s)}
@@ -98,6 +114,8 @@ export default function SettingsModal({
                   ? "Agent Connection"
                   : s === "appearance"
                   ? "Appearance"
+                  : s === "privacy"
+                  ? "Privacy"
                   : "About"}
               </button>
             ))}
@@ -125,6 +143,13 @@ export default function SettingsModal({
               />
             )}
             {section === "appearance" && <AppearanceSection />}
+            {section === "privacy" && (
+              <PrivacySection
+                sharingEnabled={sharingEnabled}
+                loading={settingsLoading}
+                onToggle={(v) => void handleSharingToggle(v)}
+              />
+            )}
             {section === "about" && <AboutSection />}
           </div>
         </div>
@@ -310,6 +335,73 @@ function AboutSection(): React.ReactElement {
       <p className="text-xs leading-relaxed text-[#7a7a85]">
         A minimal, focused interface for connecting and chatting with custom
         AI-compatible agent endpoints.
+      </p>
+    </div>
+  );
+}
+
+
+// ── Privacy Section ────────────────────────────────────────────────────────
+
+function PrivacySection({
+  sharingEnabled,
+  loading,
+  onToggle,
+}: {
+  sharingEnabled: boolean;
+  loading: boolean;
+  onToggle: (v: boolean) => void;
+}): React.ReactElement {
+  return (
+    <div className="space-y-5">
+      <p className="text-[10px] font-medium uppercase tracking-wide text-[#7a7a85]">
+        Incident Sharing
+      </p>
+
+      {/* Toggle row */}
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex-1">
+          <p className="text-xs font-medium text-[#e8e8ec]">Share incident reports</p>
+          <p className="mt-1 text-[10px] leading-relaxed text-[#7a7a85]">
+            When enabled, you can generate a sanitized incident payload to share
+            with the Uzmoon team. All secrets and absolute paths are redacted
+            before sharing. <strong className="text-[#3a3a42]">Off by default.</strong>
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={sharingEnabled}
+          disabled={loading}
+          onClick={() => onToggle(!sharingEnabled)}
+          className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus:outline-none disabled:opacity-40 ${
+            sharingEnabled ? "bg-[#6366f1]" : "bg-[#262629]"
+          }`}
+        >
+          <span
+            className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+              sharingEnabled ? "translate-x-4" : "translate-x-0"
+            }`}
+          />
+        </button>
+      </div>
+
+      {/* Status indicator */}
+      <div
+        className={`rounded-lg border px-3 py-2.5 text-xs ${
+          sharingEnabled
+            ? "border-[#6366f1]/20 bg-[#6366f1]/5 text-[#6366f1]"
+            : "border-[#262629] bg-[#141416] text-[#7a7a85]"
+        }`}
+      >
+        {sharingEnabled
+          ? "Incident sharing is enabled. Payload is sanitized before sharing."
+          : "Incident sharing is disabled. No data will be sent or shared."}
+      </div>
+
+      <p className="text-[10px] leading-relaxed text-[#3a3a42]">
+        This setting only controls whether the share payload button is available
+        in the Reliability panel. No data is ever sent automatically.
       </p>
     </div>
   );

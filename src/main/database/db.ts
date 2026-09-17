@@ -9,6 +9,7 @@ import type {
   AgentConfig,
   AgentProfile,
   AppState,
+  AppSettings,
   Conversation,
   Attachment,
   QueueItem,
@@ -18,6 +19,7 @@ import type {
   WriteJournalEntry,
   RequestContextLedger,
 } from "../../shared/types.js";
+import { DEFAULT_APP_SETTINGS } from "../../shared/types.js";
 
 // ── Store shape ────────────────────────────────────────────────────────────
 
@@ -53,10 +55,13 @@ interface Store {
   // ── V0.4: Agent Read Tools ─────────────────────────────────────────────
   /** RequestContextLedgers keyed by requestId */
   requestLedgers: Record<string, RequestContextLedger>;
+  // ── V0.9 addendum: App Settings ───────────────────────────────────────
+  appSettings: AppSettings;
 }
 
 const DEFAULT_STORE: Store = {
   appState: { onboardingComplete: false, agentConfigId: null, defaultAgentProfileId: null },
+  appSettings: { ...DEFAULT_APP_SETTINGS },
   agentConfig: null,
   agentProfiles: {},
   projects: {},
@@ -98,6 +103,7 @@ function load(): Store {
       editHistory: raw.editHistory ?? {},
       writeJournal: raw.writeJournal ?? {},
       requestLedgers: raw.requestLedgers ?? {},
+      appSettings: raw.appSettings ?? { ...DEFAULT_APP_SETTINGS },
     };
 
     // ── One-time migration: AgentConfig → AgentProfile ─────────────────
@@ -690,6 +696,7 @@ export function pruneQueueHistory(_db: true, convId: string): void {
       i.status === "processing" ||
       i.status === "paused" ||
       (i.status === "failed" && (i.completedAt ?? 0) > cutoff) ||
+      (i.status === "cancelled" && (i.completedAt ?? 0) > cutoff) ||
       (i.status === "completed" && (i.completedAt ?? 0) > cutoff)
   );
   persist();
@@ -916,4 +923,19 @@ export function getAllAgentReadRefSnapshotIds(_db: true): Set<string> {
     }
   }
   return ids;
+}
+
+// ── App Settings ──────────────────────────────────────────────────────────
+
+export function getAppSettings(_db: true): AppSettings {
+  return structuredClone(store().appSettings ?? DEFAULT_APP_SETTINGS);
+}
+
+export function setAppSettings(_db: true, settings: Partial<AppSettings>): AppSettings {
+  const current = store().appSettings ?? { ...DEFAULT_APP_SETTINGS };
+  const updated: AppSettings = { ...current, ...settings };
+  const s = store();
+  s.appSettings = updated;
+  save(s);
+  return structuredClone(updated);
 }

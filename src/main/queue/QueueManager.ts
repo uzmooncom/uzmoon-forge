@@ -13,6 +13,7 @@ import { randomUUID, createHash } from "crypto";
 import { WebContents } from "electron";
 import { IPC, EDIT_IPC } from "../../shared/types.js";
 import { assertInvariant } from "../reliability/invariants.js";
+import { tryGetTraceRecorder } from "../reliability/index.js";
 import type { QueueItem, ChatMessage, Conversation, ContextRef, RequestContextLedger, ForgeToolCall, ForgeToolResult, ConvRuntimeState } from "../../shared/types.js";
 import * as db from "../database/db.js";
 import { classifyError } from "../agent-client/client.js";
@@ -312,12 +313,19 @@ function validateRefOwnership(
  * Best-effort: never throws.
  */
 export function deleteOrphanedSnapshots(
-  refs: import("../../shared/types.js").ContextRef[],
-  excludeMsgIds: Set<string> | string
+  refs: import("../../shared/types.js").ContextRef[] | string,
+  excludeMsgIds?: Set<string> | string
 ): void {
+  // Overload: deleteOrphanedSnapshots(convId) — full snapshot dir sweep
+  if (typeof refs === "string") {
+    sweepOrphanedSnapshots();
+    return;
+  }
   // Normalise: accept either a single string or a Set
   const excludeSet: Set<string> =
-    typeof excludeMsgIds === "string" ? new Set([excludeMsgIds]) : excludeMsgIds;
+    typeof excludeMsgIds === "string" ? new Set([excludeMsgIds]) :
+    excludeMsgIds instanceof Set ? excludeMsgIds :
+    new Set<string>();
 
   // Collect all snapshot ref IDs still alive in the DB (excluding removed messages)
   const allMessages = db.getAllMessages(true);
@@ -901,6 +909,18 @@ Rules:
     const requestId = randomUUID();
     // Backfill requestId into the registry entry now that we have it
     runEntry.requestId = requestId;
+
+    // Trace wiring — start trace for this request
+    const _tracer = tryGetTraceRecorder();
+    if (_tracer) {
+      _tracer.startTrace({
+        requestId,
+        conversationId,
+        ...(convForSystem?.projectId ? { projectId: convForSystem.projectId } : {}),
+      });
+      _tracer.emit(requestId, "RUN_CREATED", { model: profile.model });
+    }
+
     const ledger: RequestContextLedger = {
       requestId,
       conversationId,
@@ -1333,6 +1353,12 @@ Rules:
       db.touchAgentProfileLastUsed(true, profile.id);
       db.updateAgentProfileStatus(true, profile.id, "connected");
 
+      // Trace wiring — record final text and close the trace
+      if (_tracer) {
+        _tracer.emit(requestId, "FINAL_NORMALIZED", { kind: "final", finalText: fullText.slice(0, 500) });
+        _tracer.endTrace(requestId, "completed");
+      }
+
       db.updateQueueItem(true, conversationId, item.id, {
         status: "completed",
         completedAt: now,
@@ -1404,6 +1430,9 @@ Rules:
           });
         }
 
+        // Trace wiring — close cancelled trace
+        if (_tracer) _tracer.endTrace(requestId, "cancelled");
+
         db.updateQueueItem(true, conversationId, item.id, {
           status: "cancelled",
           completedAt: Date.now(),
@@ -1456,6 +1485,8 @@ Rules:
           agentProfileId: profile.id,
         };
         db.insertMessage(true, agentLoopErrorMsg);
+        // Trace wiring — close failed trace with code
+        if (_tracer) _tracer.endTrace(requestId, "failed", err instanceof AgentLoopError ? err.code : undefined);
         this.send(IPC.CHAT_STREAM_ERROR, { streamId, message: agentLoopErrorMsg, queueItemId: item.id });
         db.updateQueueItem(true, conversationId, item.id, {
           status: "failed",
@@ -1496,6 +1527,8 @@ Rules:
         { requestId, conversationId, hint: "generic error path — non-empty error message" }
       );
 
+      // Trace wiring — close failed trace (generic error)
+      if (_tracer) _tracer.endTrace(requestId, "failed", "PROVIDER_ERROR");
       this.send(IPC.CHAT_STREAM_ERROR, { streamId, message: errorMsg, queueItemId: item.id });
 
       db.updateQueueItem(true, conversationId, item.id, {
@@ -1506,6 +1539,12 @@ Rules:
       db.setQueuePaused(true, conversationId, true);
       this.pushQueueState(conversationId);
     }
+  }
+
+  /** Pause a queue — prevents next item from starting; in-flight item continues */
+  pause(convId: string): void {
+    db.setQueuePaused(true, convId, true);
+    this.pushQueueState(convId);
   }
 
   /** Resume a paused queue — profile resolved fresh for each item */
@@ -1631,3 +1670,13 @@ function autoTitle(content: string): string {
 }
 
 export const queueManager = new QueueManager();
+
+/** FOR TESTS ONLY — resets all module-level state for isolation between test cases */
+export function _resetQueueManagerForTest(): void {
+  // Abort all in-flight signals so running processItem calls exit early
+  for (const sig of activeStreams.values()) sig.aborted = true;
+  activeStreams.clear();
+  convToStream.clear();
+  activeRunRegistry.clear();
+  processing.clear();
+}
