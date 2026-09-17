@@ -69,7 +69,9 @@ export type KnownToolName =
   | "search_code"
   | "read_file"
   | "read_file_range"
-  | "run_command";
+  | "run_command"
+  | "list_project_commands"
+  | "read_command_output";
 
 export const KNOWN_TOOL_NAMES = new Set<string>([
   "list_directory",
@@ -78,6 +80,8 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   "read_file",
   "read_file_range",
   "run_command",
+  "list_project_commands",
+  "read_command_output",
 ]);
 
 // ── Validation result ───────────────────────────────────────────────────────
@@ -90,6 +94,24 @@ export interface RunCommandArgs {
   timeoutMs?: number;
 }
 
+export interface ListProjectCommandsArgs {
+  /** Optional filter: only return commands from a specific conversation */
+  conversationId?: string;
+  /** Optional filter: only return commands with this state */
+  state?: string;
+  /** Max results (default 20, max 100) */
+  limit?: number;
+}
+
+export interface ReadCommandOutputArgs {
+  /** The command ID returned by run_command */
+  commandId: string;
+  /** Byte offset to start reading from (default 0) */
+  offsetBytes?: number;
+  /** Max bytes to return (default 8192, max 32768) */
+  limitBytes?: number;
+}
+
 export interface ValidationOk {
   ok: true;
   toolName: KnownToolName;
@@ -99,7 +121,9 @@ export interface ValidationOk {
     | SearchCodeArgs
     | ReadFileArgs
     | ReadFileRangeArgs
-    | RunCommandArgs;
+    | RunCommandArgs
+    | ListProjectCommandsArgs
+    | ReadCommandOutputArgs;
 }
 
 export interface ValidationError {
@@ -148,7 +172,10 @@ export function validateToolCall(call: ForgeToolCall): ValidationResult {
       return validateReadFileRange(args);
     case "run_command":
       return validateRunCommand(args);
-
+    case "list_project_commands":
+      return validateListProjectCommands(args);
+    case "read_command_output":
+      return validateReadCommandOutput(args);
   }
 }
 
@@ -362,6 +389,72 @@ function validateRunCommand(args: unknown): ValidationResult {
   return { ok: true, toolName: "run_command", args: runArgs };
 }
 
+// ── list_project_commands validator ───────────────────────────────────────
+
+function validateListProjectCommands(args: Record<string, unknown>): ValidationResult {
+  const conversationId = args["conversation_id"];
+  if (conversationId !== undefined && typeof conversationId !== "string") {
+    return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "list_project_commands: conversation_id must be a string" };
+  }
+
+  const state = args["state"];
+  if (state !== undefined && typeof state !== "string") {
+    return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "list_project_commands: state must be a string" };
+  }
+
+  let limit: number | undefined;
+  const limitRaw = args["limit"];
+  if (limitRaw !== undefined) {
+    if (typeof limitRaw !== "number" || !Number.isInteger(limitRaw)) {
+      return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "list_project_commands: limit must be an integer" };
+    }
+    limit = Math.max(1, Math.min(100, limitRaw));
+  }
+
+  const lcArgs: ListProjectCommandsArgs = {
+    ...(conversationId !== undefined && { conversationId: conversationId as string }),
+    ...(state !== undefined && { state: state as string }),
+    ...(limit !== undefined && { limit }),
+  };
+
+  return { ok: true, toolName: "list_project_commands", args: lcArgs };
+}
+
+// ── read_command_output validator ──────────────────────────────────────────
+
+function validateReadCommandOutput(args: Record<string, unknown>): ValidationResult {
+  const commandId = args["command_id"];
+  if (typeof commandId !== "string" || commandId.trim().length === 0) {
+    return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "read_command_output: command_id must be a non-empty string" };
+  }
+
+  let offsetBytes: number | undefined;
+  const offsetRaw = args["offset_bytes"];
+  if (offsetRaw !== undefined) {
+    if (typeof offsetRaw !== "number" || !Number.isInteger(offsetRaw) || offsetRaw < 0) {
+      return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "read_command_output: offset_bytes must be a non-negative integer" };
+    }
+    offsetBytes = offsetRaw;
+  }
+
+  let limitBytes: number | undefined;
+  const limitRaw = args["limit_bytes"];
+  if (limitRaw !== undefined) {
+    if (typeof limitRaw !== "number" || !Number.isInteger(limitRaw) || limitRaw < 1) {
+      return { ok: false, errorCode: "INVALID_ARGUMENT", errorMessage: "read_command_output: limit_bytes must be a positive integer" };
+    }
+    limitBytes = Math.min(32768, limitRaw);
+  }
+
+  const rcArgs: ReadCommandOutputArgs = {
+    commandId: commandId.trim(),
+    ...(offsetBytes !== undefined && { offsetBytes }),
+    ...(limitBytes !== undefined && { limitBytes }),
+  };
+
+  return { ok: true, toolName: "read_command_output", args: rcArgs };
+}
+
 // ── Provider tool definition serialization ──────────────────────────────────
 
 /** OpenAI function/tool definition shape */
@@ -542,6 +635,63 @@ const TOOL_DEFS: Array<{
         },
       },
       required: ["executable", "args", "cwd_relative"],
+    },
+  },
+  {
+    name: "list_project_commands",
+    description:
+      "List recent command executions for this project. " +
+      "Use this to check the status of a previously proposed command, " +
+      "or to review what commands have been run in this session. " +
+      "Returns commandId, state, displayCommand, exitCode, and outputSummary for each entry.",
+    parameters: {
+      type: "object",
+      properties: {
+        conversation_id: {
+          type: "string",
+          description: "Optional: filter to commands from a specific conversation.",
+        },
+        state: {
+          type: "string",
+          description: "Optional: filter by state (e.g. 'awaiting_approval', 'running', 'succeeded', 'failed').",
+        },
+        limit: {
+          type: "integer",
+          description: "Maximum number of results to return (default 20, max 100).",
+          minimum: 1,
+          maximum: 100,
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: "read_command_output",
+    description:
+      "Read the captured stdout/stderr output of a completed or running command. " +
+      "Output is ANSI-stripped and sanitized (secrets redacted). " +
+      "Use offsetBytes + limitBytes to page through large outputs. " +
+      "The commandId is returned by run_command or list_project_commands.",
+    parameters: {
+      type: "object",
+      properties: {
+        command_id: {
+          type: "string",
+          description: "The command ID to read output for.",
+        },
+        offset_bytes: {
+          type: "integer",
+          description: "Byte offset to start reading from (default 0).",
+          minimum: 0,
+        },
+        limit_bytes: {
+          type: "integer",
+          description: "Max bytes to read (default 8192, max 32768).",
+          minimum: 1,
+          maximum: 32768,
+        },
+      },
+      required: ["command_id"],
     },
   },
 ];

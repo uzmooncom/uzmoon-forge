@@ -18,7 +18,10 @@ import {
   type ReadFileArgs,
   type ReadFileRangeArgs,
   type RunCommandArgs,
+  type ListProjectCommandsArgs,
+  type ReadCommandOutputArgs,
 } from "../agent-client/tool-types.js";
+import { COMMAND_LIMITS } from "../commands/command-limits.js";
 import type { CommandEvidenceRef } from "../../shared/types.js";
 import * as service from "./service.js";
 import { searchCode } from "./search-code.js";
@@ -32,6 +35,8 @@ export interface ToolExecutionContext {
   conversationId: string;
   /** Total bytes read so far this request (mutable — executor updates it) */
   readBytesUsed: number;
+  /** Number of run_command calls issued this agent run (mutable — executor increments it) */
+  commandsRunThisRequest: number;
 }
 
 export interface ToolExecutionResult {
@@ -99,6 +104,12 @@ export async function executeProjectTool(
       break;
     case "run_command":
       result = await handleRunCommand(call, validation.args as RunCommandArgs, ctx);
+      break;
+    case "list_project_commands":
+      result = await handleListProjectCommands(call, validation.args as ListProjectCommandsArgs, ctx);
+      break;
+    case "read_command_output":
+      result = await handleReadCommandOutput(call, validation.args as ReadCommandOutputArgs, ctx);
       break;
   }
 
@@ -506,6 +517,21 @@ async function handleRunCommand(
   args: RunCommandArgs,
   ctx: ToolExecutionContext
 ): Promise<Omit<ToolExecutionResult, "durationMs">> {
+  // Per-request command budget (COMMAND_BUDGET_EXCEEDED)
+  if (ctx.commandsRunThisRequest >= COMMAND_LIMITS.MAX_COMMANDS_PER_AGENT_RUN) {
+    return {
+      result: {
+        callId: call.callId,
+        toolName: call.name,
+        ok: false,
+        errorCode: "COMMAND_BUDGET_EXCEEDED",
+        errorMessage: `Command budget exhausted: maximum ${COMMAND_LIMITS.MAX_COMMANDS_PER_AGENT_RUN} run_command calls per agent run.`,
+      },
+    };
+  }
+  // Increment budget counter before proposal (prevents race if two tool calls overlap)
+  ctx.commandsRunThisRequest++;
+
   // Lazy import to avoid circular dependency
   const { propose } = await import("../commands/command-manager.js");
   const { COMMAND_TERMINAL_STATES } = await import("../../shared/types.js");
@@ -652,6 +678,112 @@ async function handleRunCommand(
   };
 }
 
+// ── list_project_commands handler ───────────────────────────────────────────
+
+async function handleListProjectCommands(
+  call: ForgeToolCall,
+  args: ListProjectCommandsArgs,
+  ctx: ToolExecutionContext
+): Promise<Omit<ToolExecutionResult, "durationMs">> {
+  const { listCommands } = await import("../commands/command-manager.js");
+
+  const allForProject = listCommands(ctx.projectId, args.conversationId);
+
+  // Optional state filter
+  let filtered = args.state
+    ? allForProject.filter((c) => c.state === args.state)
+    : allForProject;
+
+  // Sort newest first
+  filtered = filtered.sort((a, b) => b.createdAt - a.createdAt);
+
+  const limit = args.limit ?? 20;
+  const results = filtered.slice(0, limit).map((c) => ({
+    commandId: c.id,
+    state: c.state,
+    displayCommand: c.displayCommand,
+    source: c.source,
+    riskClass: c.policyDecision.riskClass,
+    exitCode: c.exitCode ?? null,
+    durationMs: c.durationMs ?? null,
+    createdAt: c.createdAt,
+    ...(c.authorizationState && { authorizationState: c.authorizationState }),
+  }));
+
+  return {
+    result: {
+      callId: call.callId,
+      toolName: call.name,
+      ok: true,
+      data: {
+        projectId: ctx.projectId,
+        count: results.length,
+        totalCount: filtered.length,
+        commands: results,
+      },
+    },
+  };
+}
+
+// ── read_command_output handler ──────────────────────────────────────────────
+
+async function handleReadCommandOutput(
+  call: ForgeToolCall,
+  args: ReadCommandOutputArgs,
+  ctx: ToolExecutionContext
+): Promise<Omit<ToolExecutionResult, "durationMs">> {
+  const { getCommand, readCommandOutput } = await import("../commands/command-manager.js");
+
+  const record = getCommand(args.commandId);
+
+  // Cross-project access guard — agent may only read commands in its own project
+  if (!record) {
+    return {
+      result: {
+        callId: call.callId,
+        toolName: call.name,
+        ok: false,
+        errorCode: "NOT_FOUND",
+        errorMessage: `Command not found: ${args.commandId}`,
+      },
+    };
+  }
+
+  if (record.projectId !== ctx.projectId) {
+    return {
+      result: {
+        callId: call.callId,
+        toolName: call.name,
+        ok: false,
+        errorCode: "ACCESS_DENIED",
+        errorMessage: `Command ${args.commandId} belongs to a different project.`,
+      },
+    };
+  }
+
+  const page = readCommandOutput(
+    args.commandId,
+    args.offsetBytes ?? 0,
+    args.limitBytes ?? COMMAND_LIMITS.MAX_MODEL_OUTPUT_BYTES
+  );
+
+  return {
+    result: {
+      callId: call.callId,
+      toolName: call.name,
+      ok: true,
+      data: {
+        commandId: args.commandId,
+        state: record.state,
+        text: page.text,
+        truncated: page.truncated,
+        totalBytes: page.totalBytes,
+        offsetBytes: args.offsetBytes ?? 0,
+      },
+    },
+  };
+}
+
 /**
  * Generate a stable tool activity result summary string.
  */
@@ -688,6 +820,15 @@ export function buildResultSummary(toolName: string, result: ForgeToolResult): s
       const exitCode = data["exitCode"] as number | undefined;
       const exitStr = exitCode !== undefined ? ` exit ${exitCode}` : "";
       return `${exitStr}`;
+    }
+    case "list_project_commands": {
+      const count = (data["count"] as number) ?? 0;
+      return `${count} command${count !== 1 ? "s" : ""}`;
+    }
+    case "read_command_output": {
+      const totalBytes = (data["totalBytes"] as number) ?? 0;
+      const truncated = data["truncated"] ? "+" : "";
+      return `${formatBytes(totalBytes)}${truncated} output`;
     }
     default:
       return "ok";

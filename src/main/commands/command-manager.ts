@@ -53,7 +53,7 @@ import * as db from "../database/db.js";
 // ── DB sentinel ──────────────────────────────────────────────────────────────
 // All db functions take `_db: true` as first arg.
 // We pass the literal `true` — same pattern as QueueManager.ts.
-const DB: true = true;
+const DB = true as const;
 
 // ── Process handle registry (in-memory only, never persisted) ────────────────
 

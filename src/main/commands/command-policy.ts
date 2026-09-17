@@ -198,7 +198,6 @@ function matchesCompositeExact(
  */
 export function classifyRisk(spec: CommandSpec): CommandRiskClass {
   const exec = basename(spec.executable);
-  const f = firstArg(spec.args);
 
   // 1. Shell interpreters (highest priority block)
   if (SHELL_INTERPRETERS.has(exec)) return "shell_interpreter";

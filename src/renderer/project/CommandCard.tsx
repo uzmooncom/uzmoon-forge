@@ -117,6 +117,7 @@ function riskLabel(rc: CommandRiskClass): string {
 export function CommandCard({ cmd, onApprove, onReject, onCancel }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [trustMode, setTrustMode] = useState<"once" | "trust">("once");
+  const [approvalSubmitting, setApprovalSubmitting] = useState(false);
 
   const isTerminal = ["succeeded", "failed", "timed_out", "cancelled", "blocked"].includes(cmd.state);
   const isRunning = cmd.state === "running";
@@ -212,14 +213,26 @@ export function CommandCard({ cmd, onApprove, onReject, onCancel }: Props) {
 
           <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
             <button
-              onClick={(e) => { e.stopPropagation(); onReject?.(cmd.id); }}
-              style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 6, border: "1px solid rgba(239,68,68,0.3)", background: "transparent", color: "rgba(248,113,113,0.7)", fontSize: 11, cursor: "pointer" }}
+              disabled={approvalSubmitting}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (approvalSubmitting) return;
+                setApprovalSubmitting(true);
+                onReject?.(cmd.id);
+              }}
+              style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 6, border: "1px solid rgba(239,68,68,0.3)", background: "transparent", color: approvalSubmitting ? "rgba(248,113,113,0.3)" : "rgba(248,113,113,0.7)", fontSize: 11, cursor: approvalSubmitting ? "not-allowed" : "pointer", opacity: approvalSubmitting ? 0.5 : 1 }}
             >
               <XIcon /> Reject
             </button>
             <button
-              onClick={(e) => { e.stopPropagation(); onApprove?.(cmd.id, trustMode); }}
-              style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 6, border: "none", background: "rgba(16,185,129,0.6)", color: "white", fontSize: 11, fontWeight: 500, cursor: "pointer" }}
+              disabled={approvalSubmitting}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (approvalSubmitting) return;
+                setApprovalSubmitting(true);
+                onApprove?.(cmd.id, trustMode);
+              }}
+              style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 10px", borderRadius: 6, border: "none", background: approvalSubmitting ? "rgba(16,185,129,0.3)" : "rgba(16,185,129,0.6)", color: "white", fontSize: 11, fontWeight: 500, cursor: approvalSubmitting ? "not-allowed" : "pointer", opacity: approvalSubmitting ? 0.5 : 1 }}
             >
               <CheckIcon /> Approve
             </button>

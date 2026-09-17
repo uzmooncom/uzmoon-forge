@@ -177,8 +177,6 @@ const PREVIEW_DEFAULT_WIDTH = 360;
 const PREVIEW_MIN_WIDTH = 240;
 const PREVIEW_MAX_WIDTH = 600;
 const TERMINAL_DEFAULT_WIDTH = 280;
-const TERMINAL_MIN_WIDTH = 220;
-const TERMINAL_MAX_WIDTH = 500;
 
 // ── ProjectWorkspace ────────────────────────────────────────────────────────
 
@@ -202,7 +200,8 @@ export default function ProjectWorkspace({ project, onBack, onOpenSettings }: Pr
 
   // Terminal panel
   const [showTerminal, setShowTerminal] = useState(false);
-  const [terminalWidth, setTerminalWidth] = useState(TERMINAL_DEFAULT_WIDTH);
+  const [terminalWidth, _setTerminalWidth] = useState(TERMINAL_DEFAULT_WIDTH);
+  void _setTerminalWidth; // resize drag will wire this in a future pass
 
   // Preview state
   const [previewPath, setPreviewPath] = useState<string | null>(null);

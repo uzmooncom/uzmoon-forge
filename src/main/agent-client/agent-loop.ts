@@ -465,13 +465,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   // queued → starting
   transition(run, "starting", tracer);
 
-  // Mutable execution context (shared reference — tool executor updates readBytesUsed)
+  // Mutable execution context (shared reference — tool executor updates readBytesUsed/commandsRunThisRequest)
   const ctx: ToolExecutionContext = {
     projectId,
     projectRoot,
     requestId,
     conversationId,
     readBytesUsed: 0,
+    commandsRunThisRequest: 0,
   };
 
   // Accumulated results

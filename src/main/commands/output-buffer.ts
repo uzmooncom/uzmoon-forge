@@ -28,9 +28,11 @@ import { redactSecrets } from "../reliability/sanitizer.js";
 // - CSI sequences: ESC [ ... m (colors, cursor movement)
 // - OSC sequences: ESC ] ... ST (hyperlinks, title set)
 // - Other ESC sequences
+// eslint-disable-next-line no-control-regex
 const ANSI_ESCAPE_RE = /\x1b(?:\[[0-9;]*[a-zA-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|\([AB]|[^[\]()A-Za-z]?[A-Za-z])/g;
 
 // C0 control characters excluding \t (0x09) \n (0x0A) \r (0x0D)
+// eslint-disable-next-line no-control-regex
 const CONTROL_CHAR_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g;
 
 export function stripAnsiAndControlChars(text: string): string {

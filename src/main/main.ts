@@ -6,6 +6,12 @@ import { registerHandlers } from "./ipc/handlers.js";
 import { sweepOrphanedSnapshots } from "./queue/QueueManager.js";
 import { sweepWriteJournal } from "./project-files/edit-service.js";
 import { initReliabilityEngine } from "./reliability/index.js";
+import {
+  initCommandManager,
+  reconcileOnStartup,
+  cancelAllOnQuit,
+} from "./commands/command-manager.js";
+import { NodeProcessAdapter } from "./commands/process-adapter.js";
 import { RELIABILITY_IPC } from "../shared/types.js";
 
 const dataDir =
@@ -85,6 +91,15 @@ app.whenReady().then(() => {
 
   createWindow(secrets, database);
 
+  // Initialize command manager with the real process adapter
+  // Must be after createWindow so mainWindow.webContents exists
+  if (mainWindow) {
+    initCommandManager(new NodeProcessAdapter(), mainWindow.webContents);
+  }
+
+  // Reconcile any running/queued commands from a prior crash
+  try { reconcileOnStartup(); } catch { /* non-fatal */ }
+
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow(secrets, database);
@@ -96,4 +111,9 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+app.on("before-quit", () => {
+  // Best-effort cancel of all running commands on quit
+  void cancelAllOnQuit();
 });
