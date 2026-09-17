@@ -791,3 +791,156 @@ export const AGENT_TOOL_IPC = {
   /** Get tool activity entries for a given requestId */
   TOOL_ACTIVITY_GET: "agentTool:activityGet",
 } as const;
+
+// ── V0.9 Reliability Hardening ─────────────────────────────────────────────
+
+/**
+ * Canonical typed failure codes shared across agent-loop, QueueManager, edit-service.
+ * Used for incident fingerprinting — never fingerprint arbitrary display strings.
+ */
+export type ForgeFailureCode =
+  | "PROTOCOL_RECOVERY_EXHAUSTED"
+  | "PROVIDER_ERROR"
+  | "CONTEXT_INTEGRITY_ERROR"
+  | "RESOURCE_MISSING"
+  | "EDIT_PROPOSAL_INVALID"
+  | "EDIT_PROPOSAL_TRUNCATED"
+  | "EDIT_PROPOSAL_AMBIGUOUS"
+  | "TOOL_BUDGET_EXHAUSTED"
+  | "CANCELLED"
+  | "PROJECT_UNAVAILABLE"
+  | "INVARIANT_VIOLATION"
+  | "INVALID_STATE_TRANSITION"
+  | "CROSS_RUN_CONTAMINATION"
+  | "DUPLICATE_FINAL_MESSAGE"
+  | "STALE_BASE_WRITE"
+  | "RESOURCE_GC_VIOLATION"
+  | "UNKNOWN";
+
+/** Severity levels for invariants and incidents */
+export type ForgeSeverity = "critical" | "high" | "medium" | "low";
+
+/** Broad incident categories */
+export type IncidentCategory =
+  | "AGENT_RUNTIME"
+  | "PROTOCOL"
+  | "QUEUE"
+  | "CONCURRENCY"
+  | "NAVIGATION"
+  | "PERSISTENCE"
+  | "RESOURCE_LIFECYCLE"
+  | "PROJECT_INTELLIGENCE"
+  | "SAFE_EDITING"
+  | "PROVIDER"
+  | "INDEXING"
+  | "IPC_ROUTING"
+  | "SECURITY_INVARIANT";
+
+/** A canonical incident record — stored locally, never sent without opt-in */
+export interface ForgeIncident {
+  id: string;
+  fingerprint: string;
+  invariantId: string;
+  category: IncidentCategory;
+  severity: ForgeSeverity;
+  failureCode: ForgeFailureCode;
+  forgeVersion: string;
+  runtimeSchemaVersion: number;
+  requestId?: string;
+  conversationId?: string;
+  projectId?: string;
+  agentRunId?: string;
+  observedState: Record<string, unknown>;
+  expectedState?: Record<string, unknown>;
+  traceId?: string;
+  recoveryApplied?: string;
+  recoveryResult?: "success" | "failed" | "skipped";
+  firstSeen: number;
+  lastSeen: number;
+  occurrenceCount: number;
+  knownIssue?: boolean;
+  sanitizedSharePayload?: Record<string, unknown>;
+}
+
+/** A trace event emitted during an AgentRun for reliability observability */
+export interface TraceEvent {
+  traceId: string;
+  requestId: string;
+  conversationId: string;
+  projectId?: string;
+  sequence: number;
+  timestamp: number;
+  kind:
+    | "RUN_CREATED"
+    | "RUN_STATE_CHANGED"
+    | "PROVIDER_REQUEST_STARTED"
+    | "PROVIDER_RESPONSE_NORMALIZED"
+    | "TOOL_REQUESTED"
+    | "TOOL_STARTED"
+    | "TOOL_COMPLETED"
+    | "TOOL_FAILED"
+    | "FILE_READ"
+    | "SNAPSHOT_CAPTURED"
+    | "LEDGER_UPDATED"
+    | "PROTOCOL_RECOVERY"
+    | "FINAL_NORMALIZED"
+    | "PROPOSAL_CREATED"
+    | "QUEUE_STATE_CHANGED"
+    | "NAVIGATION_REHYDRATED"
+    | "RUN_COMPLETED"
+    | "RUN_FAILED"
+    | "RUN_CANCELLED"
+    | "INVARIANT_VIOLATION";
+  /** Structured metadata — no secrets, no raw content, no absolute paths */
+  meta: Record<string, unknown>;
+  /** Optional tool call ID for tool events */
+  toolCallId?: string;
+  /** Optional resource ID for resource events */
+  resourceId?: string;
+}
+
+/**
+ * V0.9 Structured Edit IR — enables compact multi-file edit proposals.
+ * Model does NOT supply hashes — Forge derives from immutable base.
+ */
+export type EditOperationType = "full_content" | "exact_text_replace";
+
+export interface FullContentEditOp {
+  operation: "full_content";
+  path: string;
+  content: string;
+}
+
+export interface ExactTextReplaceOp {
+  operation: "exact_text_replace";
+  path: string;
+  oldText: string;
+  newText: string;
+  /** Expected number of occurrences — required for determinism (1 = single match required) */
+  expectedOccurrences: number;
+}
+
+export type EditOperationIR = FullContentEditOp | ExactTextReplaceOp;
+
+/** A compact multi-file edit proposal using Edit IR */
+export interface StructuredEditProposal {
+  summary: string;
+  explanation?: string;
+  operations: EditOperationIR[];
+}
+
+/** V0.9 IPC channels for reliability */
+export const RELIABILITY_IPC = {
+  /** Get current incident summary list */
+  INCIDENTS_LIST: "reliability:incidentsList",
+  /** Get full incident by id */
+  INCIDENT_GET: "reliability:incidentGet",
+  /** Get sanitized share payload for an incident */
+  INCIDENT_SHARE_PAYLOAD: "reliability:incidentSharePayload",
+  /** Clear all incidents */
+  INCIDENTS_CLEAR: "reliability:incidentsClear",
+  /** Get current reliability metrics */
+  METRICS_GET: "reliability:metricsGet",
+  /** Push from main: new incident recorded */
+  INCIDENT_RECORDED: "reliability:incidentRecorded",
+} as const;

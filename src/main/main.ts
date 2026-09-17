@@ -5,6 +5,7 @@ import { SecretStore } from "./secret-store/secrets.js";
 import { registerHandlers } from "./ipc/handlers.js";
 import { sweepOrphanedSnapshots } from "./queue/QueueManager.js";
 import { sweepWriteJournal } from "./project-files/edit-service.js";
+import { initReliabilityEngine } from "./reliability/index.js";
 
 const dataDir =
   process.env["FORGE_DATA_DIR"] ?? app.getPath("userData");
@@ -67,6 +68,14 @@ app.whenReady().then(() => {
   void database;
   try { sweepOrphanedSnapshots(); } catch { /* non-fatal */ }
   try { sweepWriteJournal(); } catch { /* non-fatal */ }
+
+  // Initialize reliability subsystem (non-blocking; best-effort)
+  try {
+    initReliabilityEngine({
+      dataDir,
+      version: "0.9.0",
+    });
+  } catch { /* non-fatal */ }
 
   createWindow(secrets, database);
 

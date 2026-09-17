@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } fr
 import { randomUUID, createHash } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -22,6 +22,8 @@ import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
 import { testConnection } from "../agent-client/client.js";
 import { queueManager, cancelStream, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots } from "../queue/QueueManager.js";
+import { tryGetIncidentRecorder } from "../reliability/index.js";
+import { buildGitHubIssuePayload } from "../reliability/sanitizer.js";
 void sweepOrphanedSnapshots; // imported for startup use — called from main.ts
 
 interface Services {
@@ -1204,6 +1206,60 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       // Sort by executedAt ascending
       allActivity.sort((a, b) => a.executedAt - b.executedAt);
       return allActivity;
+    }
+  );
+
+  // ── V0.9 Reliability IPC ───────────────────────────────────────────────
+  ipcMain.handle(
+    RELIABILITY_IPC.INCIDENTS_LIST,
+    (): import("../../shared/types.js").ForgeIncident[] => {
+      return tryGetIncidentRecorder()?.getAll() ?? [];
+    }
+  );
+
+  ipcMain.handle(
+    RELIABILITY_IPC.INCIDENT_GET,
+    (_e: IpcMainInvokeEvent, id: string): import("../../shared/types.js").ForgeIncident | undefined => {
+      return tryGetIncidentRecorder()?.getById(id);
+    }
+  );
+
+  ipcMain.handle(
+    RELIABILITY_IPC.INCIDENT_SHARE_PAYLOAD,
+    (_e: IpcMainInvokeEvent, id: string): Record<string, unknown> | null => {
+      const recorder = tryGetIncidentRecorder();
+      if (!recorder) return null;
+      const inc = recorder.getById(id);
+      if (!inc) return null;
+      const payload = buildGitHubIssuePayload({
+        invariantId: inc.invariantId,
+        failureCode: inc.failureCode,
+        category: inc.category,
+        severity: inc.severity,
+        fingerprint: inc.fingerprint,
+        forgeVersion: inc.forgeVersion,
+        runtimeSchemaVersion: inc.runtimeSchemaVersion,
+        observedState: inc.observedState,
+        ...(inc.traceId !== undefined && { traceId: inc.traceId }),
+        occurrenceCount: inc.occurrenceCount,
+      });
+      return payload as Record<string, unknown>;
+    }
+  );
+
+  ipcMain.handle(
+    RELIABILITY_IPC.INCIDENTS_CLEAR,
+    (): void => {
+      tryGetIncidentRecorder()?.clear();
+    }
+  );
+
+  ipcMain.handle(
+    RELIABILITY_IPC.METRICS_GET,
+    (): Record<string, unknown> => {
+      const recorder = tryGetIncidentRecorder();
+      if (!recorder) return { total: 0, critical: 0, high: 0, byCategory: {}, knownIssues: 0, oldestSeen: null };
+      return recorder.getMetrics() as unknown as Record<string, unknown>;
     }
   );
 }

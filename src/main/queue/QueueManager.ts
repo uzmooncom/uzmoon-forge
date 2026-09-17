@@ -12,6 +12,7 @@
 import { randomUUID, createHash } from "crypto";
 import { WebContents } from "electron";
 import { IPC, EDIT_IPC } from "../../shared/types.js";
+import { assertInvariant } from "../reliability/invariants.js";
 import type { QueueItem, ChatMessage, Conversation, ContextRef, RequestContextLedger, ForgeToolCall, ForgeToolResult, ConvRuntimeState } from "../../shared/types.js";
 import * as db from "../database/db.js";
 import { classifyError } from "../agent-client/client.js";
@@ -886,6 +887,7 @@ Rules:
 - NEVER say "let me check" or "I will inspect" without using a forge_tool action.
 - NEVER end a response with planning narration.
 - Use forge_final only when the original user request has actually been answered completely.
+- For simple conversational questions or requests that do not require project file access (greetings, explanations, questions about yourself), you MUST respond with forge_final immediately on the first turn — no tool calls are needed or appropriate.
 - Continue autonomously until you can provide a complete answer, a valid proposal, or encounter a real blocker.
 - Do not expose forge_tool, forge_final, forge_edit_proposal syntax in user-facing content.
 </forge_agent_protocol>`
@@ -1283,6 +1285,7 @@ Rules:
       // ── AgentLoopError — typed runtime failures ────────────────────────────
       // Map each failure code to a coherent user-visible error message.
       // No intermediate narration is persisted — only one error ChatMessage.
+      // INV: ONE_RUN_ONE_VISIBLE_FAILURE — exactly one error message per failed run.
       if (err instanceof AgentLoopError) {
         let errorContent: string;
         switch (err.code) {
@@ -1301,6 +1304,16 @@ Rules:
           default:
             errorContent = "Could not complete this Agent run. Please try again.";
         }
+
+        // Assert: only one error message being created for this failed run.
+        const existingErrors = db.getMessagesByConversation(true, conversationId)
+          .filter(m => m.isError === true && m.agentProfileId === profile.id);
+        assertInvariant(
+          "ONE_RUN_ONE_VISIBLE_FAILURE",
+          existingErrors.length === 0 || existingErrors.every(m => m.content !== errorContent),
+          { existingErrorCount: existingErrors.length, requestId: requestId, conversationId },
+          { requestId, conversationId, hint: "AgentLoopError path" },
+        );
 
         const agentLoopErrorMsg: ChatMessage = {
           id: randomUUID(),
