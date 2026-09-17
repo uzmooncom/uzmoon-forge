@@ -42,6 +42,7 @@ vi.mock("../agent-client/client.js", () => ({
 }));
 
 import { runAgentLoop, AgentLoopError } from "../agent-client/agent-loop.js";
+import { buildOpenAIToolDefs, buildAnthropicToolDefs } from "../agent-client/tool-types.js";
 import {
   getDb,
   resetDb,
@@ -486,5 +487,84 @@ describe("Invariant wiring — PROVIDER_DISCONNECT_HANDLED", () => {
     // the AgentLoopError branch — so no violation expected here
     const provViolation = violations.find((v) => v.invariantId === "PROVIDER_DISCONNECT_HANDLED");
     expect(provViolation).toBeUndefined();
+  });
+});
+
+// ── Regression: Safe Terminal V1 capability exposure ─────────────────────
+// Root cause: forge_project_tools system prompt block claimed
+// "Terminal, shell, and command execution are unavailable" even after
+// Safe Terminal V1 was shipped. The model obeyed the prose instruction
+// and refused all terminal requests despite run_command being in TOOL_DEFS.
+
+describe("Regression — Safe Terminal V1 capability exposure (wiring-16, wiring-17)", () => {
+  it("wiring-16: Project Chat system prompt must expose run_command and not claim terminal is unavailable", async () => {
+    const convId = makeConv(PROJECT_ID); // project-scoped conversation
+
+    mockRunAgentLoop.mockResolvedValueOnce({
+      finalText: "done",
+      proposalFenceRaw: undefined,
+      agentReadRefs: [],
+      toolActivity: [],
+    });
+
+    await enqueueAndWait(convId, "Run pnpm test for me", 2000);
+
+    // The system prompt is the first argument to runAgentLoop
+    expect(mockRunAgentLoop).toHaveBeenCalled();
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const cfg = mockRunAgentLoop.mock.calls[0]![0] as { system?: string };
+    const sysPrompt = cfg.system ?? "";
+
+    // Must mention run_command
+    expect(sysPrompt).toContain("run_command");
+
+    // Must NOT contain the false claim that terminal/shell is unavailable
+    expect(sysPrompt).not.toContain("Terminal, shell, and command execution are unavailable");
+    expect(sysPrompt).not.toContain("shell access is unavailable");
+    expect(sysPrompt).not.toContain("shell erişimim bulunmuyor");
+
+    // Must be a non-trivial system prompt (project mode wires one)
+    expect(sysPrompt.length).toBeGreaterThan(200);
+  });
+
+  it("wiring-17: buildOpenAIToolDefs and buildAnthropicToolDefs include all three command tools", () => {
+    const openAiTools = buildOpenAIToolDefs();
+    const openAiNames = openAiTools.map((t) => t.function.name);
+    expect(openAiNames).toContain("run_command");
+    expect(openAiNames).toContain("list_project_commands");
+    expect(openAiNames).toContain("read_command_output");
+
+    const anthropicTools = buildAnthropicToolDefs();
+    const anthropicNames = anthropicTools.map((t) => t.name);
+    expect(anthropicNames).toContain("run_command");
+    expect(anthropicNames).toContain("list_project_commands");
+    expect(anthropicNames).toContain("read_command_output");
+
+    // Verify run_command has required schema fields
+    const rcDef = anthropicTools.find((t) => t.name === "run_command");
+    expect(rcDef).toBeDefined();
+    const schema = rcDef!.input_schema as { properties: Record<string, unknown> };
+    expect(schema.properties).toHaveProperty("executable");
+    expect(schema.properties).toHaveProperty("args");
+    expect(schema.properties).toHaveProperty("cwd_relative");
+  });
+
+  it("wiring-16b: Global Chat system prompt is undefined (run_command only for project mode)", async () => {
+    const convId = makeConv(undefined); // no projectId → global chat
+
+    mockRunAgentLoop.mockResolvedValueOnce({
+      finalText: "hello",
+      proposalFenceRaw: undefined,
+      agentReadRefs: [],
+      toolActivity: [],
+    });
+
+    await enqueueAndWait(convId, "Hi", 2000);
+
+    expect(mockRunAgentLoop).toHaveBeenCalled();
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    const cfg = mockRunAgentLoop.mock.calls[0]![0] as { system?: string };
+    // Global chat has no system prompt — undefined or empty
+    expect(cfg.system == null || cfg.system === "").toBe(true);
   });
 });
