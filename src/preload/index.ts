@@ -30,6 +30,7 @@ import type {
   ToolActivityEntry,
   ForgeToolCall,
   ForgeToolResult,
+  ConvRuntimeState,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -239,6 +240,11 @@ const forgeApi = {
   /** Cancel the active stream for a conversation (stops processing, pauses queue) */
   cancelStream: (convId: string): Promise<void> =>
     ipcRenderer.invoke(IPC.CHAT_CANCEL, convId),
+
+  // ── Runtime state (authoritative active-run query) ──────────────────────
+  /** Returns live AgentRun state for convId, or null if idle. */
+  getRuntimeState: (convId: string): Promise<ConvRuntimeState | null> =>
+    ipcRenderer.invoke(IPC.RUNTIME_STATE_GET, convId),
 
   // ── Queue management ─────────────────────────────────────────────────────
   getQueue: (convId: string): Promise<{ items: QueueItem[]; paused: boolean }> =>

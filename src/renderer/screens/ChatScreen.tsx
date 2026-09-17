@@ -13,6 +13,7 @@ import type {
   QueueItem,
   ConvQueueState,
   AgentProfile,
+  ConvRuntimeState,
 } from "../../shared/types.js";
 
 // Chat sub-components
@@ -78,17 +79,23 @@ function QueuePanel({
 }: QueuePanelProps) {
   if (!queueState) return null;
 
-  const pending = queueState.items.filter(
-    (i) => i.status === "queued" || i.status === "processing" || i.status === "paused"
+  // ACTIVE: currently processing (owned by StreamingBubble, just its queue entry)
+  // WAITING: truly queued, waiting behind active
+  // The active/processing item must NOT be counted as "queued" in the label
+  const waitingItems = queueState.items.filter(
+    (i) => i.status === "queued" || i.status === "paused"
   );
   const failed = queueState.items.filter((i) => i.status === "failed");
 
-  if (pending.length === 0 && failed.length === 0 && !queueState.paused) return null;
+  if (waitingItems.length === 0 && failed.length === 0 && !queueState.paused && !isStreaming) return null;
+  // Also skip if ONLY streaming with no waiting/failed items — StreamingBubble covers that
+  if (isStreaming && waitingItems.length === 0 && failed.length === 0 && !queueState.paused) return null;
 
   return (
     <div className="mx-4 mb-2 max-w-[800px] mx-auto">
       <div className="bg-[#1a1a27] border border-white/8 rounded-xl overflow-hidden">
-        {/* Header */}
+        {/* Header — only shown when there are waiting/paused/failed items */}
+        {(waitingItems.length > 0 || failed.length > 0 || queueState.paused) && (
         <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5">
           <div
             className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
@@ -100,11 +107,9 @@ function QueuePanel({
             }`}
           />
           <span className="text-xs text-white/50 flex-1">
-            {isStreaming
-              ? "Processing…"
-              : queueState.paused
+            {queueState.paused && !isStreaming
               ? "Queue paused"
-              : `${pending.length} message${pending.length !== 1 ? "s" : ""} queued`}
+              : `${waitingItems.length} message${waitingItems.length !== 1 ? "s" : ""} queued`}
           </span>
           {queueState.paused && !isStreaming && (
             <button
@@ -115,6 +120,7 @@ function QueuePanel({
             </button>
           )}
         </div>
+        )}
 
         {/* Failed items */}
         {failed.map((item) => (
@@ -146,9 +152,8 @@ function QueuePanel({
           </div>
         ))}
 
-        {/* Queued items (not processing) */}
-        {pending
-          .filter((i) => i.status === "queued" || i.status === "paused")
+        {/* Queued items — excludes the currently-processing item */}
+        {waitingItems
           .map((item) => (
             <div
               key={item.id}
@@ -382,6 +387,60 @@ export default function ChatScreen({
     });
   }, [activeConvId]);
 
+  // ── Runtime state hydration ─────────────────────────────────────────────
+  // When returning to a conversation that has an active AgentRun, reconstruct
+  // the transient streaming UI from the authoritative main-process registry.
+  //
+  // Subscribe-first pattern: IPC listeners are registered at component mount
+  // (the effect below). Hydration queries happen here AFTER listeners are up,
+  // so we can never miss a STREAM_END that races the hydration response.
+  // If the run completes between our query and the subscription being active,
+  // the STREAM_END event will still fire and clear streaming state correctly.
+  const lastHydratedConvRef = useRef<string | null>(null);
+  const lastHydratedRevisionRef = useRef<number>(-1);
+
+  useEffect(() => {
+    if (!activeConvId) return;
+
+    // Reset hydration tracking for the new conversation
+    lastHydratedConvRef.current = activeConvId;
+    lastHydratedRevisionRef.current = -1;
+
+    // Query authoritative runtime state
+    void window.forgeApi.getRuntimeState(activeConvId).then((state: ConvRuntimeState | null) => {
+      // Guard: user may have switched away before promise resolved
+      if (lastHydratedConvRef.current !== activeConvId) return;
+      if (!state) {
+        // No active run — clear any stale streaming state for this conv
+        // (handles: run completed while renderer was unmounted)
+        setStreamingMap((prev) => {
+          const cur = prev[activeConvId];
+          if (!cur) return prev;
+          // Only clear if this was a hydrated ghost, not a real live subscription
+          const n = { ...prev };
+          delete n[activeConvId];
+          return n;
+        });
+        return;
+      }
+
+      // Guard against overwriting newer local state (event arrived before hydration)
+      const existingRevision = lastHydratedRevisionRef.current;
+      if (existingRevision >= state.revision) return;
+      lastHydratedRevisionRef.current = state.revision;
+
+      // Register streamId↔convId mapping so future chunk/tool/end events work
+      streamConvMap.current.set(state.streamId, activeConvId);
+
+      // Reconstruct streaming state — text may be empty (tools still running)
+      setStreaming(
+        { streamId: state.streamId, text: "", conversationId: activeConvId },
+        activeConvId
+      );
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConvId]);
+
   // Persist sidebar prefs
   useEffect(() => {
     try { localStorage.setItem("forge:sidebarOpen", String(sidebarOpen)); } catch { /**/ }
@@ -422,6 +481,10 @@ export default function ChatScreen({
       const convId = conversation?.id ?? userMessage?.conversationId;
       if (!convId) return;
       streamConvMap.current.set(streamId, convId);
+      // Bump revision so a stale hydration response doesn't overwrite this live event
+      if (convId === lastHydratedConvRef.current) {
+        lastHydratedRevisionRef.current = Number.MAX_SAFE_INTEGER;
+      }
       setStreaming({ streamId, text: "", conversationId: convId }, convId);
       if (conversation) {
         setConversations((prev) => {

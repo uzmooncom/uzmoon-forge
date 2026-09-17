@@ -12,7 +12,7 @@
 import { randomUUID, createHash } from "crypto";
 import { WebContents } from "electron";
 import { IPC, EDIT_IPC } from "../../shared/types.js";
-import type { QueueItem, ChatMessage, Conversation, ContextRef, RequestContextLedger, ForgeToolCall, ForgeToolResult } from "../../shared/types.js";
+import type { QueueItem, ChatMessage, Conversation, ContextRef, RequestContextLedger, ForgeToolCall, ForgeToolResult, ConvRuntimeState } from "../../shared/types.js";
 import * as db from "../database/db.js";
 import { classifyError } from "../agent-client/client.js";
 import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
@@ -449,6 +449,46 @@ export function cancelStream(streamId: string): void {
   if (sig) sig.aborted = true;
 }
 
+// ── Active run registry ────────────────────────────────────────────────────
+// Stores live runtime state per conversation for renderer hydration.
+// Populated at run start, updated as tool calls arrive, deleted at run end.
+// The renderer queries this via RUNTIME_STATE_GET when mounting mid-run.
+
+type LiveToolEntry = ConvRuntimeState["toolActivity"][number];
+
+interface ActiveRunEntry {
+  streamId: string;
+  requestId: string;
+  conversationId: string;
+  agentProfileId: string;
+  agentNameSnapshot: string;
+  modelSnapshot: string;
+  startedAt: number;
+  toolActivity: LiveToolEntry[];
+  exploredCount: number;
+  revision: number;
+}
+
+/** conversationId → live run entry */
+const activeRunRegistry = new Map<string, ActiveRunEntry>();
+
+export function getRuntimeState(convId: string): ConvRuntimeState | null {
+  const entry = activeRunRegistry.get(convId);
+  if (!entry) return null;
+  return {
+    conversationId: entry.conversationId,
+    streamId: entry.streamId,
+    requestId: entry.requestId,
+    agentProfileId: entry.agentProfileId,
+    agentNameSnapshot: entry.agentNameSnapshot,
+    modelSnapshot: entry.modelSnapshot,
+    startedAt: entry.startedAt,
+    toolActivity: structuredClone(entry.toolActivity),
+    exploredCount: entry.exploredCount,
+    revision: entry.revision,
+  };
+}
+
 // ── Dispatch lock ──────────────────────────────────────────────────────────
 
 const processing = new Set<string>();
@@ -703,6 +743,21 @@ export class QueueManager {
     convToStream.set(conversationId, streamId);
 
     const startTime = Date.now();
+
+    // Register live run entry so the renderer can hydrate on remount
+    const runEntry: ActiveRunEntry = {
+      streamId,
+      requestId: "", // filled in after requestId is created below
+      conversationId,
+      agentProfileId: profile.id,
+      agentNameSnapshot: profile.name,
+      modelSnapshot: profile.model,
+      startedAt: startTime,
+      toolActivity: [],
+      exploredCount: 0,
+      revision: 1,
+    };
+    activeRunRegistry.set(conversationId, runEntry);
     let fullText = "";
 
     // Immutable request config — profile snapshot in memory only
@@ -838,6 +893,8 @@ Rules:
 
     // Create RequestContextLedger for this request
     const requestId = randomUUID();
+    // Backfill requestId into the registry entry now that we have it
+    runEntry.requestId = requestId;
     const ledger: RequestContextLedger = {
       requestId,
       conversationId,
@@ -874,9 +931,36 @@ Rules:
           this.send(IPC.CHAT_STREAM_ACTIVITY_TEXT, { streamId, text });
         },
         onToolStart: (call: ForgeToolCall) => {
+          // Update live registry for renderer hydration
+          const entry = activeRunRegistry.get(conversationId);
+          if (entry) {
+            entry.toolActivity.push({
+              callId: call.callId,
+              name: call.name,
+              args: call.arguments as Record<string, unknown>,
+              startedAt: Date.now(),
+            });
+            entry.revision++;
+          }
           this.send(IPC.CHAT_STREAM_TOOL_START, { streamId, requestId, call });
         },
         onToolEnd: (call: ForgeToolCall, result: ForgeToolResult, durationMs: number) => {
+          // Update live registry
+          const entry = activeRunRegistry.get(conversationId);
+          if (entry) {
+            const toolEntry = entry.toolActivity.find((t) => t.callId === call.callId);
+            if (toolEntry) {
+              toolEntry.completedAt = Date.now();
+              const resultSummary = typeof result.data === "string"
+                ? result.data.slice(0, 200)
+                : result.ok ? "ok" : (result.errorMessage ?? "error").slice(0, 200);
+              toolEntry.result = resultSummary;
+              toolEntry.durationMs = durationMs;
+            }
+            // Track full-file reads for exploredCount
+            if (call.name === "read_file") entry.exploredCount++;
+            entry.revision++;
+          }
           // Relay IPC event to renderer for live tool-row updates.
           // ledger.toolActivity is populated from loopResult.toolActivity after the run;
           // building a duplicate entry here and pushing it is dead code — removed.
@@ -899,6 +983,7 @@ Rules:
 
       activeStreams.delete(streamId);
       convToStream.delete(conversationId);
+      activeRunRegistry.delete(conversationId);
 
       const durationMs = Date.now() - startTime;
       const now = Date.now();
@@ -1141,6 +1226,7 @@ Rules:
     } catch (err: unknown) {
       activeStreams.delete(streamId);
       convToStream.delete(conversationId);
+      activeRunRegistry.delete(conversationId);
 
       // ── CANCELLED ──────────────────────────────────────────────────────────
       // AgentLoopError("CANCELLED") or legacy Error("cancelled") — clean stop.
@@ -1378,6 +1464,10 @@ Rules:
 
   getQueue(convId: string): { items: QueueItem[]; paused: boolean } {
     return db.getConvQueue(true, convId);
+  }
+
+  getConvRuntimeState(convId: string): ConvRuntimeState | null {
+    return getRuntimeState(convId);
   }
 }
 

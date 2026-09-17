@@ -549,6 +549,12 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     return queueManager.getQueue(convId);
   });
 
+  // Returns live AgentRun runtime state for a conversation.
+  // Renderer calls this on mount/conv-switch to hydrate mid-run UI.
+  ipcMain.handle(IPC.RUNTIME_STATE_GET, (_e: IpcMainInvokeEvent, convId: string) => {
+    return queueManager.getConvRuntimeState(convId);
+  });
+
   ipcMain.handle(
     IPC.QUEUE_EDIT,
     (_e: IpcMainInvokeEvent, convId: string, itemId: string, content: string, attachmentIds?: string[]) => {

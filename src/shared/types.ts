@@ -194,6 +194,35 @@ export interface QueueItem {
   contextRefs?: ContextRef[];
 }
 
+/**
+ * Snapshot of an actively-running (or just-completed) AgentRun that the renderer
+ * uses to reconstruct transient streaming UI when mounting mid-run.
+ * Only populated while a run is in progress; null means idle.
+ */
+export interface ConvRuntimeState {
+  conversationId: string;
+  streamId: string;
+  requestId: string;
+  agentProfileId: string;
+  agentNameSnapshot: string;
+  modelSnapshot: string;
+  startedAt: number;
+  /** Live tool activity accumulated so far — for re-constructing StreamingBubble */
+  toolActivity: Array<{
+    callId: string;
+    name: string;
+    args: Record<string, unknown>;
+    startedAt: number;
+    completedAt?: number;
+    result?: string;
+    durationMs?: number;
+  }>;
+  /** How many full-file agent reads have occurred so far */
+  exploredCount: number;
+  /** Monotonic revision counter — renderer ignores hydration older than current local revision */
+  revision: number;
+}
+
 /** What the renderer receives about a conversation's queue */
 export interface ConvQueueState {
   conversationId: string;
@@ -241,6 +270,9 @@ export const IPC = {
   CHAT_STREAM_ACTIVITY_TEXT: "chat:streamActivityText",
 
   // Queue management
+  /** Renderer invokes this on mount/conv-switch to hydrate active run state */
+  RUNTIME_STATE_GET: "runtime:stateGet",
+
   QUEUE_GET: "queue:get",
   QUEUE_EDIT: "queue:edit",
   QUEUE_REMOVE: "queue:remove",
