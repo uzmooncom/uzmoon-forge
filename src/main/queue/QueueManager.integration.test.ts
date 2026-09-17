@@ -30,7 +30,7 @@ vi.mock("../agent-client/client.js", () => ({
 import { makeRequest } from "../agent-client/client.js";
 import { getDb, resetDb, createConversation, insertMessage, getConvQueue, saveAgentProfile } from "../database/db.js";
 import { captureSnapshot } from "../project-files/service.js";
-import { queueManager, setSecretGetter, deleteOrphanedSnapshots } from "./QueueManager.js";
+import { queueManager, setSecretGetter, deleteOrphanedSnapshots, drainForTest, _resetQueueManagerForTest } from "./QueueManager.js";
 
 const mockMakeRequest = makeRequest as ReturnType<typeof vi.fn>;
 
@@ -80,7 +80,11 @@ beforeEach(() => {
   } as unknown as Electron.WebContents);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Drain all in-flight processNext promises before resetting DB
+  // to prevent "DB not initialised" unhandled rejections from async bleed.
+  await drainForTest();
+  _resetQueueManagerForTest();
   resetDb();
   if (tmpDir && fs.existsSync(tmpDir)) {
     fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -118,6 +118,8 @@ export interface ChatMessage {
   modelSnapshot?: string;
   /** Project file snapshots attached to this message as context */
   contextRefs?: ContextRef[];
+  /** The QueueManager requestId that produced this assistant message (for invariant dedup) */
+  requestId?: string;
 }
 
 export interface Conversation {

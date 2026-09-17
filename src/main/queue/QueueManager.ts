@@ -650,11 +650,14 @@ export class QueueManager {
     }
 
     processing.add(convId);
-    try {
-      await this.processItem(item, profile, apiKey);
-    } finally {
+    const processPromise = this.processItem(item, profile, apiKey).finally(() => {
       processing.delete(convId);
-    }
+    });
+    _activeProcessingPromises.add(processPromise);
+    void processPromise.finally(() => {
+      _activeProcessingPromises.delete(processPromise);
+    });
+    await processPromise;
 
     // After completion, try next (profile resolved fresh for next item)
     const next = db.nextQueuedItem(true, convId);
@@ -1146,6 +1149,7 @@ Rules:
           agentProfileId: profile.id,
           agentNameSnapshot: profile.name,
           modelSnapshot: profile.model,
+          requestId,
         };
         db.insertMessage(true, assistantMsg);
       } else {
@@ -1172,6 +1176,7 @@ Rules:
           agentProfileId: profile.id,
           agentNameSnapshot: profile.name,
           modelSnapshot: profile.model,
+          requestId,
           // Extension field — proposal back-reference
           ...(({ proposalId } as unknown) as Record<string, unknown>),
         };
@@ -1276,6 +1281,7 @@ Rules:
               agentProfileId: profile.id,
               agentNameSnapshot: profile.name,
               modelSnapshot: profile.model,
+              requestId,
             };
             db.insertMessage(true, fallbackMsg);
             assistantMsg = fallbackMsg;
@@ -1294,6 +1300,7 @@ Rules:
             agentProfileId: profile.id,
             agentNameSnapshot: profile.name,
             modelSnapshot: profile.model,
+            requestId,
           };
           db.insertMessage(true, fallbackMsg);
           assistantMsg = fallbackMsg;
@@ -1319,6 +1326,7 @@ Rules:
           agentProfileId: profile.id,
           agentNameSnapshot: profile.name,
           modelSnapshot: profile.model,
+          requestId,
         };
         db.insertMessage(true, assistantMsg);
       }
@@ -1335,18 +1343,27 @@ Rules:
         { requestId, conversationId, hint: "persisted assistant message protocol leak check" }
       );
 
-      // INV: 1_USER_1_ASSISTANT — last two persisted messages must alternate roles correctly
+      // INV: 1_USER_1_ASSISTANT — request-scoped: exactly one user message and one final
+      // assistant message per request. Bulk-queued user messages from other requests may
+      // coexist in the conversation — positional adjacency is NOT required.
       {
-        const recentMsgs = db.getMessagesByConversation(true, conversationId).slice(-2);
-        const [msg0, msg1] = recentMsgs;
-        if (recentMsgs.length === 2 && msg0 !== undefined && msg1 !== undefined) {
-          assertInvariant(
-            "1_USER_1_ASSISTANT",
-            msg0.role !== msg1.role,
-            { role0: msg0.role, role1: msg1.role, requestId, conversationId },
-            { requestId, conversationId, hint: "message alternation check" }
-          );
-        }
+        const allMsgs = db.getMessagesByConversation(true, conversationId);
+        // 1. User message for this request must exist exactly once
+        const userMsgsForRequest = allMsgs.filter((m) => m.id === item.messageId && m.role === "user");
+        assertInvariant(
+          "1_USER_1_ASSISTANT",
+          userMsgsForRequest.length === 1,
+          { check: "user_message_exists", count: userMsgsForRequest.length, messageId: item.messageId, requestId, conversationId },
+          { requestId, conversationId, hint: "request user message exists exactly once" }
+        );
+        // 2. No duplicate assistant message for this requestId
+        const assistantMsgsForRequest = allMsgs.filter((m) => m.requestId === requestId && m.role === "assistant");
+        assertInvariant(
+          "1_USER_1_ASSISTANT",
+          assistantMsgsForRequest.length === 1,
+          { check: "no_duplicate_final", count: assistantMsgsForRequest.length, requestId, conversationId },
+          { requestId, conversationId, hint: "no duplicate final assistant message for request" }
+        );
       }
 
       db.updateConversation(true, conversationId, { updatedAt: now });
@@ -1672,11 +1689,29 @@ function autoTitle(content: string): string {
 export const queueManager = new QueueManager();
 
 /** FOR TESTS ONLY — resets all module-level state for isolation between test cases */
+/** Set of active processNext promises — used for deterministic test teardown */
+const _activeProcessingPromises = new Set<Promise<void>>();
+
+/**
+ * Wait for all in-flight processNext calls to settle (resolve or reject).
+ * Call this before _resetQueueManagerForTest() to avoid async bleed between tests.
+ */
+export async function drainForTest(): Promise<void> {
+  // Abort all active streams so running processItem calls exit at the next abort-check
+  for (const sig of activeStreams.values()) sig.aborted = true;
+  // Wait for all in-flight promises to settle
+  const snapshot = Array.from(_activeProcessingPromises);
+  if (snapshot.length > 0) {
+    await Promise.allSettled(snapshot);
+  }
+}
+
 export function _resetQueueManagerForTest(): void {
-  // Abort all in-flight signals so running processItem calls exit early
+  // Abort all in-flight signals (idempotent — drainForTest may have already done this)
   for (const sig of activeStreams.values()) sig.aborted = true;
   activeStreams.clear();
   convToStream.clear();
   activeRunRegistry.clear();
   processing.clear();
+  _activeProcessingPromises.clear();
 }
