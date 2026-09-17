@@ -6,6 +6,7 @@ import { registerHandlers } from "./ipc/handlers.js";
 import { sweepOrphanedSnapshots } from "./queue/QueueManager.js";
 import { sweepWriteJournal } from "./project-files/edit-service.js";
 import { initReliabilityEngine } from "./reliability/index.js";
+import { RELIABILITY_IPC } from "../shared/types.js";
 
 const dataDir =
   process.env["FORGE_DATA_DIR"] ?? app.getPath("userData");
@@ -74,6 +75,11 @@ app.whenReady().then(() => {
     initReliabilityEngine({
       dataDir,
       version: "0.9.0",
+      notifyIncident: (incident) => {
+        try {
+          mainWindow?.webContents.send(RELIABILITY_IPC.INCIDENT_RECORDED, incident);
+        } catch { /* non-fatal: window may be closing */ }
+      },
     });
   } catch { /* non-fatal */ }
 

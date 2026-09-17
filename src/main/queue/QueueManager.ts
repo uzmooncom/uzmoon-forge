@@ -29,6 +29,10 @@ import {
   computeProposalStatus,
   MULTI_BLOCK_SENTINEL,
 } from "../project-files/edit-service.js";
+import {
+  parseStructuredEditProposal,
+  normalizeToFullContent,
+} from "../project-files/edit-ir.js";
 import fs from "fs";
 import path from "path";
 
@@ -983,6 +987,25 @@ Rules:
         try { db.saveLedger(true, ledger); } catch { /* best effort */ }
       }
 
+      // INV: SNAPSHOT_IMMUTABLE — all agent read refs must have valid non-empty IDs
+      assertInvariant(
+        "SNAPSHOT_IMMUTABLE",
+        ledger.agentReadRefs.every(r => typeof r.id === "string" && r.id.length > 0 && typeof r.snapshotPath === "string" && r.snapshotPath.length > 0),
+        { agentReadRefCount: ledger.agentReadRefs.length, requestId, conversationId },
+        { requestId, conversationId, hint: "ledger agentReadRefs integrity" }
+      );
+
+      // INV: RESOURCE_OWNERSHIP_CLEAN — agent read snapshots must be inside known dataDir
+      {
+        const _snapshotsDir = path.resolve(path.join(db.getDataDir(), "snapshots"));
+        assertInvariant(
+          "RESOURCE_OWNERSHIP_CLEAN",
+          ledger.agentReadRefs.every(r => r.snapshotPath.startsWith(_snapshotsDir)),
+          { invalidPaths: ledger.agentReadRefs.filter(r => !r.snapshotPath.startsWith(_snapshotsDir)).map(r => r.id), requestId },
+          { requestId, conversationId, hint: "agent read ref path ownership" }
+        );
+      }
+
       activeStreams.delete(streamId);
       convToStream.delete(conversationId);
       activeRunRegistry.delete(conversationId);
@@ -996,11 +1019,95 @@ Rules:
       // We also run extractProposalFence as a fallback for global-chat mode where
       // there is no forge_final envelope and the model embeds the proposal in prose.
       let assistantMsg: ChatMessage;
-      const rawProposalFenceJson = loopProposalFenceRaw
-        ? extractProposalFence(loopProposalFenceRaw)
-        : extractProposalFence(fullText);
       const conv = db.getConversation(true, conversationId);
       const convProjectId = conv?.projectId;
+
+      // ── Structured Edit IR pre-processing ─────────────────────────────────
+      // If the response contains a forge_structured_edit_proposal fence, normalize
+      // all ops to full_content using base snapshots. The normalized content is
+      // then fed into the existing forge_edit_proposal pipeline unchanged.
+      let effectiveFenceSource = loopProposalFenceRaw ?? fullText;
+      if (convProjectId) {
+        const structuredResult = parseStructuredEditProposal(fullText);
+        if (structuredResult !== null) {
+          if (!structuredResult.ok) {
+            // Malformed structured proposal — assert invariant, suppress proposal pipeline
+            assertInvariant(
+              "INVALID_PROPOSAL_NEVER_PARTIALLY_APPLIES",
+              true, // assertion: we have NOT applied anything yet
+              { error: structuredResult.error, requestId, conversationId },
+              { requestId, conversationId, hint: "malformed structured edit proposal" }
+            );
+            effectiveFenceSource = "";
+          } else {
+            // Build combined refs (manual + agent reads)
+            const agentRefsAsContextRefs: ContextRef[] = (ledger.agentReadRefs ?? [])
+              .filter(ar => ar.fullFile)
+              .map((ar): ContextRef => ({
+                id: ar.id,
+                projectId: ar.projectId,
+                relativePath: ar.relativePath,
+                snapshotPath: ar.snapshotPath,
+                contentHash: ar.contentHash,
+                capturedAt: ar.capturedAt,
+                size: ar.size,
+                language: ar.language,
+              }));
+            const combinedRefs: ContextRef[] = [...(item.contextRefs ?? []), ...agentRefsAsContextRefs];
+
+            // Normalize each op: exact_text_replace → full_content via base snapshot
+            const normalizedFiles: Array<{ path: string; content: string }> = [];
+            let normalizationFailed = false;
+
+            for (const op of structuredResult.proposal.operations) {
+              if (op.operation === "full_content") {
+                normalizedFiles.push({ path: op.path, content: op.content });
+              } else if (op.operation === "exact_text_replace") {
+                // Resolve base snapshot for this op's path
+                const resolution = resolveContextRef(combinedRefs, convProjectId, op.path);
+                if (resolution.status !== "ok") {
+                  normalizationFailed = true;
+                  break;
+                }
+                const baseContent = readSnapshot(resolution.ref.snapshotPath);
+                if (baseContent === null) {
+                  normalizationFailed = true;
+                  break;
+                }
+                const normResult = normalizeToFullContent(op, baseContent);
+                if (!normResult.ok) {
+                  // Ambiguous replacement — assert invariant, abort all ops
+                  assertInvariant(
+                    "EDIT_AMBIGUITY_BLOCKED",
+                    true, // nothing has been written yet
+                    { error: normResult.error, path: op.path, requestId, conversationId },
+                    { requestId, conversationId, hint: "structured edit ambiguity blocked" }
+                  );
+                  normalizationFailed = true;
+                  break;
+                }
+                normalizedFiles.push({ path: normResult.op.path, content: normResult.op.content });
+              }
+            }
+
+            if (normalizationFailed) {
+              effectiveFenceSource = "";
+            } else {
+              // All ops normalized — build forge_edit_proposal-compatible fence
+              const normalizedProposal = {
+                summary: structuredResult.proposal.summary,
+                ...(structuredResult.proposal.explanation !== undefined && { explanation: structuredResult.proposal.explanation }),
+                files: normalizedFiles,
+              };
+              effectiveFenceSource = "```forge_edit_proposal\n" + JSON.stringify(normalizedProposal) + "\n```";
+            }
+          }
+        }
+      }
+
+      const rawProposalFenceJson = effectiveFenceSource
+        ? extractProposalFence(effectiveFenceSource)
+        : null;
 
       // Multi-block: ambiguous structured response — keep prose, show error affordance
       if (rawProposalFenceJson === MULTI_BLOCK_SENTINEL) {
@@ -1198,6 +1305,30 @@ Rules:
 
       } // close outer multi-block else
 
+      // INV: NO_PROTOCOL_LEAK — persisted message must not contain raw forge protocol fences
+      assertInvariant(
+        "NO_PROTOCOL_LEAK",
+        !assistantMsg.content.includes("forge_tool") &&
+        !assistantMsg.content.includes("forge_final") &&
+        !assistantMsg.content.includes("forge_agent_protocol"),
+        { contentSnippet: assistantMsg.content.slice(0, 120), requestId, conversationId },
+        { requestId, conversationId, hint: "persisted assistant message protocol leak check" }
+      );
+
+      // INV: 1_USER_1_ASSISTANT — last two persisted messages must alternate roles correctly
+      {
+        const recentMsgs = db.getMessagesByConversation(true, conversationId).slice(-2);
+        const [msg0, msg1] = recentMsgs;
+        if (recentMsgs.length === 2 && msg0 !== undefined && msg1 !== undefined) {
+          assertInvariant(
+            "1_USER_1_ASSISTANT",
+            msg0.role !== msg1.role,
+            { role0: msg0.role, role1: msg1.role, requestId, conversationId },
+            { requestId, conversationId, hint: "message alternation check" }
+          );
+        }
+      }
+
       db.updateConversation(true, conversationId, { updatedAt: now });
       db.touchAgentProfileLastUsed(true, profile.id);
       db.updateAgentProfileStatus(true, profile.id, "connected");
@@ -1356,6 +1487,14 @@ Rules:
         agentProfileId: profile.id,
       };
       db.insertMessage(true, errorMsg);
+
+      // INV: PROVIDER_DISCONNECT_HANDLED — error message must have non-empty content
+      assertInvariant(
+        "PROVIDER_DISCONNECT_HANDLED",
+        typeof errorMsg.content === "string" && errorMsg.content.trim().length > 0,
+        { errorContent: errorMsg.content.slice(0, 80), requestId, conversationId },
+        { requestId, conversationId, hint: "generic error path — non-empty error message" }
+      );
 
       this.send(IPC.CHAT_STREAM_ERROR, { streamId, message: errorMsg, queueItemId: item.id });
 

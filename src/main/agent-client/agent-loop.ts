@@ -40,6 +40,7 @@ import type { SimpleMessage } from "./client.js";
 import { TOOL_LIMITS, buildOpenAIToolDefs, buildAnthropicToolDefs } from "./tool-types.js";
 import { executeProjectTool, buildResultSummary, newActivityId } from "../project-files/tool-executor.js";
 import type { ToolExecutionContext } from "../project-files/tool-executor.js";
+import { tryGetTraceRecorder, assertInvariant } from "../reliability/index.js";
 
 // ── Public error type ─────────────────────────────────────────────────────────
 
@@ -347,18 +348,28 @@ const VALID_TRANSITIONS: Partial<Record<AgentRunState, AgentRunState[]>> = {
   // Terminal states — no outgoing transitions (checked via 'completed'/'cancelled'/'failed')
 };
 
-function transition(run: AgentRun, to: AgentRunState): void {
-  const allowed = VALID_TRANSITIONS[run.state];
+function transition(run: AgentRun, to: AgentRunState, tracer?: ReturnType<typeof tryGetTraceRecorder>): void {
+  const fromState = run.state;
+  const allowed = VALID_TRANSITIONS[fromState];
+  assertInvariant(
+    "STATE_TRANSITIONS_VALID",
+    !!(allowed && allowed.includes(to)),
+    { fromState, toState: to, requestId: run.requestId },
+    { requestId: run.requestId, conversationId: run.conversationId, hint: `transition ${fromState}→${to}` }
+  );
   if (!allowed || !allowed.includes(to)) {
     throw new AgentLoopError(
       "INVALID_STATE_TRANSITION",
-      `Invalid AgentRun state transition: ${run.state} → ${to}`
+      `Invalid AgentRun state transition: ${fromState} → ${to}`
     );
   }
   run.state = to;
   if (to === "completed" || to === "cancelled" || to === "failed") {
     run.completedAt = Date.now();
   }
+  try {
+    tracer?.emit(run.requestId, "RUN_STATE_CHANGED", { state: to, fromState });
+  } catch { /* tracer never blocks execution */ }
 }
 
 // ── Tool result message building ──────────────────────────────────────────────
@@ -423,6 +434,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   } = opts;
 
   // ── Initialize AgentRun ────────────────────────────────────────────────────
+  const tracer = tryGetTraceRecorder();
   const run: AgentRun = {
     requestId,
     conversationId,
@@ -435,8 +447,20 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     readByteCount: 0,
   };
 
+  // Start trace for this request
+  try {
+    tracer?.startTrace({ requestId, conversationId, ...(projectId !== undefined ? { projectId } : {}) });
+    tracer?.emit(requestId, "RUN_CREATED", {
+      requestId,
+      conversationId,
+      projectId,
+      agentProfileId: cfg.id,
+      isProjectMode,
+    });
+  } catch { /* tracer never blocks execution */ }
+
   // queued → starting
-  transition(run, "starting");
+  transition(run, "starting", tracer);
 
   // Mutable execution context (shared reference — tool executor updates readBytesUsed)
   const ctx: ToolExecutionContext = {
@@ -462,13 +486,15 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   let budgetExhausted = false;
 
   // starting → waiting_for_model
-  transition(run, "waiting_for_model");
+  transition(run, "waiting_for_model", tracer);
 
   // Check for initial cancellation
   if (signal.aborted) {
-    transition(run, "cancelled");
+    transition(run, "cancelled", tracer);
     run.failureCode = "CANCELLED";
     run.failureMessage = "Run cancelled before start";
+    try { tracer?.emit(requestId, "RUN_CANCELLED", { reason: "cancelled before start" }); } catch { /* */ }
+    try { tracer?.endTrace(requestId, "cancelled"); } catch { /* */ }
     throw new AgentLoopError("CANCELLED", "cancelled");
   }
 
@@ -476,14 +502,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   while (true) {
     // Check for cancellation before each turn
     if (signal.aborted) {
-      transition(run, "cancelled");
+      transition(run, "cancelled", tracer);
       run.failureCode = "CANCELLED";
       run.failureMessage = "Run cancelled during execution";
+      try { tracer?.emit(requestId, "RUN_CANCELLED", { reason: "cancelled during execution", step: run.toolStepCount }); } catch { /* */ }
+      try { tracer?.endTrace(requestId, "cancelled"); } catch { /* */ }
       throw new AgentLoopError("CANCELLED", "cancelled");
     }
 
     // Check tool step budget
     if (run.toolStepCount >= TOOL_LIMITS.MAX_TOOL_STEPS_PER_REQUEST) {
+      assertInvariant(
+        "TOOL_BUDGET_ENFORCED",
+        run.toolStepCount <= TOOL_LIMITS.MAX_TOOL_STEPS_PER_REQUEST,
+        { toolStepCount: run.toolStepCount, max: TOOL_LIMITS.MAX_TOOL_STEPS_PER_REQUEST, requestId },
+        { requestId, conversationId, hint: "budget check" }
+      );
       budgetExhausted = true;
     }
 
@@ -495,6 +529,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     // We only decide what to do with them AFTER normalizeDecision.
     let turnBuffer = "";
 
+    try { tracer?.emit(requestId, "PROVIDER_REQUEST_STARTED", { step: run.toolStepCount, budgetExhausted }); } catch { /* */ }
     let rawText: string;
     try {
       rawText = await makeRequest({
@@ -518,14 +553,18 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg === "cancelled" || signal.aborted) {
-        transition(run, "cancelled");
+        transition(run, "cancelled", tracer);
         run.failureCode = "CANCELLED";
         run.failureMessage = "Cancelled during model request";
+        try { tracer?.emit(requestId, "RUN_CANCELLED", { reason: "cancelled during model request" }); } catch { /* */ }
+        try { tracer?.endTrace(requestId, "cancelled"); } catch { /* */ }
         throw new AgentLoopError("CANCELLED", "cancelled");
       }
-      transition(run, "failed");
+      transition(run, "failed", tracer);
       run.failureCode = "PROVIDER_ERROR";
       run.failureMessage = msg;
+      try { tracer?.emit(requestId, "RUN_FAILED", { failureCode: "PROVIDER_ERROR", message: msg }); } catch { /* */ }
+      try { tracer?.endTrace(requestId, "failed", "PROVIDER_ERROR"); } catch { /* */ }
       throw new AgentLoopError("PROVIDER_ERROR", `Provider error: ${msg}`);
     }
 
@@ -533,7 +572,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     const turnText = rawText ?? turnBuffer ?? "";
 
     // waiting_for_model → processing_turn
-    transition(run, "processing_turn");
+    transition(run, "processing_turn", tracer);
 
     // ── Normalize the provider turn into a canonical decision ─────────────────
     const decision = normalizeDecision(
@@ -542,6 +581,14 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       isProjectMode,
       budgetExhausted
     );
+    try {
+      tracer?.emit(requestId, "PROVIDER_RESPONSE_NORMALIZED", {
+        kind: decision.kind,
+        ...(decision.kind === "invalid" && { reason: decision.reason, recoverable: decision.recoverable }),
+        ...(decision.kind === "tool_calls" && { callCount: decision.calls.length }),
+        step: run.toolStepCount,
+      });
+    } catch { /* */ }
 
     // ── CASE: tool_calls ───────────────────────────────────────────────────────
     if (decision.kind === "tool_calls") {
@@ -555,19 +602,23 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       messages.push({ role: "assistant", content: turnText });
 
       // processing_turn → executing_tools
-      transition(run, "executing_tools");
+      transition(run, "executing_tools", tracer);
 
       const toolResults: Array<{ call: ForgeToolCall; result: ForgeToolResult }> = [];
 
       for (const call of decision.calls) {
         if (signal.aborted) {
-          transition(run, "cancelled");
+          transition(run, "cancelled", tracer);
           run.failureCode = "CANCELLED";
           run.failureMessage = "Cancelled during tool execution";
+          try { tracer?.emit(requestId, "RUN_CANCELLED", { reason: "cancelled during tool execution" }); } catch { /* */ }
+          try { tracer?.endTrace(requestId, "cancelled"); } catch { /* */ }
           throw new AgentLoopError("CANCELLED", "cancelled");
         }
 
+        try { tracer?.emit(requestId, "TOOL_REQUESTED", { toolName: call.name, callId: call.callId, step: run.toolStepCount }); } catch { /* */ }
         onToolStart(call);
+        try { tracer?.emit(requestId, "TOOL_STARTED", { toolName: call.name, callId: call.callId }); } catch { /* */ }
 
         const execResult = await executeProjectTool(call, ctx);
         const { result, agentReadRef, durationMs } = execResult;
@@ -575,6 +626,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         if (agentReadRef) {
           agentReadRefs.push(agentReadRef);
           run.readByteCount += agentReadRef.size;
+          try { tracer?.emit(requestId, "FILE_READ", { relativePath: agentReadRef.relativePath, size: agentReadRef.size, fullFile: agentReadRef.fullFile }); } catch { /* */ }
         }
 
         const activity: ToolActivityEntry = {
@@ -591,6 +643,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         };
         toolActivity.push(activity);
 
+        if (result.ok) {
+          try { tracer?.emit(requestId, "TOOL_COMPLETED", { toolName: call.name, callId: call.callId, durationMs }); } catch { /* */ }
+        } else {
+          try { tracer?.emit(requestId, "TOOL_FAILED", { toolName: call.name, callId: call.callId, errorCode: result.errorCode, durationMs }); } catch { /* */ }
+        }
         onToolEnd(call, result, durationMs);
         toolResults.push({ call, result });
       }
@@ -606,19 +663,34 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       run.toolStepCount++;
 
       // executing_tools → continuing
-      transition(run, "continuing");
+      transition(run, "continuing", tracer);
       // continuing → waiting_for_model (next loop iteration)
-      transition(run, "waiting_for_model");
+      transition(run, "waiting_for_model", tracer);
       continue;
     }
 
     // ── CASE: final ────────────────────────────────────────────────────────────
     if (decision.kind === "final") {
+      // INV: TERMINAL_TURN_ONLY — the final turn must have non-empty content (or be global chat)
+      assertInvariant(
+        "TERMINAL_TURN_ONLY",
+        decision.content.trim().length > 0 || !isProjectMode,
+        { contentLength: decision.content.trim().length, isProjectMode, requestId },
+        { requestId, conversationId, hint: "final decision content check" }
+      );
+
       // processing_turn → finalizing
-      transition(run, "finalizing");
+      transition(run, "finalizing", tracer);
 
       finalText = decision.content;
       proposalFenceRaw = decision.proposalFenceRaw;
+
+      try {
+        tracer?.emit(requestId, "FINAL_NORMALIZED", {
+          contentLength: finalText.length,
+          hasProposalFence: !!proposalFenceRaw,
+        });
+      } catch { /* */ }
 
       // Emit final content to caller
       if (finalText) {
@@ -626,7 +698,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       }
 
       // finalizing → completed
-      transition(run, "completed");
+      transition(run, "completed", tracer);
+      try { tracer?.emit(requestId, "RUN_COMPLETED", { stepCount: run.toolStepCount, durationMs: Date.now() - run.startedAt }); } catch { /* */ }
+      try { tracer?.endTrace(requestId, "completed"); } catch { /* */ }
       break;
     }
 
@@ -640,9 +714,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
       if (!decision.recoverable) {
         // Unrecoverable (e.g. MULTIPLE_FINAL_ENVELOPES) — fail immediately
-        transition(run, "failed");
+        transition(run, "failed", tracer);
         run.failureCode = decision.reason;
         run.failureMessage = `Unrecoverable protocol error: ${decision.reason}`;
+        try { tracer?.emit(requestId, "RUN_FAILED", { failureCode: "PROTOCOL_RECOVERY_EXHAUSTED", reason: decision.reason }); } catch { /* */ }
+        try { tracer?.endTrace(requestId, "failed", "PROTOCOL_RECOVERY_EXHAUSTED"); } catch { /* */ }
         throw new AgentLoopError(
           "PROTOCOL_RECOVERY_EXHAUSTED",
           `Unrecoverable protocol violation: ${decision.reason}`
@@ -651,10 +727,24 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
       run.recoveryCount++;
 
+      // INV: RECOVERY_BOUNDED — recovery count must never exceed max
+      assertInvariant(
+        "RECOVERY_BOUNDED",
+        run.recoveryCount <= MAX_PROTOCOL_RECOVERY_TURNS,
+        { recoveryCount: run.recoveryCount, max: MAX_PROTOCOL_RECOVERY_TURNS, reason: decision.reason, requestId },
+        { requestId, conversationId, hint: "recovery budget check" }
+      );
+
+      try {
+        tracer?.emit(requestId, "PROTOCOL_RECOVERY", { recoveryCount: run.recoveryCount, reason: decision.reason });
+      } catch { /* */ }
+
       if (run.recoveryCount > MAX_PROTOCOL_RECOVERY_TURNS) {
-        transition(run, "failed");
+        transition(run, "failed", tracer);
         run.failureCode = "PROTOCOL_RECOVERY_EXHAUSTED";
         run.failureMessage = `Model returned ${run.recoveryCount} consecutive invalid responses`;
+        try { tracer?.emit(requestId, "RUN_FAILED", { failureCode: "PROTOCOL_RECOVERY_EXHAUSTED", recoveryCount: run.recoveryCount }); } catch { /* */ }
+        try { tracer?.endTrace(requestId, "failed", "PROTOCOL_RECOVERY_EXHAUSTED"); } catch { /* */ }
         throw new AgentLoopError(
           "PROTOCOL_RECOVERY_EXHAUSTED",
           `Protocol recovery budget exceeded after ${run.recoveryCount} attempts`
@@ -668,9 +758,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       messages.push({ role: "user", content: FORGE_PROTOCOL_CORRECTION });
 
       // processing_turn → continuing (recovery path)
-      transition(run, "continuing");
+      transition(run, "continuing", tracer);
       // continuing → waiting_for_model
-      transition(run, "waiting_for_model");
+      transition(run, "waiting_for_model", tracer);
       continue;
     }
   }

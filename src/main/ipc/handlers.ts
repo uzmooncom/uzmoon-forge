@@ -22,7 +22,7 @@ import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
 import { testConnection } from "../agent-client/client.js";
 import { queueManager, cancelStream, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots } from "../queue/QueueManager.js";
-import { tryGetIncidentRecorder } from "../reliability/index.js";
+import { tryGetIncidentRecorder, assertInvariant } from "../reliability/index.js";
 import { buildGitHubIssuePayload } from "../reliability/sanitizer.js";
 void sweepOrphanedSnapshots; // imported for startup use — called from main.ts
 
@@ -999,6 +999,14 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       for (const key of lockKeys) applyLock.set(key, true);
 
       try {
+        // INV: APPLY_REQUIRES_APPROVAL — proposal must not already be fully applied
+        assertInvariant(
+          "APPLY_REQUIRES_APPROVAL",
+          proposal.status !== "applied",
+          { proposalStatus: proposal.status, proposalId, selectedCount: selectedFileEditIds.length },
+          { hint: "APPLY_SELECTED top-of-handler" }
+        );
+
         // Phase 1: Preflight ALL files before writing ANY
         const preflightResults = editService.preflightFileEdits(
           project.workingDirectory,
@@ -1009,6 +1017,14 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
         if (failures.length > 0) {
           return { ok: false, preflightFailures: failures };
         }
+
+        // INV: STALE_BASE_PROTECTION — all preflight results passed, safe to proceed
+        assertInvariant(
+          "STALE_BASE_PROTECTION",
+          preflightResults.every(r => r.ok),
+          { preflightCount: preflightResults.length, proposalId },
+          { hint: "APPLY_SELECTED after preflight" }
+        );
 
         // Phase 2: Apply each file edit
         const appliedEditIds: string[] = [];
@@ -1085,6 +1101,23 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
               rollbackFailures.push(ae.relativePath);
             }
           }
+          // INV: ROLLBACK_CORRECTNESS — any rollback failure is a data-safety violation
+          assertInvariant(
+            "ROLLBACK_CORRECTNESS",
+            rollbackFailures.length === 0,
+            { rollbackFailures, firstError, proposalId },
+            { hint: "APPLY_SELECTED rollback loop" }
+          );
+          // INV: INVALID_PROPOSAL_NEVER_PARTIALLY_APPLIES — if rollback also failed,
+          // we have a partial state; record the violation
+          if (rollbackFailures.length > 0) {
+            assertInvariant(
+              "INVALID_PROPOSAL_NEVER_PARTIALLY_APPLIES",
+              false, // partial write DID occur and could not be rolled back
+              { rollbackFailures, appliedCount: appliedEditsThisRun.length, proposalId },
+              { hint: "APPLY_SELECTED partial state after rollback failure" }
+            );
+          }
         }
 
         // Update FileEdit statuses in DB
@@ -1136,6 +1169,14 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       const appliedEdit = db.getAppliedEdit(database, appliedEditId);
       if (!appliedEdit) return { ok: false, error: "Applied edit not found" };
       if (appliedEdit.undoneAt) return { ok: false, error: "This edit has already been undone" };
+
+      // INV: APPLY_REQUIRES_APPROVAL — undo only valid on non-undone applied edits
+      assertInvariant(
+        "APPLY_REQUIRES_APPROVAL",
+        appliedEdit.undoneAt == null,
+        { appliedEditId, undoneAt: appliedEdit.undoneAt },
+        { hint: "UNDO_APPLY top-of-handler" }
+      );
 
       const project = db.getProject(database, appliedEdit.projectId);
       if (!project) return { ok: false, error: "Project not found" };

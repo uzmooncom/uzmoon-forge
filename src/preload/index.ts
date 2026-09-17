@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -31,6 +31,7 @@ import type {
   ForgeToolCall,
   ForgeToolResult,
   ConvRuntimeState,
+  ForgeIncident,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -422,6 +423,30 @@ const forgeApi = {
       return () => ipcRenderer.removeListener(IPC.CHAT_STREAM_TOOL_END, listener);
     },
 
+  },
+
+  // ── Reliability (V0.9) ────────────────────────────────────────────────────
+  reliability: {
+    listIncidents: (): Promise<ForgeIncident[]> =>
+      ipcRenderer.invoke(RELIABILITY_IPC.INCIDENTS_LIST),
+
+    getIncident: (id: string): Promise<ForgeIncident | undefined> =>
+      ipcRenderer.invoke(RELIABILITY_IPC.INCIDENT_GET, id),
+
+    getSharePayload: (id: string): Promise<Record<string, unknown> | null> =>
+      ipcRenderer.invoke(RELIABILITY_IPC.INCIDENT_SHARE_PAYLOAD, id),
+
+    clearIncidents: (): Promise<void> =>
+      ipcRenderer.invoke(RELIABILITY_IPC.INCIDENTS_CLEAR),
+
+    getMetrics: (): Promise<Record<string, unknown>> =>
+      ipcRenderer.invoke(RELIABILITY_IPC.METRICS_GET),
+
+    onIncidentRecorded: (cb: (incident: ForgeIncident) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, inc: ForgeIncident) => cb(inc);
+      ipcRenderer.on(RELIABILITY_IPC.INCIDENT_RECORDED, listener);
+      return () => ipcRenderer.removeListener(RELIABILITY_IPC.INCIDENT_RECORDED, listener);
+    },
   },
 };
 

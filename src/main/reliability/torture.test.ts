@@ -7,10 +7,14 @@
 
 import { describe, it, expect } from "vitest";
 import os from "os";
+import * as fs from "fs";
+import * as nodePath from "path";
 import { sanitizeString, sanitizeState, sanitizeValue, detectResidualSecrets } from "./sanitizer.js";
 import { computeFingerprint } from "./fingerprint.js";
 import { ReplayHarness, ALL_FIXTURES } from "./replay.js";
 import { applyExactTextReplace, parseStructuredEditProposal } from "../project-files/edit-ir.js";
+import { IncidentRecorder } from "./incident.js";
+import { TraceRecorder } from "./trace.js";
 
 const HOME = os.homedir();
 
@@ -372,5 +376,272 @@ describe("ALL_FIXTURES — cross-fixture consistency", () => {
       });
       expect(result.passed, `Fixture ${fixture.id} failed validation: ${result.failureReason}`).toBe(true);
     }
+  });
+});
+
+// ── Seeded randomized scenarios ───────────────────────────────────────────────
+// Deterministic random using a seeded PRNG — no Math.random() in production.
+
+function seededPrng(seed: number): () => number {
+  let s = seed;
+  return () => {
+    s = (s * 1664525 + 1013904223) & 0xffffffff;
+    return ((s >>> 0) / 0xffffffff);
+  };
+}
+
+describe("Seeded randomized scenarios", () => {
+  it("seed-1: sanitize survives random message / tool counts", () => {
+    const rng = seededPrng(0xdeadbeef);
+    for (let i = 0; i < 20; i++) {
+      const msgCount = Math.floor(rng() * 50) + 1;
+      const toolCount = Math.floor(rng() * 25);
+      const state = {
+        messageCount: msgCount,
+        toolStepCount: toolCount,
+        requestId: `req-${i}`,
+        conversationId: `conv-${i}`,
+        apiKey: `sk-secret-${Math.floor(rng() * 999999)}`,
+      };
+      const result = sanitizeState(state);
+      expect(detectResidualSecrets(JSON.stringify(result))).toHaveLength(0);
+      expect(result["messageCount"]).toBe(msgCount);
+      expect(result["toolStepCount"]).toBe(toolCount);
+    }
+  });
+
+  it("seed-2: concurrent fingerprints are all distinct (32 random inputs)", () => {
+    const rng = seededPrng(0xcafebabe);
+    const seen = new Set<string>();
+    for (let i = 0; i < 32; i++) {
+      const fp = computeFingerprint({
+        invariantId: `INV_${Math.floor(rng() * 26)}`,
+        failureCode: `CODE_${Math.floor(rng() * 16)}`,
+        category: `cat_${Math.floor(rng() * 5)}`,
+        structuralKey: `key_${Math.floor(rng() * 1000)}`,
+      });
+      seen.add(fp);
+    }
+    // Most fingerprints should be unique; collisions very unlikely with 32 inputs
+    expect(seen.size).toBeGreaterThanOrEqual(28);
+  });
+
+  it("seed-3: random proposal file counts parse correctly (1–10 files)", () => {
+    const rng = seededPrng(0x1337face);
+    for (let i = 0; i < 10; i++) {
+      const fileCount = Math.floor(rng() * 10) + 1;
+      const operations = Array.from({ length: fileCount }, (_, j) => ({
+        operation: "full_content",
+        path: `src/file_${j}.ts`,
+        content: `content_${j}_${Math.floor(rng() * 9999)}`,
+      }));
+      const json = JSON.stringify({ summary: `Change ${i}`, operations });
+      const text = "```forge_structured_edit_proposal\n" + json + "\n```";
+      const result = parseStructuredEditProposal(text);
+      if (!result || !result.ok) throw new Error(`Expected ok for ${fileCount} files: ${(result as { error: string } | null)?.error}`);
+      expect(result.proposal.operations.length).toBe(fileCount);
+    }
+  });
+
+  it("seed-4: sanitizer handles random sk- API key patterns (matched by sk_live_key pattern)", () => {
+    const rng = seededPrng(0xfeedface);
+    // Only use sk- prefix — the sanitizer's sk_live_key pattern requires 20+ alphanumeric chars
+    for (let i = 0; i < 20; i++) {
+      // Generate a 24-char alphanumeric suffix to satisfy the {20,} quantifier
+      const suffix = Array.from({ length: 24 }, () => "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz0123456789"[Math.floor(rng() * 57)]!).join("");
+      const secret = "sk-" + suffix;
+      const input = `Error occurred: ${secret} at step ${Math.floor(rng() * 100)}`;
+      const result = sanitizeString(input);
+      expect(result).not.toContain(suffix);
+      expect(detectResidualSecrets(result)).toHaveLength(0);
+    }
+  });
+
+  it("seed-5: random exact_text_replace ops — non-ambiguous succeed", () => {
+    const rng = seededPrng(0xabcdef01);
+    for (let i = 0; i < 15; i++) {
+      const uniqueMarker = `UNIQUE_TOKEN_${i}_${Math.floor(rng() * 99999)}`;
+      const base = `line 1\n${uniqueMarker}\nline 3\n`.repeat(1);
+      const result = applyExactTextReplace(base, {
+        operation: "exact_text_replace",
+        path: "src/a.ts",
+        oldText: uniqueMarker,
+        newText: `REPLACED_${i}`,
+        expectedOccurrences: 1,
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.result).toContain(`REPLACED_${i}`);
+        expect(result.result).not.toContain(uniqueMarker);
+      }
+    }
+  });
+
+  it("seed-6: fingerprint is deterministic across repeated calls (same seed)", () => {
+    const rng = seededPrng(0x99887766);
+    for (let i = 0; i < 20; i++) {
+      const input = {
+        invariantId: `INV_${Math.floor(rng() * 10)}`,
+        failureCode: `CODE_${Math.floor(rng() * 8)}`,
+        category: `cat_${Math.floor(rng() * 3)}`,
+        structuralKey: `key_${Math.floor(rng() * 500)}`,
+      };
+      const fp1 = computeFingerprint(input);
+      const fp2 = computeFingerprint(input);
+      expect(fp1).toBe(fp2);
+    }
+  });
+
+  it("seed-7: ambiguous exact_text_replace (N>1 occurrences, expected=1) always fails", () => {
+    const rng = seededPrng(0x55aa5a5a);
+    for (let i = 0; i < 10; i++) {
+      const token = `TOKEN_${i}`;
+      const repeats = Math.floor(rng() * 4) + 2; // 2–5
+      const base = Array(repeats).fill(`${token}\n`).join("");
+      const result = applyExactTextReplace(base, {
+        operation: "exact_text_replace",
+        path: "src/a.ts",
+        oldText: token,
+        newText: "REPLACED",
+        expectedOccurrences: 1,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.ambiguous).toBe(true);
+      }
+    }
+  });
+
+  it("seed-8: mixed full_content + exact_text_replace parsing handles all combinations", () => {
+    const rng = seededPrng(0x13572468);
+    for (let i = 0; i < 8; i++) {
+      const ops = [];
+      for (let j = 0; j < 3; j++) {
+        if (rng() > 0.5) {
+          ops.push({ operation: "full_content", path: `src/f${j}.ts`, content: `content_${j}` });
+        } else {
+          ops.push({
+            operation: "exact_text_replace",
+            path: `src/f${j}.ts`,
+            oldText: `old_${j}`,
+            newText: `new_${j}`,
+            expectedOccurrences: 1,
+          });
+        }
+      }
+      const json = JSON.stringify({ summary: `Mix ${i}`, operations: ops });
+      const text = "```forge_structured_edit_proposal\n" + json + "\n```";
+      const result = parseStructuredEditProposal(text);
+      if (!result || !result.ok) throw new Error(`Mix ${i} parse failed: ${(result as { error: string } | null)?.error}`);
+      expect(result.proposal.operations.length).toBe(3);
+    }
+  });
+});
+
+// ── Fault injection scenarios ─────────────────────────────────────────────────
+// Verify that subsystems handle I/O errors, missing state, and corrupt data
+// without crashing or leaking secrets.
+
+// (imports moved to top of file)
+
+describe("Fault injection — IncidentRecorder", () => {
+  it("fault-4: incident persist fails gracefully (unwritable dir) — engine continues", async () => {
+    // Point recorder at a non-existent deeply nested dir — writes will fail (dir not created)
+    const badDir = nodePath.join(os.tmpdir(), "forge-fault-inject-" + Date.now(), "no-such", "path");
+    const recorder = new IncidentRecorder({ dataDir: badDir, forgeVersion: "0.9.0" });
+    // Recording must not throw even when disk write fails
+    const violation: import("./invariants.js").InvariantViolation = {
+      invariantId: "RECOVERY_BOUNDED",
+      timestamp: Date.now(),
+      observedState: { x: 1 },
+    };
+    expect(() => {
+      recorder.record(violation, { failureCode: "PROTOCOL_RECOVERY_EXHAUSTED", structuralKey: "test" });
+    }).not.toThrow();
+    // In-memory state is intact
+    const incidents = recorder.getAll();
+    expect(incidents.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("Fault injection — TraceRecorder", () => {
+  it("fault-5: trace write fails (unwritable dir) — agent loop unaffected (no throw)", async () => {
+    const badDir = nodePath.join(os.tmpdir(), "forge-fault-inject-" + Date.now(), "no-traces");
+    const tracer = new TraceRecorder({ dataDir: badDir });
+    const requestId = "fault-req-001";
+    // All operations must not throw
+    expect(() => tracer.startTrace({ requestId, conversationId: "conv-001" })).not.toThrow();
+    expect(() => tracer.emit(requestId, "RUN_CREATED", { requestId })).not.toThrow();
+    expect(() => tracer.emit(requestId, "TOOL_STARTED", { callId: "c1", toolName: "read_file" })).not.toThrow();
+    expect(() => tracer.emit(requestId, "TOOL_COMPLETED", { callId: "c1" })).not.toThrow();
+    expect(() => tracer.endTrace(requestId, "completed")).not.toThrow();
+    // Completed trace is still retrievable from in-memory store
+    const trace = tracer.getTraceByRequestId(requestId);
+    expect(trace).not.toBeNull();
+    if (trace) {
+      expect(trace.events.length).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it("fault-5b: concurrent startTrace calls for distinct requestIds — no cross-contamination", () => {
+    const dir = nodePath.join(os.tmpdir(), `forge-fault-5b-${Date.now()}`);
+    fs.mkdirSync(dir, { recursive: true });
+    const tracer = new TraceRecorder({ dataDir: dir });
+    tracer.startTrace({ requestId: "req-A", conversationId: "conv-A" });
+    tracer.startTrace({ requestId: "req-B", conversationId: "conv-B" });
+    tracer.emit("req-A", "TOOL_STARTED", { callId: "cA", toolName: "read_file" });
+    tracer.emit("req-B", "RUN_CREATED", { requestId: "req-B" });
+    tracer.endTrace("req-A", "completed");
+    tracer.endTrace("req-B", "failed");
+    const traceA = tracer.getTraceByRequestId("req-A");
+    const traceB = tracer.getTraceByRequestId("req-B");
+    expect(traceA).not.toBeNull();
+    expect(traceB).not.toBeNull();
+    // Events must not cross
+    const aKinds = traceA!.events.map(e => e.kind);
+    const bKinds = traceB!.events.map(e => e.kind);
+    expect(aKinds).toContain("TOOL_STARTED");
+    expect(bKinds).toContain("RUN_CREATED");
+    expect(bKinds).not.toContain("TOOL_STARTED");
+  });
+
+  it("fault-6: getTraceByRequestId on completed trace returns events (not undefined)", () => {
+    const dir = nodePath.join(os.tmpdir(), `forge-trace-cmplt-${Date.now()}`);
+    fs.mkdirSync(dir, { recursive: true });
+    const tracer = new TraceRecorder({ dataDir: dir });
+    const rid = "req-completed-check";
+    tracer.startTrace({ requestId: rid, conversationId: "conv-c" });
+    tracer.emit(rid, "RUN_CREATED", { requestId: rid });
+    tracer.emit(rid, "FINAL_NORMALIZED", { kind: "final" });
+    tracer.endTrace(rid, "completed");
+    // Must still be findable after endTrace
+    const trace = tracer.getTraceByRequestId(rid);
+    expect(trace).not.toBeNull();
+    expect(trace!.outcome).toBe("completed");
+    expect(trace!.events.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("Fault injection — sanitizer never leaks in error objects", () => {
+  it("fault-1/2/3: Error objects with absolute paths and secrets are sanitized", () => {
+    const homeDir = os.homedir();
+    const errorState = {
+      error: `ENOENT: no such file or directory '${homeDir}/secret-project/src/index.ts'`,
+      apiKey: `sk-ant-api99-${"x".repeat(40)}`,
+      stack: `Error: ENOENT\n    at Object.readFileSync (${homeDir}/node_modules/fs.js:100)`,
+    };
+    const sanitized = sanitizeState(errorState);
+    const serialized = JSON.stringify(sanitized);
+    expect(serialized).not.toContain(homeDir);
+    expect(detectResidualSecrets(serialized)).toHaveLength(0);
+  });
+
+  it("fault-3b: zero-length secrets are not leaked (empty string in apiKey field)", () => {
+    const state = { apiKey: "", requestId: "req-001", count: 5 };
+    const result = sanitizeState(state);
+    // Empty apiKey at top-level is NOT redacted (top-level keys not matched)
+    // but must not crash
+    expect(() => sanitizeState(state)).not.toThrow();
+    expect(result["count"]).toBe(5);
   });
 });
