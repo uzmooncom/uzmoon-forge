@@ -672,6 +672,15 @@ const forgeApi = {
 
     clearHistory: (profileId?: string): Promise<void> =>
       ipcRenderer.invoke(BROWSER_IPC.HISTORY_CLEAR, profileId),
+
+    onWaitingForHuman: (cb: (payload: { conversationId: string; streamId: string; requestId: string }) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { conversationId: string; streamId: string; requestId: string }) => cb(payload);
+      ipcRenderer.on(BROWSER_IPC.WAITING_FOR_HUMAN, listener);
+      return () => ipcRenderer.removeListener(BROWSER_IPC.WAITING_FOR_HUMAN, listener);
+    },
+
+    returnBrowserControl: (conversationId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.RETURN_CONTROL, conversationId),
   },
 
   // ── Reliability (V0.9) ────────────────────────────────────────────────────

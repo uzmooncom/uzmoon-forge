@@ -51,7 +51,8 @@ export type AgentLoopErrorCode =
   | "PROVIDER_ERROR"
   | "CANCELLED"
   | "BUDGET_FINALIZATION_FAILED"
-  | "INVALID_STATE_TRANSITION";
+  | "INVALID_STATE_TRANSITION"
+  | "AGENT_WAITING_FOR_HUMAN";
 
 /**
  * Typed error thrown by runAgentLoop on terminal failures.

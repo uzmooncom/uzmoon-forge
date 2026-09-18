@@ -1649,6 +1649,14 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     (_e: IpcMainInvokeEvent, profileId?: string) => { browserManager.clearBrowserHistory(profileId); }
   );
 
+  ipcMain.handle(
+    BROWSER_IPC.RETURN_CONTROL,
+    async (_e: IpcMainInvokeEvent, conversationId: string) => {
+      // Resume the queue — the agent was waiting for human browser interaction
+      await queueManager.resume(conversationId);
+    }
+  );
+
   // ── Dev Process IPC ─────────────────────────────────────────────────────
   ipcMain.handle(
     DEV_PROCESS_IPC.LIST,

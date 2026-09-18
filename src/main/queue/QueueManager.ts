@@ -973,17 +973,27 @@ You are executing one Uzmoon Forge Agent run for the user's Project request.
 
 In EVERY response you MUST return exactly one of:
 
-1. A forge_tool action when you need project information:
+1. A forge_tool action when you need project information or need to interact with the browser:
 \`\`\`forge_tool
 {"name": "tool_name", "arguments": {}}
 \`\`\`
 
 2. A forge_final response when you have enough information to answer:
 \`\`\`forge_final
-{"content": "Your complete answer here."}
+{"status": "completed", "summary": "Brief summary of what was accomplished.", "content": "Your complete answer here."}
 \`\`\`
 
+The forge_final status field is required and must be one of: "completed", "blocked", or "failed".
+Use "blocked" when a CAPTCHA, MFA, or login screen requires human action. Use "failed" only when you cannot proceed.
+
 You may include a forge_edit_proposal block in the SAME response as forge_final when proposing file changes.
+
+Browser tools:
+- browser_use_session is OPTIONAL — the system auto-resolves browser context from the current run.
+- Use browser_read_page to observe page state before interacting.
+- New V3 interaction tools: browser_hover, browser_double_click, browser_drag, browser_focus, browser_clear, browser_scroll_into_view, browser_checkbox, browser_upload_file, browser_get_media, browser_control_media, browser_handle_dialog.
+- Use browser_wait_for to wait for page changes after actions. Available conditions: page_load, text_present, text_absent, url_matches, url_equals, title_contains, element_present, element_absent, element_enabled, navigation_settled, network_quiet.
+- If you encounter a CAPTCHA, MFA prompt, or login screen that requires credentials you do not have, return forge_final with status: "blocked" and a clear summary.
 
 Rules:
 - NEVER return naked explanatory prose as your only output.
@@ -993,6 +1003,7 @@ Rules:
 - For simple conversational questions or requests that do not require project file access (greetings, explanations, questions about yourself), you MUST respond with forge_final immediately on the first turn — no tool calls are needed or appropriate.
 - Continue autonomously until you can provide a complete answer, a valid proposal, or encounter a real blocker.
 - Do not expose forge_tool, forge_final, forge_edit_proposal syntax in user-facing content.
+- Avoid repeating the same observation and tool call — if you observe no change after an action, try a different approach or declare the task blocked.
 </forge_agent_protocol>`
       : undefined;
 
@@ -1554,6 +1565,21 @@ Rules:
       // No intermediate narration is persisted — only one error ChatMessage.
       // INV: ONE_RUN_ONE_VISIBLE_FAILURE — exactly one error message per failed run.
       if (err instanceof AgentLoopError) {
+        // Special case: AGENT_WAITING_FOR_HUMAN is not a failure — it's a pause.
+        // The queue item stays in "processing" conceptually but we emit a UI notification.
+        // The run resumes when the user clicks "Return Control" (BROWSER_IPC.RETURN_CONTROL).
+        if (err.code === "AGENT_WAITING_FOR_HUMAN") {
+          db.updateQueueItem(true, conversationId, item.id, {
+            status: "paused",
+            lastError: "Waiting for human input in browser. Click 'Return Control' when done.",
+          });
+          db.setQueuePaused(true, conversationId, true);
+          const { BROWSER_IPC } = await import("../../shared/types.js");
+          this.send(BROWSER_IPC.WAITING_FOR_HUMAN, { conversationId, streamId, requestId });
+          this.pushQueueState(conversationId);
+          activeRunRegistry.delete(conversationId);
+          return;
+        }
         let errorContent: string;
         switch (err.code) {
           case "PROTOCOL_RECOVERY_EXHAUSTED":

@@ -286,6 +286,9 @@ export default function ChatScreen({
   // ── Delete confirm ─────────────────────────────────────────────────────
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
+  // ── waiting_for_human — set when agent needs browser intervention ───────
+  const [waitingForHumanConvId, setWaitingForHumanConvId] = useState<string | null>(null);
+
   // ── Draft conversation id ──────────────────────────────────────────────
   const draftConvId = useRef<string>(randomId());
 
@@ -485,6 +488,8 @@ export default function ChatScreen({
       if (convId === lastHydratedConvRef.current) {
         lastHydratedRevisionRef.current = Number.MAX_SAFE_INTEGER;
       }
+      // If this conversation was waiting for human, clear the banner on resume
+      setWaitingForHumanConvId((prev) => prev === convId ? null : prev);
       setStreaming({ streamId, text: "", conversationId: convId }, convId);
       if (conversation) {
         setConversations((prev) => {
@@ -551,12 +556,17 @@ export default function ChatScreen({
       }
     });
 
+    const unsubWaiting = window.forgeApi.browser.onWaitingForHuman(({ conversationId }) => {
+      setWaitingForHumanConvId(conversationId);
+    });
+
     return () => {
       unsubStart();
       unsubChunk();
       unsubEnd();
       unsubErr();
       unsubQueue();
+      unsubWaiting();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadConversations, setStreaming]);
@@ -1304,6 +1314,33 @@ export default function ChatScreen({
 
             {/* Streaming bubble */}
             {streaming && <StreamingBubble text={streaming.text} streamId={streaming.streamId} />}
+
+            {/* waiting_for_human banner — agent paused for browser intervention */}
+            {!streaming && waitingForHumanConvId === activeConvId && (
+              <div className="group flex flex-col gap-0 py-3 px-1">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-4 h-4 rounded flex items-center justify-center bg-amber-500/20 flex-shrink-0">
+                    <svg width="9" height="9" viewBox="0 0 12 12" fill="none">
+                      <path d="M6 1v5M6 9.5v.5" stroke="#f59e0b" strokeWidth="1.5" strokeLinecap="round" />
+                    </svg>
+                  </div>
+                  <span className="text-[11px] text-amber-400/80 font-medium">Human intervention required</span>
+                </div>
+                <p className="text-xs text-white/50 mb-3 ml-6">The agent is waiting for you to complete an action in the browser (e.g. CAPTCHA, MFA, login). When done, click Return Control to resume.</p>
+                <button
+                  onClick={async () => {
+                    if (activeConvId) {
+                      await window.forgeApi.browser.returnBrowserControl(activeConvId);
+                      setWaitingForHumanConvId(null);
+                    }
+                  }}
+                  className="ml-6 px-3 py-1.5 text-xs font-medium rounded border border-amber-500/30 text-amber-400 hover:bg-amber-500/10 hover:border-amber-500/50 transition-all w-fit"
+                >
+                  Return Control
+                </button>
+              </div>
+            )}
+
             <div ref={bottomRef} className="h-4" />
           </div>
         </div>

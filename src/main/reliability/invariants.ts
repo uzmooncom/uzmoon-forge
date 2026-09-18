@@ -618,6 +618,64 @@ define({
   maxHealingLevel: 1,
 });
 
+// ── Browser Runtime V3 Invariants ─────────────────────────────────────────────
+
+define({
+  id: 'AGENT_GOAL_NOT_STALLED',
+  description: 'An agent run must not repeat the same observation and action hash across consecutive steps beyond the stall threshold.',
+  category: 'AGENT_RUNTIME',
+  severity: 'high',
+  maxHealingLevel: 2,
+});
+
+define({
+  id: 'WAITING_FOR_HUMAN_RESOLVABLE',
+  description: 'A run placed into waiting_for_human state must be associated with an active browser tab that the user can interact with.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'high',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'DIALOG_RESOLUTION_MATCHES_TYPE',
+  description: 'Dialog resolution actions must be consistent with the dialog type (confirm/prompt cannot be dismissed without a value when value was supplied).',
+  category: 'BROWSER_RUNTIME',
+  severity: 'medium',
+  maxHealingLevel: 2,
+});
+
+define({
+  id: 'UPLOAD_FILE_WITHIN_PROJECT_ROOT',
+  description: 'Files uploaded via browser_upload_file must resolve within the active project root — path traversal to the host filesystem is prohibited.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'MEDIA_CONTROL_TARGET_VALID',
+  description: 'browser_control_media actions must target a known media element ref; orphaned or expired refs must not silently succeed.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'medium',
+  maxHealingLevel: 2,
+});
+
+define({
+  id: 'AGENT_FINAL_STATUS_PRESENT',
+  description: 'ForgeAgentFinal JSON in forge_final envelopes must contain a valid status field (completed | blocked | failed).',
+  category: 'AGENT_RUNTIME',
+  severity: 'high',
+  maxHealingLevel: 3,
+});
+
+define({
+  id: 'ELEMENT_REF_NOT_STALE',
+  description: 'Element refs passed to V3 browser interaction tools must belong to the current navigation generation — stale refs from a prior page load must be rejected.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'medium',
+  maxHealingLevel: 2,
+});
+
 // ── InvariantMonitor ──────────────────────────────────────────────────────────
 
 /** Called when a violation is detected — plug in to the incident pipeline */
