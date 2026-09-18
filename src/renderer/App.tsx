@@ -6,6 +6,7 @@ import ChatScreen from "./screens/ChatScreen.js";
 import ProjectsScreen from "./screens/ProjectsScreen.js";
 import ProjectWorkspace from "./screens/ProjectWorkspace.js";
 import AgentProfilesModal from "./components/AgentProfilesModal.js";
+import BrowserWorkspace from "./screens/BrowserWorkspace.js";
 
 // ── Nav icons ──────────────────────────────────────────────────────────────
 
@@ -31,6 +32,18 @@ function FolderIcon({ size = 18 }: { size?: number }) {
   );
 }
 
+
+function BrowserIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" fill="none">
+      <rect x="2" y="3" width="16" height="14" rx="2" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M2 7h16" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="5" cy="5" r="0.8" fill="currentColor" />
+      <circle cx="8" cy="5" r="0.8" fill="currentColor" />
+    </svg>
+  );
+}
+
 function SettingsIcon({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 20 20" fill="none">
@@ -46,7 +59,7 @@ function SettingsIcon({ size = 16 }: { size?: number }) {
 // ── Types ──────────────────────────────────────────────────────────────────
 
 type Screen = "loading" | "welcome" | "connect" | "app";
-type AppView = "chat" | "projects";
+type AppView = "chat" | "projects" | "browser";
 
 // ── MainShell ──────────────────────────────────────────────────────────────
 
@@ -94,6 +107,16 @@ function MainShell({ onOpenSettings }: MainShellProps) {
               <FolderIcon size={18} />
             </NavButton>
 
+
+            {/* Browser */}
+            <NavButton
+              active={view === "browser"}
+              label="Browser"
+              onClick={() => setView("browser")}
+            >
+              <BrowserIcon size={18} />
+            </NavButton>
+
             {/* Spacer */}
             <div className="flex-1" />
 
@@ -119,6 +142,10 @@ function MainShell({ onOpenSettings }: MainShellProps) {
           ) : view === "chat" ? (
             <ChatScreen
               projectId={null}
+              onOpenSettings={onOpenSettings}
+            />
+          ) : view === "browser" ? (
+            <BrowserWorkspace
               onOpenSettings={onOpenSettings}
             />
           ) : (
