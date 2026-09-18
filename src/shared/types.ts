@@ -1344,6 +1344,22 @@ export interface BrowserTab {
   updatedAt: number;
 }
 
+/**
+ * Opaque binding between a browser resource and a conversation/request.
+ * Main process is authoritative — renderer never constructs this directly.
+ */
+export interface BrowserContextRef {
+  id: string;
+  profileId: string;
+  sessionId: string;
+  tabId: string;
+  navigationGeneration: number;
+  createdAt: number;
+  conversationId?: string;
+  requestId?: string;
+  agentRunId?: string;
+}
+
 /** Agent browser control token — must be validated before every browser action */
 export interface BrowserAgentControl {
   sessionId: string;
@@ -1532,6 +1548,13 @@ export const BROWSER_IPC = {
   DOWNLOAD_STARTED:      "browser:downloadStarted",
   // Main → Renderer (send): request UI to show browser workspace
   REQUEST_SHOW_BROWSER:  "browser:requestShowBrowser",
+  // Renderer → Main: user switched the visible tab
+  USER_TAB_CHANGED:      "browser:userTabChanged",
+  // Main → Browser renderer: open/focus window command
+  OPEN_WINDOW:           "browser:openWindow",
+  FOCUS_WINDOW:          "browser:focusWindow",
+  // Browser renderer → Main: renderer is ready
+  BROWSER_RENDERER_READY: "browser:rendererReady",
 } as const;
 
 // ── Dev Process (Long-Running Project Processes) ──────────────────────────

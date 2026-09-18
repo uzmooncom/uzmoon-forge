@@ -25,6 +25,7 @@ import { queueManager, cancelStream, getActiveStreamId, setSecretGetter, deleteO
 import { tryGetIncidentRecorder, assertInvariant } from "../reliability/index.js";
 import * as commandManager from "../commands/command-manager.js";
 import * as browserManager from "../browser/browser-manager.js";
+import * as browserWindowController from "../browser/browser-window-controller.js";
 import * as devProcessManager from "../commands/dev-process-manager.js";
 import { buildGitHubIssuePayload } from "../reliability/sanitizer.js";
 void sweepOrphanedSnapshots; // imported for startup use — called from main.ts
@@ -1592,6 +1593,18 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   ipcMain.handle(
     BROWSER_IPC.GET_RUNTIME_STATE,
     (_e: IpcMainInvokeEvent) => browserManager.getBrowserRuntimeState()
+  );
+
+  // Open the standalone Forge Browser window (or focus if already open)
+  ipcMain.handle(
+    BROWSER_IPC.OPEN_WINDOW,
+    (_e: IpcMainInvokeEvent) => { browserWindowController.openBrowserWindow(); }
+  );
+
+  // Focus the standalone Forge Browser window (no-op if not open)
+  ipcMain.handle(
+    BROWSER_IPC.FOCUS_WINDOW,
+    (_e: IpcMainInvokeEvent) => { browserWindowController.focusBrowserWindow(); }
   );
 
   // ── Dev Process IPC ─────────────────────────────────────────────────────

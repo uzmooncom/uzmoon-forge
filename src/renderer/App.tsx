@@ -6,7 +6,7 @@ import ChatScreen from "./screens/ChatScreen.js";
 import ProjectsScreen from "./screens/ProjectsScreen.js";
 import ProjectWorkspace from "./screens/ProjectWorkspace.js";
 import AgentProfilesModal from "./components/AgentProfilesModal.js";
-import BrowserWorkspace from "./screens/BrowserWorkspace.js";
+// BrowserWorkspace removed — browser runs as a standalone native window
 
 // ── Nav icons ──────────────────────────────────────────────────────────────
 
@@ -59,7 +59,7 @@ function SettingsIcon({ size = 16 }: { size?: number }) {
 // ── Types ──────────────────────────────────────────────────────────────────
 
 type Screen = "loading" | "welcome" | "connect" | "app";
-type AppView = "chat" | "projects" | "browser";
+type AppView = "chat" | "projects";
 
 // ── MainShell ──────────────────────────────────────────────────────────────
 
@@ -70,15 +70,11 @@ interface MainShellProps {
 function MainShell({ onOpenSettings }: MainShellProps) {
   const [view, setView] = useState<AppView>("chat");
   const [activeProject, setActiveProject] = useState<Project | null>(null);
-  const [requestedBrowserSession, setRequestedBrowserSession] = useState<{ sessionId?: string; tabId?: string } | null>(null);
 
-  // Listen for agent-requested browser navigation
+  // Listen for agent-requested browser navigation → open standalone browser window
   useEffect(() => {
-    const unsub = window.forgeApi.browser.onRequestShowBrowser((payload) => {
-      setView("browser");
-      if (payload.sessionId || payload.tabId) {
-        setRequestedBrowserSession(payload);
-      }
+    const unsub = window.forgeApi.browser.onRequestShowBrowser((_payload) => {
+      void window.forgeApi.browser.openBrowserWindow();
     });
     return () => unsub();
   }, []);
@@ -120,11 +116,11 @@ function MainShell({ onOpenSettings }: MainShellProps) {
             </NavButton>
 
 
-            {/* Browser */}
+            {/* Browser — opens as standalone native window */}
             <NavButton
-              active={view === "browser"}
+              active={false}
               label="Browser"
-              onClick={() => setView("browser")}
+              onClick={() => void window.forgeApi.browser.openBrowserWindow()}
             >
               <BrowserIcon size={18} />
             </NavButton>
@@ -155,13 +151,6 @@ function MainShell({ onOpenSettings }: MainShellProps) {
             <ChatScreen
               projectId={null}
               onOpenSettings={onOpenSettings}
-            />
-          ) : view === "browser" ? (
-            <BrowserWorkspace
-              onOpenSettings={onOpenSettings}
-              {...(requestedBrowserSession?.sessionId !== undefined && { requestedSessionId: requestedBrowserSession.sessionId })}
-              {...(requestedBrowserSession?.tabId !== undefined && { requestedTabId: requestedBrowserSession.tabId })}
-              onRequestedSessionHandled={() => setRequestedBrowserSession(null)}
             />
           ) : (
             <ProjectsScreen

@@ -637,6 +637,14 @@ const forgeApi = {
       ipcRenderer.on(BROWSER_IPC.REQUEST_SHOW_BROWSER, listener);
       return () => ipcRenderer.removeListener(BROWSER_IPC.REQUEST_SHOW_BROWSER, listener);
     },
+
+    /** Open the standalone Forge Browser window (or focus it if already open) */
+    openBrowserWindow: (): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.OPEN_WINDOW),
+
+    /** Focus the standalone Forge Browser window (no-op if not open) */
+    focusBrowserWindow: (): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.FOCUS_WINDOW),
   },
 
   // ── Reliability (V0.9) ────────────────────────────────────────────────────

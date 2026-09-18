@@ -13,6 +13,7 @@ import {
 } from "./commands/command-manager.js";
 import { NodeProcessAdapter } from "./commands/process-adapter.js";
 import { initBrowserManager, reconcileBrowserOnStartup } from "./browser/browser-manager.js";
+import { initBrowserWindowController, cleanupBrowserWindowOnQuit } from "./browser/browser-window-controller.js";
 import { initDevProcessManager, cleanupDevProcessesOnQuit } from "./commands/dev-process-manager.js";
 import { RELIABILITY_IPC } from "../shared/types.js";
 
@@ -98,7 +99,11 @@ app.whenReady().then(() => {
   if (mainWindow) {
     initCommandManager(new NodeProcessAdapter(), mainWindow.webContents);
     initDevProcessManager(mainWindow.webContents);
-    initBrowserManager(mainWindow, mainWindow.webContents, dataDir);
+    // initBrowserManager registers main window as IPC sender; browser window adds itself later
+    initBrowserManager(mainWindow.webContents, dataDir);
+    // Init browser window controller so openBrowserWindow() can be called
+    const distDir = path.join(__dirname, "..", "..");
+    initBrowserWindowController(mainWindow.webContents, distDir);
   }
 
   // Reconcile any running/queued commands from a prior crash
@@ -123,4 +128,6 @@ app.on("before-quit", () => {
   void cancelAllOnQuit();
   // Best-effort stop all dev processes on quit
   cleanupDevProcessesOnQuit();
+  // Best-effort close browser window and release WebContentsViews
+  void cleanupBrowserWindowOnQuit();
 });

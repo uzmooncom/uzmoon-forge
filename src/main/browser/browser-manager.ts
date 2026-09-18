@@ -95,11 +95,11 @@ let _revision = 0;
 /** Currently active session id */
 let _activeSessionId: string | null = null;
 
-/** Reference to the Electron BrowserWindow for view management */
-let _mainWindow: import("electron").BrowserWindow | null = null;
+/** Reference to the standalone Forge Browser BrowserWindow for WebContentsView parenting */
+let _browserWindow: import("electron").BrowserWindow | null = null;
 
-/** WebContents for sending IPC push events */
-let _sender: import("electron").WebContents | null = null;
+/** All active renderer WebContents that receive IPC push events */
+const _senders = new Set<import("electron").WebContents>();
 
 /** Currently visible tab view */
 let _visibleTabId: string | null = null;
@@ -114,17 +114,18 @@ function bumpRevision(): void {
 }
 
 function pushRuntimeState(): void {
-  if (!_sender || _sender.isDestroyed()) return;
-  try {
-    _sender.send(BROWSER_IPC.RUNTIME_STATE_PUSH, buildRuntimeState());
-  } catch { /* non-fatal */ }
+  const state = buildRuntimeState();
+  for (const s of _senders) {
+    if (s.isDestroyed()) continue;
+    try { s.send(BROWSER_IPC.RUNTIME_STATE_PUSH, state); } catch { /* non-fatal */ }
+  }
 }
 
 function pushToRenderer(channel: string, payload: unknown): void {
-  if (!_sender || _sender.isDestroyed()) return;
-  try {
-    _sender.send(channel, payload);
-  } catch { /* non-fatal */ }
+  for (const s of _senders) {
+    if (s.isDestroyed()) continue;
+    try { s.send(channel, payload); } catch { /* non-fatal */ }
+  }
 }
 
 function buildRuntimeState(): BrowserRuntimeState {
@@ -194,18 +195,41 @@ function emitTrace(
 // ── Init / Cleanup ─────────────────────────────────────────────────────────
 
 export function initBrowserManager(
-  mainWindow: import("electron").BrowserWindow,
   sender: import("electron").WebContents,
   dataDir: string,
 ): void {
-  _mainWindow = mainWindow;
-  _sender = sender;
+  _senders.add(sender);
   _dataDir = dataDir;
 
   // Ensure screenshot dir exists
   try {
     fs.mkdirSync(path.join(dataDir, "browser-screenshots"), { recursive: true });
   } catch { /* non-fatal */ }
+}
+
+/**
+ * Set (or clear) the native BrowserWindow that hosts WebContentsViews.
+ * Called by browser-window-controller when the standalone window opens/closes.
+ */
+export function setBrowserNativeWindow(
+  win: import("electron").BrowserWindow | null,
+): void {
+  _browserWindow = win;
+}
+
+/**
+ * Add a renderer WebContents that should receive all browser IPC push events.
+ * Called by browser-window-controller when the standalone window opens.
+ */
+export function addRendererSender(sender: import("electron").WebContents): void {
+  _senders.add(sender);
+}
+
+/**
+ * Remove a renderer WebContents (e.g. when the standalone window is closed).
+ */
+export function removeRendererSender(sender: import("electron").WebContents): void {
+  _senders.delete(sender);
 }
 
 /** Called on startup to reconcile DB state with runtime. */
@@ -284,8 +308,8 @@ export function _resetBrowserManagerForTest(): void {
   _pendingApprovals.clear();
   _downloads.clear();
   _activeSessionId = null;
-  _mainWindow = null;
-  _sender = null;
+  _browserWindow = null;
+  _senders.clear();
   _dataDir = null;
   _visibleTabId = null;
   _revision = 0;
@@ -489,7 +513,7 @@ async function _createTabInternal(
   saveBrowserTab(true, tab);
 
   // Create WebContentsView if in Electron environment
-  if (electronWebContentsView && _mainWindow) {
+  if (electronWebContentsView && _browserWindow) {
     const profile = getBrowserProfile(true, profileId);
     const partition = profile ? profilePartition(profile) : `persist:forge-browser-${profileId}`;
 
@@ -503,7 +527,7 @@ async function _createTabInternal(
       },
     });
 
-    _mainWindow.contentView.addChildView(wc);
+    _browserWindow.contentView.addChildView(wc);
     _tabViews.set(id, wc);
 
     // Wire events
@@ -765,7 +789,7 @@ function _releaseTabView(tabId: string): void {
   if (!view) return;
   try {
     view.webContents.stop();
-    _mainWindow?.contentView.removeChildView(view);
+    _browserWindow?.contentView.removeChildView(view);
   } catch { /* non-fatal */ }
   _tabViews.delete(tabId);
   _elementRefs.delete(tabId);
@@ -850,8 +874,8 @@ export function getAgentControlByRequestId(requestId: string): BrowserAgentContr
  * Non-throwing: if sender is unavailable the event is silently dropped.
  */
 export function requestShowBrowser(sessionId?: string, tabId?: string): void {
-  if (!_sender || _sender.isDestroyed()) return;
-  _sender.send(BROWSER_IPC.REQUEST_SHOW_BROWSER, { sessionId, tabId });
+  // Push to all connected renderers (main window + browser window)
+  pushToRenderer(BROWSER_IPC.REQUEST_SHOW_BROWSER, { sessionId, tabId });
 }
 
 /**
