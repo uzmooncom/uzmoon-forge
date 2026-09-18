@@ -71,7 +71,28 @@ export type KnownToolName =
   | "read_file_range"
   | "run_command"
   | "list_project_commands"
-  | "read_command_output";
+  | "read_command_output"
+  // ── Browser Runtime V1 ────────────────────────────────────────────
+  | "browser_list_sessions"
+  | "browser_new_tab"
+  | "browser_close_tab"
+  | "browser_switch_tab"
+  | "browser_open_url"
+  | "browser_back"
+  | "browser_forward"
+  | "browser_reload"
+  | "browser_stop"
+  | "browser_read_page"
+  | "browser_find_text"
+  | "browser_click"
+  | "browser_type"
+  | "browser_fill"
+  | "browser_select"
+  | "browser_press_key"
+  | "browser_scroll"
+  | "browser_screenshot"
+  | "browser_get_console"
+  | "browser_get_network_summary";
 
 export const KNOWN_TOOL_NAMES = new Set<string>([
   "list_directory",
@@ -82,6 +103,27 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   "run_command",
   "list_project_commands",
   "read_command_output",
+  // Browser Runtime V1
+  "browser_list_sessions",
+  "browser_new_tab",
+  "browser_close_tab",
+  "browser_switch_tab",
+  "browser_open_url",
+  "browser_back",
+  "browser_forward",
+  "browser_reload",
+  "browser_stop",
+  "browser_read_page",
+  "browser_find_text",
+  "browser_click",
+  "browser_type",
+  "browser_fill",
+  "browser_select",
+  "browser_press_key",
+  "browser_scroll",
+  "browser_screenshot",
+  "browser_get_console",
+  "browser_get_network_summary",
 ]);
 
 // ── Validation result ───────────────────────────────────────────────────────
@@ -123,7 +165,18 @@ export interface ValidationOk {
     | ReadFileRangeArgs
     | RunCommandArgs
     | ListProjectCommandsArgs
-    | ReadCommandOutputArgs;
+    | ReadCommandOutputArgs
+    | BrowserListSessionsArgs
+    | BrowserNewTabArgs
+    | BrowserTabRefArgs
+    | BrowserOpenUrlArgs
+    | BrowserFindTextArgs
+    | BrowserClickArgs
+    | BrowserTypeArgs
+    | BrowserFillArgs
+    | BrowserSelectArgs
+    | BrowserPressKeyArgs
+    | BrowserScrollArgs;
 }
 
 export interface ValidationError {
@@ -176,6 +229,27 @@ export function validateToolCall(call: ForgeToolCall): ValidationResult {
       return validateListProjectCommands(args);
     case "read_command_output":
       return validateReadCommandOutput(args);
+    // ── Browser Runtime V1 ──────────────────────────────────────────────
+    case "browser_list_sessions":   return validateBrowserListSessions(args);
+    case "browser_new_tab":         return validateBrowserNewTab(args);
+    case "browser_close_tab":       return validateBrowserTabRef("browser_close_tab", args);
+    case "browser_switch_tab":      return validateBrowserTabRef("browser_switch_tab", args);
+    case "browser_open_url":        return validateBrowserOpenUrl(args);
+    case "browser_back":            return validateBrowserTabRef("browser_back", args);
+    case "browser_forward":         return validateBrowserTabRef("browser_forward", args);
+    case "browser_reload":          return validateBrowserTabRef("browser_reload", args);
+    case "browser_stop":            return validateBrowserTabRef("browser_stop", args);
+    case "browser_read_page":       return validateBrowserTabRef("browser_read_page", args);
+    case "browser_find_text":       return validateBrowserFindText(args);
+    case "browser_click":           return validateBrowserClick(args);
+    case "browser_type":            return validateBrowserType(args);
+    case "browser_fill":            return validateBrowserFill(args);
+    case "browser_select":          return validateBrowserSelect(args);
+    case "browser_press_key":       return validateBrowserPressKey(args);
+    case "browser_scroll":          return validateBrowserScroll(args);
+    case "browser_screenshot":      return validateBrowserTabRef("browser_screenshot", args);
+    case "browser_get_console":     return validateBrowserTabRef("browser_get_console", args);
+    case "browser_get_network_summary": return validateBrowserTabRef("browser_get_network_summary", args);
   }
 }
 
@@ -694,7 +768,396 @@ const TOOL_DEFS: Array<{
       required: ["command_id"],
     },
   },
+  // ── Browser Runtime V1 tool definitions ──────────────────────────────────
+  {
+    name: 'browser_list_sessions',
+    description:
+      'List active browser sessions (open browser windows). ' +
+      'Returns session_id, profile name, number of tabs, and active tab URL for each session. ' +
+      'Use this first to discover available sessions before using other browser tools.',
+    parameters: {
+      type: 'object',
+      properties: {
+        profile_id: { type: 'string', description: 'Optional: filter by browser profile ID.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'browser_new_tab',
+    description:
+      'Open a new tab in an existing browser session. ' +
+      'Returns the new tab_id. The tab starts at about:blank or the given url.',
+    parameters: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: 'The session_id (from browser_list_sessions).' },
+        url: { type: 'string', description: 'Optional initial URL.' },
+      },
+      required: ['session_id'],
+    },
+  },
+  {
+    name: 'browser_close_tab',
+    description: 'Close a browser tab by its tab_id.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id to close.' } }, required: ['tab_id'] },
+  },
+  {
+    name: 'browser_switch_tab',
+    description: 'Switch focus to a different tab within the same session.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id to switch to.' } }, required: ['tab_id'] },
+  },
+  {
+    name: 'browser_open_url',
+    description:
+      'Navigate a browser tab to a URL. Only http/https URLs are permitted. ' +
+      'Bare hostnames and search queries are also accepted.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tab_id: { type: 'string', description: 'The tab_id to navigate.' },
+        url: { type: 'string', description: 'URL or search query.' },
+      },
+      required: ['tab_id', 'url'],
+    },
+  },
+  {
+    name: 'browser_back',
+    description: 'Navigate back in a tab history.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id.' } }, required: ['tab_id'] },
+  },
+  {
+    name: 'browser_forward',
+    description: 'Navigate forward in a tab history.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id.' } }, required: ['tab_id'] },
+  },
+  {
+    name: 'browser_reload',
+    description: 'Reload the current page in a tab.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id.' } }, required: ['tab_id'] },
+  },
+  {
+    name: 'browser_stop',
+    description: 'Stop the current page load in a tab.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id.' } }, required: ['tab_id'] },
+  },
+  {
+    name: 'browser_read_page',
+    description:
+      'Extract a bounded semantic snapshot of the current page. ' +
+      'Returns visible text (up to 16KB) and interactive elements with stable ref IDs. ' +
+      'Use refs with browser_click, browser_fill, browser_select. ' +
+      'Refs become stale after any navigation — call browser_read_page again.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id.' } }, required: ['tab_id'] },
+  },
+  {
+    name: 'browser_find_text',
+    description: 'Search for text on the current page. Returns match count.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tab_id: { type: 'string', description: 'The tab_id.' },
+        query: { type: 'string', description: 'Text to search for.' },
+      },
+      required: ['tab_id', 'query'],
+    },
+  },
+  {
+    name: 'browser_click',
+    description:
+      'Click an interactive element by its ref ID from browser_read_page. ' +
+      'Refs are tied to the current navigation — read_page first if unsure.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tab_id: { type: 'string', description: 'The tab_id.' },
+        ref: { type: 'string', description: 'Element ref (e.g. b1, l3, i2) from browser_read_page.' },
+      },
+      required: ['tab_id', 'ref'],
+    },
+  },
+  {
+    name: 'browser_type',
+    description: 'Type text into the currently focused element.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tab_id: { type: 'string', description: 'The tab_id.' },
+        text: { type: 'string', description: 'Text to type.' },
+      },
+      required: ['tab_id', 'text'],
+    },
+  },
+  {
+    name: 'browser_fill',
+    description:
+      'Set the value of an input or textarea field by ref ID. ' +
+      'Prefer this over browser_type for form fields.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tab_id: { type: 'string', description: 'The tab_id.' },
+        ref: { type: 'string', description: 'Input ref (e.g. i1) from browser_read_page.' },
+        value: { type: 'string', description: 'Value to set.' },
+      },
+      required: ['tab_id', 'ref', 'value'],
+    },
+  },
+  {
+    name: 'browser_select',
+    description: 'Select an option in a dropdown by ref ID.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tab_id: { type: 'string', description: 'The tab_id.' },
+        ref: { type: 'string', description: 'Select ref (e.g. s1) from browser_read_page.' },
+        value: { type: 'string', description: 'Option value to select.' },
+      },
+      required: ['tab_id', 'ref', 'value'],
+    },
+  },
+  {
+    name: 'browser_press_key',
+    description: 'Press a keyboard key in the current tab (Return, Escape, Tab, ArrowDown, etc.).',
+    parameters: {
+      type: 'object',
+      properties: {
+        tab_id: { type: 'string', description: 'The tab_id.' },
+        key: { type: 'string', description: 'Key name (e.g. Return, Escape, Tab, ArrowDown).' },
+      },
+      required: ['tab_id', 'key'],
+    },
+  },
+  {
+    name: 'browser_scroll',
+    description: 'Scroll the page by a number of pixels.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tab_id: { type: 'string', description: 'The tab_id.' },
+        delta_x: { type: 'number', description: 'Horizontal scroll delta in pixels.' },
+        delta_y: { type: 'number', description: 'Vertical scroll delta in pixels (positive = down).' },
+      },
+      required: ['tab_id'],
+    },
+  },
+  {
+    name: 'browser_screenshot',
+    description:
+      'Capture a screenshot of the current tab as a base64 PNG data URL. ' +
+      'Limited to 5 per agent run. Prefer browser_read_page for structure.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id.' } }, required: ['tab_id'] },
+  },
+  {
+    name: 'browser_get_console',
+    description: 'Get recent browser console log entries for a tab. Returns up to 50 entries.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id.' } }, required: ['tab_id'] },
+  },
+  {
+    name: 'browser_get_network_summary',
+    description:
+      'Get a summary of recent network requests made by a tab. ' +
+      'Returns URL (sensitive params redacted), method, HTTP status, resource type, timestamp.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id.' } }, required: ['tab_id'] },
+  },
 ];
+
+
+// ── Browser Runtime V1 arg interfaces ──────────────────────────────────────
+
+export interface BrowserListSessionsArgs {
+  profile_id?: string;
+}
+
+export interface BrowserNewTabArgs {
+  session_id: string;
+  url?: string;
+}
+
+export interface BrowserTabRefArgs {
+  tab_id: string;
+}
+
+export interface BrowserOpenUrlArgs {
+  tab_id: string;
+  url: string;
+}
+
+export interface BrowserFindTextArgs {
+  tab_id: string;
+  query: string;
+}
+
+export interface BrowserClickArgs {
+  tab_id: string;
+  ref: string;
+}
+
+export interface BrowserTypeArgs {
+  tab_id: string;
+  text: string;
+}
+
+export interface BrowserFillArgs {
+  tab_id: string;
+  ref: string;
+  value: string;
+}
+
+export interface BrowserSelectArgs {
+  tab_id: string;
+  ref: string;
+  value: string;
+}
+
+export interface BrowserPressKeyArgs {
+  tab_id: string;
+  key: string;
+}
+
+export interface BrowserScrollArgs {
+  tab_id: string;
+  delta_x?: number;
+  delta_y?: number;
+}
+
+// ── Browser validators ─────────────────────────────────────────────────────
+
+function validateBrowserListSessions(args: Record<string, unknown>): ValidationResult {
+  const r: BrowserListSessionsArgs = {};
+  if (args['profile_id'] !== undefined) {
+    if (typeof args['profile_id'] !== 'string' || !args['profile_id']) {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_list_sessions: profile_id must be a non-empty string' };
+    }
+    r.profile_id = args['profile_id'] as string;
+  }
+  return { ok: true, toolName: 'browser_list_sessions', args: r };
+}
+
+function validateBrowserNewTab(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['session_id'] !== 'string' || !args['session_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_new_tab: session_id must be a non-empty string' };
+  }
+  const r: BrowserNewTabArgs = { session_id: args['session_id'] as string };
+  if (args['url'] !== undefined) {
+    if (typeof args['url'] !== 'string') {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_new_tab: url must be a string' };
+    }
+    r.url = args['url'] as string;
+  }
+  return { ok: true, toolName: 'browser_new_tab', args: r };
+}
+
+function validateBrowserTabRef(toolName: KnownToolName, args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: toolName + ': tab_id must be a non-empty string' };
+  }
+  const r: BrowserTabRefArgs = { tab_id: args['tab_id'] as string };
+  return { ok: true, toolName, args: r };
+}
+
+function validateBrowserOpenUrl(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_open_url: tab_id must be a non-empty string' };
+  }
+  if (typeof args['url'] !== 'string' || !args['url']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_open_url: url must be a non-empty string' };
+  }
+  const r: BrowserOpenUrlArgs = { tab_id: args['tab_id'] as string, url: args['url'] as string };
+  return { ok: true, toolName: 'browser_open_url', args: r };
+}
+
+function validateBrowserFindText(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_find_text: tab_id must be a non-empty string' };
+  }
+  if (typeof args['query'] !== 'string' || !args['query']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_find_text: query must be a non-empty string' };
+  }
+  const r: BrowserFindTextArgs = { tab_id: args['tab_id'] as string, query: args['query'] as string };
+  return { ok: true, toolName: 'browser_find_text', args: r };
+}
+
+function validateBrowserClick(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_click: tab_id must be a non-empty string' };
+  }
+  if (typeof args['ref'] !== 'string' || !args['ref']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_click: ref must be a non-empty string' };
+  }
+  const r: BrowserClickArgs = { tab_id: args['tab_id'] as string, ref: args['ref'] as string };
+  return { ok: true, toolName: 'browser_click', args: r };
+}
+
+function validateBrowserType(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_type: tab_id must be a non-empty string' };
+  }
+  if (typeof args['text'] !== 'string') {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_type: text must be a string' };
+  }
+  const r: BrowserTypeArgs = { tab_id: args['tab_id'] as string, text: args['text'] as string };
+  return { ok: true, toolName: 'browser_type', args: r };
+}
+
+function validateBrowserFill(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_fill: tab_id must be a non-empty string' };
+  }
+  if (typeof args['ref'] !== 'string' || !args['ref']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_fill: ref must be a non-empty string' };
+  }
+  if (typeof args['value'] !== 'string') {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_fill: value must be a string' };
+  }
+  const r: BrowserFillArgs = { tab_id: args['tab_id'] as string, ref: args['ref'] as string, value: args['value'] as string };
+  return { ok: true, toolName: 'browser_fill', args: r };
+}
+
+function validateBrowserSelect(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_select: tab_id must be a non-empty string' };
+  }
+  if (typeof args['ref'] !== 'string' || !args['ref']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_select: ref must be a non-empty string' };
+  }
+  if (typeof args['value'] !== 'string') {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_select: value must be a string' };
+  }
+  const r: BrowserSelectArgs = { tab_id: args['tab_id'] as string, ref: args['ref'] as string, value: args['value'] as string };
+  return { ok: true, toolName: 'browser_select', args: r };
+}
+
+function validateBrowserPressKey(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_press_key: tab_id must be a non-empty string' };
+  }
+  if (typeof args['key'] !== 'string' || !args['key']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_press_key: key must be a non-empty string' };
+  }
+  const r: BrowserPressKeyArgs = { tab_id: args['tab_id'] as string, key: args['key'] as string };
+  return { ok: true, toolName: 'browser_press_key', args: r };
+}
+
+function validateBrowserScroll(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_scroll: tab_id must be a non-empty string' };
+  }
+  const r: BrowserScrollArgs = { tab_id: args['tab_id'] as string };
+  if (args['delta_x'] !== undefined) {
+    if (typeof args['delta_x'] !== 'number') {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_scroll: delta_x must be a number' };
+    }
+    r.delta_x = args['delta_x'] as number;
+  }
+  if (args['delta_y'] !== undefined) {
+    if (typeof args['delta_y'] !== 'number') {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_scroll: delta_y must be a number' };
+    }
+    r.delta_y = args['delta_y'] as number;
+  }
+  return { ok: true, toolName: 'browser_scroll', args: r };
+}
 
 /** Build OpenAI-format tool definitions */
 export function buildOpenAIToolDefs(): OpenAIToolDef[] {

@@ -23,6 +23,9 @@ import type {
   CommandTrustRule,
   CommandOutputMetadata,
   ForgeFailureCode,
+  BrowserProfile,
+  BrowserSession,
+  BrowserTab,
 } from "../../shared/types.js";
 import { DEFAULT_APP_SETTINGS } from "../../shared/types.js";
 
@@ -69,6 +72,13 @@ interface Store {
   commandOutputs: Record<string, string>;
   /** CommandTrustRules keyed by id */
   trustRules: Record<string, CommandTrustRule>;
+  // ── V1.1: Browser Runtime ─────────────────────────────────────────────
+  /** BrowserProfile metadata keyed by id (no raw cookies/tokens — Chromium partition owns those) */
+  browserProfiles: Record<string, BrowserProfile>;
+  /** BrowserSession metadata keyed by id */
+  browserSessions: Record<string, BrowserSession>;
+  /** BrowserTab metadata keyed by id */
+  browserTabs: Record<string, BrowserTab>;
 }
 
 const DEFAULT_STORE: Store = {
@@ -88,6 +98,9 @@ const DEFAULT_STORE: Store = {
   commands: {},
   commandOutputs: {},
   trustRules: {},
+  browserProfiles: {},
+  browserSessions: {},
+  browserTabs: {},
 };
 
 // ── Singleton ──────────────────────────────────────────────────────────────
@@ -122,6 +135,9 @@ function load(): Store {
       commands: raw.commands ?? {},
       commandOutputs: raw.commandOutputs ?? {},
       trustRules: raw.trustRules ?? {},
+      browserProfiles: raw.browserProfiles ?? {},
+      browserSessions: raw.browserSessions ?? {},
+      browserTabs: raw.browserTabs ?? {},
     };
 
     // ── One-time migration: AgentConfig → AgentProfile ─────────────────
@@ -1067,5 +1083,125 @@ export function touchTrustRuleUsed(_db: true, ruleId: string): void {
   r.lastUsedAt = Date.now();
   r.useCount = (r.useCount ?? 0) + 1;
   persist();
+}
+
+// ── Browser Runtime V1 CRUD ───────────────────────────────────────────────
+// Stores only metadata — no raw cookies, tokens, or auth data.
+// Chromium session partitions own web storage.
+
+export function saveBrowserProfile(_db: true, profile: BrowserProfile): void {
+  store().browserProfiles[profile.id] = structuredClone(profile);
+  persist();
+}
+
+export function getBrowserProfile(_db: true, id: string): BrowserProfile | null {
+  const p = store().browserProfiles[id];
+  return p ? structuredClone(p) : null;
+}
+
+export function listBrowserProfiles(_db: true): BrowserProfile[] {
+  return structuredClone(
+    Object.values(store().browserProfiles).sort((a, b) => a.createdAt - b.createdAt)
+  );
+}
+
+export function deleteBrowserProfile(_db: true, id: string): void {
+  delete store().browserProfiles[id];
+  persist();
+}
+
+export function updateBrowserProfile(_db: true, id: string, patch: Partial<BrowserProfile>): BrowserProfile | null {
+  const p = store().browserProfiles[id];
+  if (!p) return null;
+  Object.assign(p, patch, { updatedAt: Date.now() });
+  persist();
+  return structuredClone(p);
+}
+
+export function saveBrowserSession(_db: true, session: BrowserSession): void {
+  store().browserSessions[session.id] = structuredClone(session);
+  persist();
+}
+
+export function getBrowserSession(_db: true, id: string): BrowserSession | null {
+  const s = store().browserSessions[id];
+  return s ? structuredClone(s) : null;
+}
+
+export function listBrowserSessions(_db: true, profileId?: string): BrowserSession[] {
+  const all = Object.values(store().browserSessions);
+  const filtered = profileId ? all.filter((s) => s.profileId === profileId) : all;
+  return structuredClone(filtered.sort((a, b) => (b.lastOpenedAt ?? b.createdAt) - (a.lastOpenedAt ?? a.createdAt)));
+}
+
+export function updateBrowserSession(_db: true, id: string, patch: Partial<BrowserSession>): BrowserSession | null {
+  const s = store().browserSessions[id];
+  if (!s) return null;
+  Object.assign(s, patch, { updatedAt: Date.now() });
+  persist();
+  return structuredClone(s);
+}
+
+export function deleteBrowserSession(_db: true, id: string): void {
+  delete store().browserSessions[id];
+  persist();
+}
+
+export function saveBrowserTab(_db: true, tab: BrowserTab): void {
+  store().browserTabs[tab.id] = structuredClone(tab);
+  persist();
+}
+
+export function getBrowserTab(_db: true, id: string): BrowserTab | null {
+  const t = store().browserTabs[id];
+  return t ? structuredClone(t) : null;
+}
+
+export function listBrowserTabs(_db: true, sessionId: string): BrowserTab[] {
+  return structuredClone(
+    Object.values(store().browserTabs)
+      .filter((t) => t.sessionId === sessionId)
+      .sort((a, b) => a.createdAt - b.createdAt)
+  );
+}
+
+export function updateBrowserTab(_db: true, id: string, patch: Partial<BrowserTab>): BrowserTab | null {
+  const t = store().browserTabs[id];
+  if (!t) return null;
+  Object.assign(t, patch, { updatedAt: Date.now() });
+  persist();
+  return structuredClone(t);
+}
+
+export function deleteBrowserTab(_db: true, id: string): void {
+  delete store().browserTabs[id];
+  persist();
+}
+
+/** Delete all tabs belonging to a session */
+export function deleteBrowserTabsBySession(_db: true, sessionId: string): void {
+  const s = store();
+  let dirty = false;
+  for (const id of Object.keys(s.browserTabs)) {
+    if (s.browserTabs[id]?.sessionId === sessionId) {
+      delete s.browserTabs[id];
+      dirty = true;
+    }
+  }
+  if (dirty) persist();
+}
+
+/** Get browser store summary for migration/reconcile purposes */
+export function getBrowserStoreSummary(_db: true): {
+  profileCount: number;
+  sessionCount: number;
+  tabCount: number;
+} {
+  const s = store();
+  return {
+    profileCount: Object.keys(s.browserProfiles).length,
+    sessionCount: Object.keys(s.browserSessions).length,
+    tabCount: Object.keys(s.browserTabs).length,
+  };
 }
 

@@ -833,7 +833,23 @@ export type ForgeFailureCode =
   | "COMMAND_BUDGET_EXCEEDED"
   | "COMMAND_APPROVAL_BYPASS"
   | "COMMAND_SOURCE_WRITE_BYPASS"
-  | "UNKNOWN";
+  | "UNKNOWN"
+  // ── Browser Runtime failure codes ─────────────────────────────────────
+  | "BROWSER_PROFILE_NOT_FOUND"
+  | "BROWSER_SESSION_NOT_FOUND"
+  | "BROWSER_TAB_NOT_FOUND"
+  | "BROWSER_ACCESS_DENIED"
+  | "BROWSER_AGENT_ACCESS_DISABLED"
+  | "BROWSER_APPROVAL_REJECTED"
+  | "BROWSER_NAVIGATION_FAILED"
+  | "BROWSER_TIMEOUT"
+  | "BROWSER_STALE_ELEMENT_REF"
+  | "BROWSER_ACTION_BUDGET_EXCEEDED"
+  | "BROWSER_PAGE_CRASHED"
+  | "BROWSER_PRIVATE_SESSION_CLOSED"
+  | "BROWSER_DOWNLOAD_BLOCKED"
+  | "BROWSER_UNSAFE_URL"
+  | "BROWSER_CONTENT_TOO_LARGE";
 
 /** Severity levels for invariants and incidents */
 export type ForgeSeverity = "critical" | "high" | "medium" | "low";
@@ -853,7 +869,8 @@ export type IncidentCategory =
   | "INDEXING"
   | "IPC_ROUTING"
   | "SECURITY_INVARIANT"
-  | "COMMAND_EXECUTION";
+  | "COMMAND_EXECUTION"
+  | "BROWSER_RUNTIME";
 
 /** A canonical incident record — stored locally, never sent without opt-in */
 export interface ForgeIncident {
@@ -921,7 +938,19 @@ export interface TraceEvent {
     | "COMMAND_CANCELLED"
     | "COMMAND_TIMED_OUT"
     | "COMMAND_TRUST_GRANTED"
-    | "COMMAND_TRUST_INVALIDATED";
+    | "COMMAND_TRUST_INVALIDATED"
+    // ── Browser runtime trace events ──────────────────────────────────
+    | "BROWSER_SESSION_CREATED"
+    | "BROWSER_SESSION_CLOSED"
+    | "BROWSER_TAB_CREATED"
+    | "BROWSER_NAVIGATION_STARTED"
+    | "BROWSER_NAVIGATION_COMPLETED"
+    | "BROWSER_AGENT_CONTROL_STARTED"
+    | "BROWSER_AGENT_ACTION"
+    | "BROWSER_AGENT_ACTION_BLOCKED"
+    | "BROWSER_APPROVAL_REQUESTED"
+    | "BROWSER_DOWNLOAD_REQUESTED"
+    | "BROWSER_CRASHED";
   /** Structured metadata — no secrets, no raw content, no absolute paths */
   meta: Record<string, unknown>;
   /** Optional tool call ID for tool events */
@@ -1249,6 +1278,256 @@ export const COMMAND_IPC = {
 export const SETTINGS_IPC = {
   GET: "settings:get",
   SET: "settings:set",
+} as const;
+
+// ── Browser Runtime V1 — Canonical Types ─────────────────────────────────
+
+export type BrowserPersistenceMode = "persistent" | "private";
+
+export type BrowserAgentAccessPolicy = "off" | "ask" | "allowed";
+
+/** A browser identity/storage profile. Persistent profiles keep cookies etc. across sessions. */
+export interface BrowserProfile {
+  id: string;
+  name: string;
+  persistenceMode: BrowserPersistenceMode;
+  agentAccessPolicy: BrowserAgentAccessPolicy;
+  /** Electron session partition string — derived, never mutated after creation */
+  partition: string;
+  isDefault?: boolean;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt?: number;
+}
+
+export type BrowserSessionLifecycle = "active" | "suspended" | "closing" | "closed";
+
+/** Tab URL/title pairs persisted for session restore */
+export interface BrowserRestoreState {
+  tabs: Array<{ id: string; url: string; title: string }>;
+  activeTabId: string | null;
+  savedAt: number;
+}
+
+/** A browser workspace instance — owns an ordered set of tabs */
+export interface BrowserSession {
+  id: string;
+  profileId: string;
+  name?: string;
+  lifecycle: BrowserSessionLifecycle;
+  activeTabId: string | null;
+  /** Ordered tab IDs */
+  tabIds: string[];
+  /** For persistent profiles only — restored on open */
+  restoreState?: BrowserRestoreState;
+  createdAt: number;
+  updatedAt: number;
+  lastOpenedAt?: number;
+}
+
+export type BrowserTabLoadState = "idle" | "loading" | "loaded" | "crashed";
+
+/** A single browser tab */
+export interface BrowserTab {
+  id: string;
+  sessionId: string;
+  profileId: string;
+  url: string;
+  title: string;
+  faviconDataUrl?: string;
+  loadState: BrowserTabLoadState;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  /** Incremented on every navigation — used to detect stale element refs */
+  navigationGeneration: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Agent browser control token — must be validated before every browser action */
+export interface BrowserAgentControl {
+  sessionId: string;
+  tabId: string;
+  conversationId: string;
+  requestId: string;
+  agentRunId: string;
+  startedAt: number;
+}
+
+/** Full runtime state broadcast to renderer */
+export interface BrowserRuntimeState {
+  profiles: BrowserProfile[];
+  sessions: BrowserSession[];
+  tabs: BrowserTab[];
+  activeSessionId: string | null;
+  agentControl: BrowserAgentControl | null;
+  revision: number;
+}
+
+/** An interactive element extracted from a page for agent targeting */
+export interface PageSemanticElement {
+  /** Stable ref key tied to this navigation generation: "b17", "i4", "l22" */
+  ref: string;
+  role: string;
+  name: string;
+  value?: string;
+  href?: string;
+  checked?: boolean;
+  disabled?: boolean;
+  placeholder?: string;
+}
+
+/** Bounded semantic snapshot of a browser page — safe to send to model */
+export interface PageSemanticSnapshot {
+  url: string;
+  title: string;
+  navigationGeneration: number;
+  tabId: string;
+  sessionId: string;
+  capturedAt: number;
+  /** Bounded visible text (max BROWSER_LIMITS.MAX_PAGE_TEXT_BYTES) */
+  text: string;
+  /** Interactive elements (max BROWSER_LIMITS.MAX_ELEMENTS_PER_SNAPSHOT) */
+  elements: PageSemanticElement[];
+  truncated: boolean;
+}
+
+/** Risk classification for agent browser actions — deterministic, no LLM */
+export type BrowserActionRisk =
+  | "READ"
+  | "NAVIGATION"
+  | "INTERACTION"
+  | "FORM_SUBMISSION"
+  | "DOWNLOAD"
+  | "UPLOAD"
+  | "AUTHENTICATION"
+  | "ACCOUNT_CHANGE"
+  | "DESTRUCTIVE"
+  | "EXTERNAL_PROTOCOL"
+  | "UNKNOWN";
+
+export type BrowserActionDecision = "allow" | "ask" | "block";
+
+/** Pending browser action awaiting user approval */
+export interface BrowserPendingApproval {
+  id: string;
+  sessionId: string;
+  tabId: string;
+  url: string;
+  action: string;
+  risk: BrowserActionRisk;
+  agentPurpose?: string;
+  requestedAt: number;
+}
+
+/** Evidence of browser interaction attached to a request context ledger */
+export interface BrowserEvidenceRef {
+  id: string;
+  requestId: string;
+  browserSessionId: string;
+  tabId: string;
+  url: string;
+  title: string;
+  timestamp: number;
+  navigationGeneration: number;
+  snapshotHash?: string;
+  /** Path to bounded text extract (session-scoped, request-scoped) */
+  extractedTextPath?: string;
+  /** Path to screenshot file */
+  screenshotPath?: string;
+  type: "page_read" | "screenshot" | "console" | "network";
+}
+
+/** Download item visible to renderer */
+export interface BrowserDownloadItem {
+  id: string;
+  sessionId: string;
+  url: string;
+  filename: string;
+  savePath?: string;
+  state: "progressing" | "completed" | "cancelled" | "interrupted";
+  receivedBytes: number;
+  totalBytes: number;
+  /** true = agent-initiated (requires policy/approval) */
+  agentInitiated: boolean;
+  startedAt: number;
+}
+
+/** Per-agent-run browser budget tracking */
+export interface BrowserAgentBudget {
+  actionsUsed: number;
+  navigationsUsed: number;
+  screenshotsUsed: number;
+  readBytesUsed: number;
+}
+
+/** Browser operation limits */
+export const BROWSER_LIMITS = {
+  /** Max agent browser actions per AgentRun */
+  MAX_ACTIONS_PER_REQUEST: 50,
+  /** Max navigations per AgentRun */
+  MAX_NAVIGATIONS_PER_REQUEST: 20,
+  /** Max screenshots per AgentRun */
+  MAX_SCREENSHOTS_PER_REQUEST: 5,
+  /** Max page-read bytes per AgentRun */
+  MAX_READ_BYTES_PER_REQUEST: 256 * 1024,
+  /** Max visible page text bytes in one snapshot */
+  MAX_PAGE_TEXT_BYTES: 16 * 1024,
+  /** Max interactive elements per snapshot */
+  MAX_ELEMENTS_PER_SNAPSHOT: 200,
+  /** Max console entries returned per call */
+  MAX_CONSOLE_ENTRIES: 50,
+  /** Max network entries returned per call */
+  MAX_NETWORK_ENTRIES: 50,
+  /** Max concurrent browser sessions */
+  MAX_SESSIONS: 10,
+  /** Max tabs per session */
+  MAX_TABS_PER_SESSION: 20,
+  /** Max concurrent agent-controlled tabs across all runs */
+  MAX_CONCURRENT_AGENT_TABS: 2,
+  /** Max screenshot width */
+  MAX_SCREENSHOT_WIDTH: 1280,
+  /** Max screenshot height */
+  MAX_SCREENSHOT_HEIGHT: 800,
+} as const;
+
+/** IPC channels for Browser Runtime V1 */
+export const BROWSER_IPC = {
+  // Renderer → Main (invoke)
+  LIST_PROFILES:         "browser:listProfiles",
+  CREATE_PROFILE:        "browser:createProfile",
+  UPDATE_PROFILE:        "browser:updateProfile",
+  DELETE_PROFILE:        "browser:deleteProfile",
+  LIST_SESSIONS:         "browser:listSessions",
+  CREATE_SESSION:        "browser:createSession",
+  CLOSE_SESSION:         "browser:closeSession",
+  LIST_TABS:             "browser:listTabs",
+  NEW_TAB:               "browser:newTab",
+  CLOSE_TAB:             "browser:closeTab",
+  NAVIGATE:              "browser:navigate",
+  NAVIGATE_BACK:         "browser:navigateBack",
+  NAVIGATE_FORWARD:      "browser:navigateForward",
+  RELOAD:                "browser:reload",
+  STOP:                  "browser:stop",
+  ACTIVATE_SESSION:      "browser:activateSession",
+  ACTIVATE_TAB:          "browser:activateTab",
+  RESIZE_VIEW:           "browser:resizeView",
+  HIDE_VIEW:             "browser:hideView",
+  SHOW_VIEW:             "browser:showView",
+  GRANT_AGENT_ACCESS:    "browser:grantAgentAccess",
+  REVOKE_AGENT_ACCESS:   "browser:revokeAgentAccess",
+  APPROVE_ACTION:        "browser:approveAction",
+  REJECT_ACTION:         "browser:rejectAction",
+  USER_TAKE_CONTROL:     "browser:userTakeControl",
+  RETURN_TO_AGENT:       "browser:returnToAgent",
+  GET_RUNTIME_STATE:     "browser:getRuntimeState",
+  // Main → Renderer (send)
+  TAB_UPDATED:           "browser:tabUpdated",
+  SESSION_UPDATED:       "browser:sessionUpdated",
+  RUNTIME_STATE_PUSH:    "browser:runtimeStatePush",
+  APPROVAL_REQUESTED:    "browser:approvalRequested",
+  AGENT_CONTROL_CHANGED: "browser:agentControlChanged",
+  DOWNLOAD_STARTED:      "browser:downloadStarted",
 } as const;
 
 /** V0.9 IPC channels for reliability */

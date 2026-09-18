@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } fr
 import { randomUUID, createHash } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -24,6 +24,7 @@ import { testConnection } from "../agent-client/client.js";
 import { queueManager, cancelStream, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots } from "../queue/QueueManager.js";
 import { tryGetIncidentRecorder, assertInvariant } from "../reliability/index.js";
 import * as commandManager from "../commands/command-manager.js";
+import * as browserManager from "../browser/browser-manager.js";
 import { buildGitHubIssuePayload } from "../reliability/sanitizer.js";
 void sweepOrphanedSnapshots; // imported for startup use — called from main.ts
 
@@ -1408,5 +1409,187 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
         ...(opts.conversationId !== undefined && { conversationId: opts.conversationId }),
       });
     }
+  );
+
+  // ── Browser Runtime V1 IPC Handlers ───────────────────────────────────────
+
+  // Profile management
+  ipcMain.handle(
+    BROWSER_IPC.LIST_PROFILES,
+    (_e: IpcMainInvokeEvent) => browserManager.listBrowserProfilesPublic()
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.CREATE_PROFILE,
+    (
+      _e: IpcMainInvokeEvent,
+      opts: { name: string; persistenceMode: "persistent" | "private"; agentAccessPolicy?: "off" | "ask" | "allowed" }
+    ) => browserManager.createBrowserProfile(opts)
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.UPDATE_PROFILE,
+    (
+      _e: IpcMainInvokeEvent,
+      id: string,
+      patch: { name?: string; agentAccessPolicy?: "off" | "ask" | "allowed"; isDefault?: boolean }
+    ) => browserManager.updateBrowserProfilePublic(id, patch)
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.DELETE_PROFILE,
+    async (_e: IpcMainInvokeEvent, id: string) => {
+      await browserManager.deleteBrowserProfilePublic(id);
+    }
+  );
+
+  // Session management
+  ipcMain.handle(
+    BROWSER_IPC.LIST_SESSIONS,
+    (_e: IpcMainInvokeEvent, profileId?: string) =>
+      db.listBrowserSessions(database, profileId)
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.CREATE_SESSION,
+    async (_e: IpcMainInvokeEvent, profileId: string, opts?: { name?: string }) =>
+      browserManager.createBrowserSession(profileId, opts)
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.CLOSE_SESSION,
+    async (_e: IpcMainInvokeEvent, sessionId: string) => {
+      await browserManager.closeBrowserSession(sessionId);
+    }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.ACTIVATE_SESSION,
+    (_e: IpcMainInvokeEvent, sessionId: string) => {
+      browserManager.activateSession(sessionId);
+    }
+  );
+
+  // Tab management
+  ipcMain.handle(
+    BROWSER_IPC.LIST_TABS,
+    (_e: IpcMainInvokeEvent, sessionId: string) =>
+      db.listBrowserTabs(database, sessionId)
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.NEW_TAB,
+    async (_e: IpcMainInvokeEvent, sessionId: string, url?: string) =>
+      browserManager.newBrowserTab(sessionId, url)
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.CLOSE_TAB,
+    (_e: IpcMainInvokeEvent, tabId: string) => {
+      browserManager.closeBrowserTab(tabId);
+    }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.ACTIVATE_TAB,
+    (_e: IpcMainInvokeEvent, tabId: string) => {
+      browserManager.activateTab(tabId);
+    }
+  );
+
+  // Navigation
+  ipcMain.handle(
+    BROWSER_IPC.NAVIGATE,
+    async (_e: IpcMainInvokeEvent, tabId: string, url: string) => {
+      await browserManager.navigateTab(tabId, url);
+    }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.NAVIGATE_BACK,
+    (_e: IpcMainInvokeEvent, tabId: string) => { browserManager.navigateBack(tabId); }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.NAVIGATE_FORWARD,
+    (_e: IpcMainInvokeEvent, tabId: string) => { browserManager.navigateForward(tabId); }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.RELOAD,
+    (_e: IpcMainInvokeEvent, tabId: string) => { browserManager.reloadTab(tabId); }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.STOP,
+    (_e: IpcMainInvokeEvent, tabId: string) => { browserManager.stopTab(tabId); }
+  );
+
+  // View positioning (renderer sends bounds after layout)
+  ipcMain.handle(
+    BROWSER_IPC.RESIZE_VIEW,
+    (_e: IpcMainInvokeEvent, rect: { x: number; y: number; width: number; height: number }) => {
+      browserManager.setBrowserViewBounds(rect);
+    }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.HIDE_VIEW,
+    (_e: IpcMainInvokeEvent) => { browserManager.hideBrowserView(); }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.SHOW_VIEW,
+    (_e: IpcMainInvokeEvent, tabId?: string) => { browserManager.showBrowserView(tabId); }
+  );
+
+  // Agent access control
+  ipcMain.handle(
+    BROWSER_IPC.GRANT_AGENT_ACCESS,
+    (_e: IpcMainInvokeEvent, control: import("../../shared/types.js").BrowserAgentControl) => {
+      browserManager.grantAgentControl(control);
+    }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.REVOKE_AGENT_ACCESS,
+    (_e: IpcMainInvokeEvent, sessionId: string) => {
+      browserManager.revokeAgentControl(sessionId);
+    }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.USER_TAKE_CONTROL,
+    (_e: IpcMainInvokeEvent, sessionId: string) => {
+      browserManager.userTakeControl(sessionId);
+    }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.RETURN_TO_AGENT,
+    (_e: IpcMainInvokeEvent) => {
+      // No-op from renderer side — agent controls are re-established by next agent run
+    }
+  );
+
+  // Approval resolution
+  ipcMain.handle(
+    BROWSER_IPC.APPROVE_ACTION,
+    (_e: IpcMainInvokeEvent, approvalId: string) => {
+      browserManager.resolveApproval(approvalId, true);
+    }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.REJECT_ACTION,
+    (_e: IpcMainInvokeEvent, approvalId: string) => {
+      browserManager.resolveApproval(approvalId, false);
+    }
+  );
+
+  // Runtime state snapshot (for initial render hydration)
+  ipcMain.handle(
+    BROWSER_IPC.GET_RUNTIME_STATE,
+    (_e: IpcMainInvokeEvent) => browserManager.getBrowserRuntimeState()
   );
 }

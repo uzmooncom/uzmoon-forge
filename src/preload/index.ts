@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -35,6 +35,12 @@ import type {
   CommandExecution,
   CommandTrustRule,
   CommandOutputPage,
+  BrowserProfile,
+  BrowserSession,
+  BrowserTab,
+  BrowserRuntimeState,
+  BrowserAgentControl,
+  BrowserPendingApproval,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -500,6 +506,129 @@ const forgeApi = {
       const listener = (_event: Electron.IpcRendererEvent, payload: { commandId: string; record: CommandExecution }) => cb(payload);
       ipcRenderer.on(COMMAND_IPC.COMPLETE, listener);
       return () => ipcRenderer.removeListener(COMMAND_IPC.COMPLETE, listener);
+    },
+  },
+
+  // ── Browser Runtime V1 ──────────────────────────────────────────────────
+  browser: {
+    // Profile management
+    listProfiles: (): Promise<BrowserProfile[]> =>
+      ipcRenderer.invoke(BROWSER_IPC.LIST_PROFILES),
+
+    createProfile: (opts: { name: string; persistenceMode: "persistent" | "private"; agentAccessPolicy?: "off" | "ask" | "allowed" }): Promise<BrowserProfile> =>
+      ipcRenderer.invoke(BROWSER_IPC.CREATE_PROFILE, opts),
+
+    updateProfile: (id: string, patch: { name?: string; agentAccessPolicy?: "off" | "ask" | "allowed"; isDefault?: boolean }): Promise<BrowserProfile | null> =>
+      ipcRenderer.invoke(BROWSER_IPC.UPDATE_PROFILE, id, patch),
+
+    deleteProfile: (id: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.DELETE_PROFILE, id),
+
+    // Session management
+    listSessions: (profileId?: string): Promise<BrowserSession[]> =>
+      ipcRenderer.invoke(BROWSER_IPC.LIST_SESSIONS, profileId),
+
+    createSession: (profileId: string, opts?: { name?: string }): Promise<BrowserSession> =>
+      ipcRenderer.invoke(BROWSER_IPC.CREATE_SESSION, profileId, opts),
+
+    closeSession: (sessionId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.CLOSE_SESSION, sessionId),
+
+    activateSession: (sessionId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.ACTIVATE_SESSION, sessionId),
+
+    // Tab management
+    listTabs: (sessionId: string): Promise<BrowserTab[]> =>
+      ipcRenderer.invoke(BROWSER_IPC.LIST_TABS, sessionId),
+
+    newTab: (sessionId: string, url?: string): Promise<BrowserTab> =>
+      ipcRenderer.invoke(BROWSER_IPC.NEW_TAB, sessionId, url),
+
+    closeTab: (tabId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.CLOSE_TAB, tabId),
+
+    activateTab: (tabId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.ACTIVATE_TAB, tabId),
+
+    // Navigation
+    navigate: (tabId: string, url: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.NAVIGATE, tabId, url),
+
+    back: (tabId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.NAVIGATE_BACK, tabId),
+
+    forward: (tabId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.NAVIGATE_FORWARD, tabId),
+
+    reload: (tabId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.RELOAD, tabId),
+
+    stop: (tabId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.STOP, tabId),
+
+    // View positioning
+    resizeView: (rect: { x: number; y: number; width: number; height: number }): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.RESIZE_VIEW, rect),
+
+    hideView: (): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.HIDE_VIEW),
+
+    showView: (tabId?: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.SHOW_VIEW, tabId),
+
+    // Agent access control
+    grantAgentAccess: (control: BrowserAgentControl): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.GRANT_AGENT_ACCESS, control),
+
+    revokeAgentAccess: (sessionId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.REVOKE_AGENT_ACCESS, sessionId),
+
+    userTakeControl: (sessionId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.USER_TAKE_CONTROL, sessionId),
+
+    returnToAgent: (): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.RETURN_TO_AGENT),
+
+    // Approval resolution
+    approveAction: (approvalId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.APPROVE_ACTION, approvalId),
+
+    rejectAction: (approvalId: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.REJECT_ACTION, approvalId),
+
+    // Runtime state
+    getRuntimeState: (): Promise<BrowserRuntimeState> =>
+      ipcRenderer.invoke(BROWSER_IPC.GET_RUNTIME_STATE),
+
+    // Push subscriptions
+    onTabUpdated: (cb: (tab: BrowserTab) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, tab: BrowserTab) => cb(tab);
+      ipcRenderer.on(BROWSER_IPC.TAB_UPDATED, listener);
+      return () => ipcRenderer.removeListener(BROWSER_IPC.TAB_UPDATED, listener);
+    },
+
+    onSessionUpdated: (cb: (session: BrowserSession) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, session: BrowserSession) => cb(session);
+      ipcRenderer.on(BROWSER_IPC.SESSION_UPDATED, listener);
+      return () => ipcRenderer.removeListener(BROWSER_IPC.SESSION_UPDATED, listener);
+    },
+
+    onRuntimeStatePush: (cb: (state: BrowserRuntimeState) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, state: BrowserRuntimeState) => cb(state);
+      ipcRenderer.on(BROWSER_IPC.RUNTIME_STATE_PUSH, listener);
+      return () => ipcRenderer.removeListener(BROWSER_IPC.RUNTIME_STATE_PUSH, listener);
+    },
+
+    onApprovalRequested: (cb: (approval: BrowserPendingApproval) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, approval: BrowserPendingApproval) => cb(approval);
+      ipcRenderer.on(BROWSER_IPC.APPROVAL_REQUESTED, listener);
+      return () => ipcRenderer.removeListener(BROWSER_IPC.APPROVAL_REQUESTED, listener);
+    },
+
+    onAgentControlChanged: (cb: (control: BrowserAgentControl | null) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, control: BrowserAgentControl | null) => cb(control);
+      ipcRenderer.on(BROWSER_IPC.AGENT_CONTROL_CHANGED, listener);
+      return () => ipcRenderer.removeListener(BROWSER_IPC.AGENT_CONTROL_CHANGED, listener);
     },
   },
 

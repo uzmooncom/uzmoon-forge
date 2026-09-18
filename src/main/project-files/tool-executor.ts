@@ -20,6 +20,17 @@ import {
   type RunCommandArgs,
   type ListProjectCommandsArgs,
   type ReadCommandOutputArgs,
+  type BrowserListSessionsArgs,
+  type BrowserNewTabArgs,
+  type BrowserTabRefArgs,
+  type BrowserOpenUrlArgs,
+  type BrowserFindTextArgs,
+  type BrowserClickArgs,
+  type BrowserTypeArgs,
+  type BrowserFillArgs,
+  type BrowserSelectArgs,
+  type BrowserPressKeyArgs,
+  type BrowserScrollArgs,
 } from "../agent-client/tool-types.js";
 import { COMMAND_LIMITS } from "../commands/command-limits.js";
 import type { CommandEvidenceRef } from "../../shared/types.js";
@@ -110,6 +121,67 @@ export async function executeProjectTool(
       break;
     case "read_command_output":
       result = await handleReadCommandOutput(call, validation.args as ReadCommandOutputArgs, ctx);
+      break;
+    // ── Browser Runtime V1 ──────────────────────────────────────────────────
+    case "browser_list_sessions":
+      result = await handleBrowserListSessions(call, validation.args as BrowserListSessionsArgs, ctx);
+      break;
+    case "browser_new_tab":
+      result = await handleBrowserNewTab(call, validation.args as BrowserNewTabArgs, ctx);
+      break;
+    case "browser_close_tab":
+      result = await handleBrowserTabAction(call, "close_tab", validation.args as BrowserTabRefArgs, ctx);
+      break;
+    case "browser_switch_tab":
+      result = await handleBrowserTabAction(call, "switch_tab", validation.args as BrowserTabRefArgs, ctx);
+      break;
+    case "browser_open_url":
+      result = await handleBrowserOpenUrl(call, validation.args as BrowserOpenUrlArgs, ctx);
+      break;
+    case "browser_back":
+      result = await handleBrowserTabAction(call, "back", validation.args as BrowserTabRefArgs, ctx);
+      break;
+    case "browser_forward":
+      result = await handleBrowserTabAction(call, "forward", validation.args as BrowserTabRefArgs, ctx);
+      break;
+    case "browser_reload":
+      result = await handleBrowserTabAction(call, "reload", validation.args as BrowserTabRefArgs, ctx);
+      break;
+    case "browser_stop":
+      result = await handleBrowserTabAction(call, "stop", validation.args as BrowserTabRefArgs, ctx);
+      break;
+    case "browser_read_page":
+      result = await handleBrowserReadPage(call, validation.args as BrowserTabRefArgs, ctx);
+      break;
+    case "browser_find_text":
+      result = await handleBrowserFindText(call, validation.args as BrowserFindTextArgs, ctx);
+      break;
+    case "browser_click":
+      result = await handleBrowserClick(call, validation.args as BrowserClickArgs, ctx);
+      break;
+    case "browser_type":
+      result = await handleBrowserType(call, validation.args as BrowserTypeArgs, ctx);
+      break;
+    case "browser_fill":
+      result = await handleBrowserFill(call, validation.args as BrowserFillArgs, ctx);
+      break;
+    case "browser_select":
+      result = await handleBrowserSelect(call, validation.args as BrowserSelectArgs, ctx);
+      break;
+    case "browser_press_key":
+      result = await handleBrowserPressKey(call, validation.args as BrowserPressKeyArgs, ctx);
+      break;
+    case "browser_scroll":
+      result = await handleBrowserScroll(call, validation.args as BrowserScrollArgs, ctx);
+      break;
+    case "browser_screenshot":
+      result = await handleBrowserTabAction(call, "screenshot", validation.args as BrowserTabRefArgs, ctx);
+      break;
+    case "browser_get_console":
+      result = await handleBrowserTabAction(call, "get_console", validation.args as BrowserTabRefArgs, ctx);
+      break;
+    case "browser_get_network_summary":
+      result = await handleBrowserTabAction(call, "get_network", validation.args as BrowserTabRefArgs, ctx);
       break;
   }
 
@@ -844,4 +916,279 @@ function formatBytes(bytes: number): string {
 /** Generate a stable unique ID for tool activity entries */
 export function newActivityId(): string {
   return randomUUID();
+}
+// ── Browser Runtime V1 handlers ─────────────────────────────────────────────
+
+async function handleBrowserListSessions(
+  call: ForgeToolCall,
+  args: BrowserListSessionsArgs,
+  _ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const state = bm.getBrowserRuntimeState();
+  let sessions = state.sessions;
+  if (args.profile_id) {
+    sessions = sessions.filter((s) => s.profileId === args.profile_id);
+  }
+  const summary = sessions.map((s) => ({
+    sessionId: s.id,
+    profileId: s.profileId,
+    tabCount: s.tabIds.length,
+    activeTabUrl: state.tabs.find((t) => t.id === s.activeTabId)?.url ?? null,
+  }));
+  return {
+    result: {
+      callId: call.callId,
+      toolName: call.name,
+      ok: true,
+      data: { sessions: summary, total: summary.length },
+    },
+  };
+}
+
+async function handleBrowserNewTab(
+  call: ForgeToolCall,
+  args: BrowserNewTabArgs,
+  _ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const { BROWSER_LIMITS } = await import('../../shared/types.js');
+  const state = bm.getBrowserRuntimeState();
+  const targetSession = state.sessions.find((s) => s.id === args.session_id);
+  if (!targetSession) {
+    return {
+      result: {
+        callId: call.callId, toolName: call.name, ok: false,
+        errorCode: 'NOT_FOUND', errorMessage: `Session not found: ${args.session_id}`,
+      },
+    };
+  }
+  if (targetSession.tabIds.length >= BROWSER_LIMITS.MAX_TABS_PER_SESSION) {
+    return {
+      result: {
+        callId: call.callId, toolName: call.name, ok: false,
+        errorCode: 'BUDGET_EXCEEDED', errorMessage: 'Tab limit reached for this session.',
+      },
+    };
+  }
+  const tab = await bm.newBrowserTab(args.session_id, args.url);
+  return {
+    result: {
+      callId: call.callId, toolName: call.name, ok: true,
+      data: { tabId: tab.id, url: tab.url, sessionId: tab.sessionId },
+    },
+  };
+}
+
+async function handleBrowserTabAction(
+  call: ForgeToolCall,
+  action: 'close_tab' | 'switch_tab' | 'back' | 'forward' | 'reload' | 'stop' | 'screenshot' | 'get_console' | 'get_network',
+  args: BrowserTabRefArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  try {
+    switch (action) {
+      case 'close_tab': {
+        bm.closeBrowserTab(args.tab_id);
+        return { result: { callId: call.callId, toolName: call.name, ok: true, data: { closed: args.tab_id } } };
+      }
+      case 'switch_tab': {
+        bm.activateTab(args.tab_id);
+        return { result: { callId: call.callId, toolName: call.name, ok: true, data: { activeTabId: args.tab_id } } };
+      }
+      case 'back': {
+        bm.navigateBack(args.tab_id);
+        return { result: { callId: call.callId, toolName: call.name, ok: true, data: { action: 'back', tabId: args.tab_id } } };
+      }
+      case 'forward': {
+        bm.navigateForward(args.tab_id);
+        return { result: { callId: call.callId, toolName: call.name, ok: true, data: { action: 'forward', tabId: args.tab_id } } };
+      }
+      case 'reload': {
+        bm.reloadTab(args.tab_id);
+        return { result: { callId: call.callId, toolName: call.name, ok: true, data: { action: 'reload', tabId: args.tab_id } } };
+      }
+      case 'stop': {
+        bm.stopTab(args.tab_id);
+        return { result: { callId: call.callId, toolName: call.name, ok: true, data: { action: 'stop', tabId: args.tab_id } } };
+      }
+      case 'screenshot': {
+        const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+        if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+        const screenshotResult = await bm.agentScreenshot(ctrl, args.tab_id);
+        return { result: { callId: call.callId, toolName: call.name, ok: true, data: screenshotResult } };
+      }
+      case 'get_console': {
+        const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+        if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+        const consoleEntries = bm.agentGetConsole(ctrl, args.tab_id);
+        return { result: { callId: call.callId, toolName: call.name, ok: true, data: { entries: consoleEntries, tabId: args.tab_id } } };
+      }
+      case 'get_network': {
+        const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+        if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+        const networkSummary = bm.agentGetNetworkSummary(ctrl, args.tab_id);
+        return { result: { callId: call.callId, toolName: call.name, ok: true, data: { requests: networkSummary, tabId: args.tab_id } } };
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserOpenUrl(
+  call: ForgeToolCall,
+  args: BrowserOpenUrlArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    const normalizedUrl = bm.normalizeNavigationInput(args.url);
+    await bm.agentOpenUrl(ctrl, args.tab_id, normalizedUrl);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, url: normalizedUrl } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserReadPage(
+  call: ForgeToolCall,
+  args: BrowserTabRefArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    const snapshot = await bm.agentReadPage(ctrl, args.tab_id);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: snapshot } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserFindText(
+  call: ForgeToolCall,
+  args: BrowserFindTextArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    const result = await bm.agentFindText(ctrl, args.tab_id, args.query);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { query: args.query, matchCount: result.count } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserClick(
+  call: ForgeToolCall,
+  args: BrowserClickArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    await bm.agentClick(ctrl, args.tab_id, args.ref);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserType(
+  call: ForgeToolCall,
+  args: BrowserTypeArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    await bm.agentType(ctrl, args.tab_id, args.text);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, charsTyped: args.text.length } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserFill(
+  call: ForgeToolCall,
+  args: BrowserFillArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    await bm.agentFill(ctrl, args.tab_id, args.ref, args.value);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserSelect(
+  call: ForgeToolCall,
+  args: BrowserSelectArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    // For select elements, fill with the option value
+    await bm.agentFill(ctrl, args.tab_id, args.ref, args.value);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref, value: args.value } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserPressKey(
+  call: ForgeToolCall,
+  args: BrowserPressKeyArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    await bm.agentPressKey(ctrl, args.tab_id, args.key);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, key: args.key } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserScroll(
+  call: ForgeToolCall,
+  args: BrowserScrollArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    await bm.agentScroll(ctrl, args.tab_id, args.delta_x ?? 0, args.delta_y ?? 0);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, delta_x: args.delta_x ?? 0, delta_y: args.delta_y ?? 0 } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
 }
