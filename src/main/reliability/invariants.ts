@@ -487,6 +487,137 @@ export const INV_COMMAND_NO_PROVIDER_SECRET_ENV = define({
   maxHealingLevel: 1,
 });
 
+
+// ── Browser Runtime V1 invariants ────────────────────────────────────────────
+
+define({
+  id: 'BROWSER_SESSION_LIMIT',
+  description: 'The number of open browser sessions must not exceed the configured maximum.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'high',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_TAB_BELONGS_TO_SESSION',
+  description: 'Every browser tab must be owned by exactly one active session.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'high',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_AGENT_BUDGET_ENFORCED',
+  description: 'Agent browser actions per request must not exceed the per-request budget.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_NAVIGATION_BUDGET_ENFORCED',
+  description: 'Agent navigations per request must not exceed the navigation budget.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'high',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_SCREENSHOT_BUDGET_ENFORCED',
+  description: 'Agent screenshots per request must not exceed the screenshot budget.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'medium',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_ELEMENT_REF_VALID',
+  description: 'Browser element refs used by the agent must belong to the current navigation generation.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'medium',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_APPROVAL_REQUIRED',
+  description: 'High-risk browser actions must not execute without explicit user approval.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_EXTERNAL_PROTOCOL_BLOCKED',
+  description: 'Non-HTTP(S) protocol navigations must always be blocked by policy.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_POLICY_EVALUATED',
+  description: 'Every agent browser action must pass through the policy evaluator before execution.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_SESSION_ISOLATED',
+  description: 'Browser sessions must use distinct Chromium partitions and must not share web storage.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'high',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_PRIVATE_SESSION_CLEARED',
+  description: 'Private browser sessions must have their storage cleared on close and on restart.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'high',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_AGENT_CONTROL_EXCLUSIVE',
+  description: 'Agent browser control must be held by at most one active request per session.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_READ_BUDGET_ENFORCED',
+  description: 'Bytes read from browser pages per request must not exceed the read budget.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'medium',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_TRACE_EMITTED',
+  description: 'All significant browser agent actions must emit a trace event for auditability.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'low',
+  maxHealingLevel: 2,
+});
+
+define({
+  id: 'BROWSER_VIEW_BOUNDS_VALID',
+  description: 'The WebContentsView bounds must be non-negative and within the window frame.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'medium',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'BROWSER_NO_FORGE_PRELOAD',
+  description: 'WebContentsView instances must never load the Forge preload script into web content.',
+  category: 'BROWSER_RUNTIME',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
 // ── InvariantMonitor ──────────────────────────────────────────────────────────
 
 /** Called when a violation is detected — plug in to the incident pipeline */
