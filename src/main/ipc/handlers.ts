@@ -21,7 +21,7 @@ import * as projectFiles from "../project-files/service.js";
 import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
 import { testConnection } from "../agent-client/client.js";
-import { queueManager, cancelStream, returnControl, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots, getActiveRunEntries, getQueueSummary } from "../queue/QueueManager.js";
+import { queueManager, cancelStream, returnControl, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots, getActiveRunEntries, getQueueSummary, setCancelApprovalsCallback } from "../queue/QueueManager.js";
 import { tryGetIncidentRecorder, assertInvariant } from "../reliability/index.js";
 import { forgeLogger } from "../telemetry/logger.js";
 import { buildDevSnapshot, getRunTimeline, buildDiagnosticBundle, initDevState } from "../telemetry/dev-state.js";
@@ -196,6 +196,13 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   // Inject openBrowserWindow into browserManager so bootstrapAgentControl can open
   // the browser window before creating tabs — avoids tabs with no WebContentsView
   browserManager.setEnsureWindowOpenFn(() => browserWindowController.openBrowserWindow());
+
+  // Inject approval cancellation callback into QueueManager.
+  // When a run is stopped, QueueManager calls this to deny any pending browser approvals.
+  // This is a DI hook to avoid QueueManager → browser-manager circular import.
+  setCancelApprovalsCallback((requestId: string) => {
+    browserManager.cancelApprovalsForRequest(requestId);
+  });
 
   // ── Resolve default agent profile ──────────────────────────────────────
 
@@ -1657,9 +1664,10 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
 
   ipcMain.handle(
     BROWSER_IPC.RETURN_CONTROL,
-    (_e: IpcMainInvokeEvent, conversationId: string) => {
-      // Signal the in-flight onWaitingForHuman promise to resolve (user returned control)
-      returnControl(conversationId);
+    (_e: IpcMainInvokeEvent, conversationId: string, requestId?: string) => {
+      // Signal the in-flight onWaitingForHuman promise to resolve.
+      // requestId makes this run-scoped so a stale Return Control cannot resume a newer run.
+      returnControl(conversationId, requestId);
     }
   );
 

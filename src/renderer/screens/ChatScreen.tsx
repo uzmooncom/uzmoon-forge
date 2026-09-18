@@ -285,7 +285,8 @@ export default function ChatScreen({
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   // ── waiting_for_human — per-conversation map (V17 fix: was single string, caused cross-conv contamination)
-  const [waitingForHumanMap, setWaitingForHumanMap] = useState<Record<string, boolean>>({});
+  // conversationId → requestId of the currently-waiting run (run-scoped)
+  const [waitingForHumanMap, setWaitingForHumanMap] = useState<Record<string, string | true>>({}); 
 
   // ── Draft conversation id ──────────────────────────────────────────────
   const draftConvId = useRef<string>(randomId());
@@ -559,8 +560,9 @@ export default function ChatScreen({
       }
     });
 
-    const unsubWaiting = window.forgeApi.browser.onWaitingForHuman(({ conversationId }) => {
-      setWaitingForHumanMap((prev) => ({ ...prev, [conversationId]: true }));
+    const unsubWaiting = window.forgeApi.browser.onWaitingForHuman(({ conversationId, requestId }) => {
+      // Store the requestId so Return Control can be run-scoped
+      setWaitingForHumanMap((prev) => ({ ...prev, [conversationId]: requestId ?? true }));
     });
 
     return () => {
@@ -1333,7 +1335,9 @@ export default function ChatScreen({
                 <button
                   onClick={async () => {
                     if (activeConvId) {
-                      await window.forgeApi.browser.returnBrowserControl(activeConvId);
+                      const rid = waitingForHumanMap[activeConvId];
+                      const requestId = typeof rid === 'string' ? rid : undefined;
+                      await window.forgeApi.browser.returnBrowserControl(activeConvId, requestId);
                       setWaitingForHumanMap((prev) => {
                         const next = { ...prev };
                         delete next[activeConvId];

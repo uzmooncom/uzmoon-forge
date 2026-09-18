@@ -454,11 +454,11 @@ const activeControllers = new Map<string, { controller: AbortController; convId:
 const convToStream = new Map<string, string>();
 
 /**
- * conversationId → resolver that resumes a run suspended in waiting_for_human.
- * Calling the resolver with no argument resumes (user returned control).
- * Calling with an error rejects (run cancelled while waiting).
+ * requestId → resolver that resumes a run suspended in waiting_for_human.
+ * Keyed by requestId (not conversationId) so a stale Return Control from an
+ * old run cannot resume a newer run in the same conversation.
  */
-const returnControlResolvers = new Map<string, { resolve: () => void; reject: (err: Error) => void }>();
+const returnControlResolvers = new Map<string, { resolve: () => void; reject: (err: Error) => void; conversationId: string }>();
 
 export function getActiveStreamId(convId: string): string | undefined {
   return convToStream.get(convId);
@@ -466,18 +466,70 @@ export function getActiveStreamId(convId: string): string | undefined {
 
 export function cancelStream(streamId: string): void {
   const entry = activeControllers.get(streamId);
-  if (entry) entry.controller.abort();
+  if (entry) {
+    entry.controller.abort();
+    // Also cancel any pending browser approvals for this stream's run.
+    // This ensures Stop during approval doesn't leave a dangling dialog.
+    cancelPendingApprovalsForStream(streamId);
+  }
+}
+
+/**
+ * Cancel all pending browser approvals associated with a stream's run.
+ * Called when cancelStream fires so the approval modal is dismissed.
+ */
+function cancelPendingApprovalsForStream(streamId: string): void {
+  // Find the requestId for this stream via the active run registry
+  for (const [, entry] of activeRunRegistry) {
+    if (entry.streamId === streamId) {
+      cancelPendingApprovalsForRequest(entry.requestId);
+      return;
+    }
+  }
+}
+
+/**
+ * Cancel all pending browser approvals for a given requestId.
+ * Imported lazily to avoid circular dependency with browser-manager.
+ */
+function cancelPendingApprovalsForRequest(requestId: string): void {
+  // Dynamic import to browser-manager is circular in tests; use registry approach.
+  // We resolve the approval IDs from the registry and mark them as denied.
+  // The browser-manager holds the actual resolvers; we use a module-level callback.
+  _cancelApprovalsCallback?.(requestId);
+}
+
+/** Injected by browser-manager to cancel approvals without circular imports. */
+let _cancelApprovalsCallback: ((requestId: string) => void) | undefined;
+
+export function setCancelApprovalsCallback(fn: (requestId: string) => void): void {
+  _cancelApprovalsCallback = fn;
 }
 
 /**
  * Called when the user clicks "Return Control" after the agent surfaced a blocker.
- * Resolves the waiting_for_human suspension so the run continues.
+ * @param conversationId - the conversation
+ * @param requestId - the exact run identity (optional; falls back to conv lookup for backward compat)
  */
-export function returnControl(conversationId: string): void {
-  const resolver = returnControlResolvers.get(conversationId);
-  if (resolver) {
-    returnControlResolvers.delete(conversationId);
-    resolver.resolve();
+export function returnControl(conversationId: string, requestId?: string): void {
+  // Prefer exact requestId lookup (run-scoped) to prevent stale resumptions
+  if (requestId) {
+    const resolver = returnControlResolvers.get(requestId);
+    if (resolver && resolver.conversationId === conversationId) {
+      returnControlResolvers.delete(requestId);
+      resolver.resolve();
+      return;
+    }
+    // requestId supplied but no match — stale Return Control; ignore it
+    return;
+  }
+  // Fallback: find the current active resolver for this conversation
+  for (const [rId, resolver] of returnControlResolvers) {
+    if (resolver.conversationId === conversationId) {
+      returnControlResolvers.delete(rId);
+      resolver.resolve();
+      return;
+    }
   }
 }
 
@@ -1181,9 +1233,14 @@ Rules:
         isProjectMode: isProjectConversation,
         signal: controller.signal,
         onWaitingForHuman: (reason) => {
+          // Race guard: if the abort already fired before we set up the resolver, reject immediately
+          if (controller.signal.aborted) {
+            return Promise.reject(new Error('CANCELLED'));
+          }
           return new Promise<void>((resolve, reject) => {
-            // Store resolver so returnControl() can resume the run
-            returnControlResolvers.set(conversationId, { resolve, reject });
+            // Store resolver keyed by requestId (run-scoped), not conversationId,
+            // so a stale Return Control from an old run cannot resume this one.
+            returnControlResolvers.set(requestId, { resolve, reject, conversationId });
             // Update live registry so renderer snapshot reflects waiting state
             const liveEntry = activeRunRegistry.get(conversationId);
             if (liveEntry) {
@@ -1193,9 +1250,11 @@ Rules:
               liveEntry.revision++;
             }
             // Emit event so the renderer can show a "Return Control" button
+            // Include requestId so the renderer can pass it back for run-scoped resume
             this.send(BROWSER_IPC.WAITING_FOR_HUMAN, {
               streamId,
               conversationId,
+              requestId,
               reason,
             });
             // Set item to paused so the panel reflects suspended state
@@ -1204,7 +1263,7 @@ Rules:
             this.pushQueueState(conversationId);
             // Wire signal abort to reject the promise (run cancelled while waiting)
             controller.signal.addEventListener('abort', () => {
-              returnControlResolvers.delete(conversationId);
+              returnControlResolvers.delete(requestId);
               reject(new Error('CANCELLED'));
             }, { once: true });
           });

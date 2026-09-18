@@ -679,8 +679,8 @@ const forgeApi = {
       return () => ipcRenderer.removeListener(BROWSER_IPC.WAITING_FOR_HUMAN, listener);
     },
 
-    returnBrowserControl: (conversationId: string): Promise<void> =>
-      ipcRenderer.invoke(BROWSER_IPC.RETURN_CONTROL, conversationId),
+    returnBrowserControl: (conversationId: string, requestId?: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.RETURN_CONTROL, conversationId, requestId),
   },
 
   // ── Reliability (V0.9) ────────────────────────────────────────────────────

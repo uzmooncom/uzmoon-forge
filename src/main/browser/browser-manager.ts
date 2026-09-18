@@ -1276,6 +1276,27 @@ export function resolveApproval(approvalId: string, approved: boolean): void {
   entry.resolve(approved);
 }
 
+/**
+ * Cancel all pending approvals associated with a requestId.
+ * Called when a run is stopped so approval modals are dismissed immediately.
+ */
+export function cancelApprovalsForRequest(requestId: string): void {
+  for (const [approvalId, entry] of _pendingApprovals) {
+    // BrowserPendingApproval may carry requestId via agentRunId field
+    // (set during bootstrapAgentControl). Check both fields.
+    const aid = (entry.approval as { requestId?: string; agentRunId?: string });
+    if (aid.requestId === requestId || aid.agentRunId === requestId) {
+      _pendingApprovals.delete(approvalId);
+      // Deny the approval — run is being stopped
+      entry.resolve(false);
+      pushToRenderer(BROWSER_IPC.APPROVAL_REQUESTED, {
+        ...entry.approval,
+        _cancelled: true,
+      });
+    }
+  }
+}
+
 // ── Agent Tool Operations ──────────────────────────────────────────────────
 
 export async function agentOpenUrl(

@@ -259,6 +259,9 @@ export async function executeProjectTool(
     case "browser_open":
       result = await handleBrowserOpen(call, ctx);
       break;
+    case "browser_close":
+      result = await handleBrowserClose(call, ctx);
+      break;
     case "start_project_process":
       result = await handleStartProjectProcess(call, validation.args as StartProjectProcessArgs, ctx);
       break;
@@ -1508,10 +1511,36 @@ async function handleBrowserOpen(
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   try {
     const bm = await import('../browser/browser-manager.js');
-    // Open/focus the browser window — this is a read-only UI action, no agent control needed.
-    bm.requestShowBrowser();
-    const isOpen = bm.isBrowserWindowOpen();
-    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { opened: true, alreadyOpen: isOpen } } };
+    const alreadyOpen = bm.isBrowserWindowOpen();
+    if (!alreadyOpen) {
+      // Use the DI-injected ensureWindowOpen fn so the native window is created.
+      // This is the same path bootstrapAgentControl uses — creates BrowserWindow before tabs.
+      const bwc = await import('../browser/browser-window-controller.js');
+      bwc.openBrowserWindow();
+    } else {
+      // Already open — just bring it to front
+      bm.requestShowBrowser();
+    }
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { opened: true, alreadyOpen } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserClose(
+  call: ForgeToolCall,
+  _ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  try {
+    const bm = await import('../browser/browser-manager.js');
+    const wasOpen = bm.isBrowserWindowOpen();
+    if (wasOpen) {
+      // Close the native browser window — preserves sessions, history, cookies
+      const bwc = await import('../browser/browser-window-controller.js');
+      bwc.closeBrowserWindow();
+    }
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { closed: wasOpen } } };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };

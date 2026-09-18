@@ -114,6 +114,7 @@ export type KnownToolName =
   | "is_browser_open"
   | "get_browser_status"
   | "browser_open"
+  | "browser_close"
   // ── Dev Process (Long-Running Project Processes) ──────────────────
   | "start_project_process"
   | "list_project_processes"
@@ -171,6 +172,7 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   "is_browser_open",
   "get_browser_status",
   "browser_open",
+  "browser_close",
   // Dev Process
   "start_project_process",
   "list_project_processes",
@@ -344,6 +346,7 @@ export function validateToolCall(call: ForgeToolCall): ValidationResult {
     case "is_browser_open":        return { ok: true, toolName: "is_browser_open", args: {} };
     case "get_browser_status":     return { ok: true, toolName: "get_browser_status", args: {} };
     case "browser_open":           return { ok: true, toolName: "browser_open", args: {} };
+    case "browser_close":          return { ok: true, toolName: "browser_close", args: {} };
     // ── Dev Process ───────────────────────────────────────────────────
     case "start_project_process":        return validateStartProjectProcess(args);
     case "list_project_processes":       return { ok: true, toolName: "list_project_processes", args: {} };
@@ -1192,6 +1195,16 @@ const TOOL_DEFS: Array<{
       'If closed, creates it with the last-used session restored. ' +
       'Does NOT require agent browser control — this is a simple UI action like opening any application window. ' +
       'Use this when the user says "browser aç" or "open browser" before doing any navigation.',
+    parameters: { type: 'object', properties: {} as Record<string, unknown>, required: [] as never[] },
+  },
+  {
+    name: 'browser_close',
+    description:
+      'Close the Forge Browser window. ' +
+      'Closes the browser UI but preserves session history and cookies. ' +
+      'Does NOT require agent browser control — this is a simple UI action. ' +
+      'Use this when the task is complete and the browser is no longer needed, ' +
+      'or when the user says "close browser" or "tarayıcıyı kapat".',
     parameters: { type: 'object', properties: {} as Record<string, unknown>, required: [] as never[] },
   },
   // ── Dev Process (Long-Running Project Processes) ─────────────────────────
