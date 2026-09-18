@@ -844,6 +844,157 @@ export function getAgentControlByRequestId(requestId: string): BrowserAgentContr
   return null;
 }
 
+/**
+ * Push a REQUEST_SHOW_BROWSER event to the renderer — asks the UI to switch to
+ * the Browser workspace and (optionally) activate a specific session/tab.
+ * Non-throwing: if sender is unavailable the event is silently dropped.
+ */
+export function requestShowBrowser(sessionId?: string, tabId?: string): void {
+  if (!_sender || _sender.isDestroyed()) return;
+  _sender.send(BROWSER_IPC.REQUEST_SHOW_BROWSER, { sessionId, tabId });
+}
+
+/**
+ * Ensure a default persistent profile + session + tab exists.
+ * Creates them if needed and returns the active (or first) session.
+ * Safe to call multiple times — idempotent.
+ */
+export async function ensureDefaultSession(): Promise<{ session: BrowserSession; tabId: string }> {
+  const state = getBrowserRuntimeState();
+  const activeSessions = state.sessions.filter((s) => s.lifecycle === "active");
+  if (activeSessions.length > 0) {
+    const preferred = _activeSessionId
+      ? activeSessions.find((s) => s.id === _activeSessionId) ?? activeSessions[0]!
+      : activeSessions[0]!;
+    const tabId = preferred.activeTabId ?? preferred.tabIds[0];
+    if (!tabId) throw new Error("BROWSER_SESSION_HAS_NO_TABS");
+    return { session: preferred, tabId };
+  }
+
+  // Find or create default persistent profile
+  const profiles = listBrowserProfilesPublic();
+  let defaultProfile = profiles.find((p) => p.isDefault) ?? profiles.find((p) => p.persistenceMode === "persistent");
+  if (!defaultProfile) {
+    defaultProfile = createBrowserProfile({
+      name: "Default",
+      persistenceMode: "persistent",
+      agentAccessPolicy: "ask",
+    });
+  } else if (defaultProfile.agentAccessPolicy === "off") {
+    updateBrowserProfilePublic(defaultProfile.id, { agentAccessPolicy: "ask" });
+    defaultProfile = getBrowserProfile(true, defaultProfile.id)!;
+  }
+
+  const session = await createBrowserSession(defaultProfile.id, { name: "Session 1" });
+  const tabId = session.activeTabId ?? session.tabIds[0];
+  if (!tabId) throw new Error("BROWSER_SESSION_HAS_NO_TABS");
+  return { session, tabId };
+}
+
+export type BootstrapResult =
+  | { ok: true; sessionId: string; tabId: string; policyDecision: "allowed" | "approved" }
+  | { ok: false; reason: "policy_off" | "policy_rejected" | "session_error" | "no_profile"; message: string };
+
+/**
+ * Bootstrap agent control for a request.
+ * Resolves the target session (preferred or best available, creating if needed),
+ * checks the profile's agentAccessPolicy, and establishes BrowserAgentControl.
+ */
+export async function bootstrapAgentControl(opts: {
+  requestId: string;
+  conversationId: string;
+  agentRunId: string;
+  sessionId?: string;
+  tabId?: string;
+  purpose?: string;
+}): Promise<BootstrapResult> {
+  try {
+    // 1. Resolve or create session
+    let session: BrowserSession;
+    let resolvedTabId: string;
+
+    if (opts.sessionId) {
+      const s = getBrowserSession(true, opts.sessionId);
+      if (!s || s.lifecycle !== "active") {
+        return { ok: false, reason: "session_error", message: `Session not found or inactive: ${opts.sessionId}` };
+      }
+      session = s;
+      resolvedTabId = opts.tabId ?? s.activeTabId ?? s.tabIds[0] ?? "";
+    } else {
+      const result = await ensureDefaultSession();
+      session = result.session;
+      resolvedTabId = opts.tabId ?? result.tabId;
+    }
+
+    if (!resolvedTabId) {
+      return { ok: false, reason: "session_error", message: "Session has no available tabs" };
+    }
+
+    // 2. Check policy
+    const profile = getBrowserProfile(true, session.profileId);
+    if (!profile) {
+      return { ok: false, reason: "no_profile", message: `Profile not found for session: ${session.profileId}` };
+    }
+
+    if (profile.agentAccessPolicy === "off") {
+      return {
+        ok: false,
+        reason: "policy_off",
+        message:
+          "Browser agent access is disabled for this profile. " +
+          "The user can enable it in Browser Settings.",
+      };
+    }
+
+    // 3. For "ask" policy, wait for user approval
+    if (profile.agentAccessPolicy === "ask") {
+      const approvalId = randomUUID();
+      const approved = await requestApproval({
+        id: approvalId,
+        sessionId: session.id,
+        tabId: resolvedTabId,
+        url: "about:blank",
+        action: "agent_control",
+        risk: "INTERACTION",
+        agentPurpose: opts.purpose ?? "Agent wants to control the browser",
+        requestedAt: Date.now(),
+      });
+      if (!approved) {
+        return { ok: false, reason: "policy_rejected", message: "User rejected browser agent access." };
+      }
+    }
+
+    // 4. Activate session + show browser UI
+    activateSession(session.id);
+    if (session.tabIds.includes(resolvedTabId)) {
+      activateTab(resolvedTabId);
+    }
+    requestShowBrowser(session.id, resolvedTabId);
+
+    // 5. Establish agent control
+    const control: BrowserAgentControl = {
+      sessionId: session.id,
+      tabId: resolvedTabId,
+      conversationId: opts.conversationId,
+      requestId: opts.requestId,
+      agentRunId: opts.agentRunId,
+      startedAt: Date.now(),
+    };
+    grantAgentControl(control);
+
+    return {
+      ok: true,
+      sessionId: session.id,
+      tabId: resolvedTabId,
+      policyDecision: profile.agentAccessPolicy === "allowed" ? "allowed" : "approved",
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: "session_error", message: msg };
+  }
+}
+
+
 export function validateAgentControl(
   sessionId: string,
   requestId: string,
@@ -999,7 +1150,15 @@ export async function agentReadPage(
           const ref = prefix + (++refCounter[prefix] || 0);
           const el = { ref, role, name };
           if (tag === 'a') el.href = node.getAttribute('href') || undefined;
-          if (tag === 'input' || tag === 'textarea') el.value = node.value || undefined;
+          if (tag === 'input' || tag === 'textarea') {
+            const inputType = (node.getAttribute('type') || '').toLowerCase();
+            const sensitiveTypes = ['password', 'hidden'];
+            const sensitiveNames = ['cc', 'card', 'cvv', 'cvc', 'ssn', 'pin', 'secret'];
+            const inputName = (node.getAttribute('name') || node.getAttribute('id') || '').toLowerCase();
+            const isSensitive = sensitiveTypes.includes(inputType) ||
+              sensitiveNames.some(n => inputName.includes(n));
+            el.value = isSensitive ? '[REDACTED]' : (node.value || undefined);
+          }
           if (tag === 'input' && (node.type === 'checkbox' || node.type === 'radio')) {
             el.checked = node.checked;
           }

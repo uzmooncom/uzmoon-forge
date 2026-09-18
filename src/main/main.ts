@@ -12,6 +12,8 @@ import {
   cancelAllOnQuit,
 } from "./commands/command-manager.js";
 import { NodeProcessAdapter } from "./commands/process-adapter.js";
+import { initBrowserManager, reconcileBrowserOnStartup } from "./browser/browser-manager.js";
+import { initDevProcessManager, cleanupDevProcessesOnQuit } from "./commands/dev-process-manager.js";
 import { RELIABILITY_IPC } from "../shared/types.js";
 
 const dataDir =
@@ -95,10 +97,13 @@ app.whenReady().then(() => {
   // Must be after createWindow so mainWindow.webContents exists
   if (mainWindow) {
     initCommandManager(new NodeProcessAdapter(), mainWindow.webContents);
+    initDevProcessManager(mainWindow.webContents);
+    initBrowserManager(mainWindow, mainWindow.webContents, dataDir);
   }
 
   // Reconcile any running/queued commands from a prior crash
   try { reconcileOnStartup(); } catch { /* non-fatal */ }
+  try { reconcileBrowserOnStartup(); } catch { /* non-fatal */ }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -116,4 +121,6 @@ app.on("window-all-closed", () => {
 app.on("before-quit", () => {
   // Best-effort cancel of all running commands on quit
   void cancelAllOnQuit();
+  // Best-effort stop all dev processes on quit
+  cleanupDevProcessesOnQuit();
 });

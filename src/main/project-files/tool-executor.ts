@@ -31,6 +31,12 @@ import {
   type BrowserSelectArgs,
   type BrowserPressKeyArgs,
   type BrowserScrollArgs,
+  type BrowserCreateSessionArgs,
+  type BrowserUseSessionArgs,
+  type BrowserWaitForArgs,
+  type StartProjectProcessArgs,
+  type ReadProjectProcessOutputArgs,
+  type StopProjectProcessArgs,
 } from "../agent-client/tool-types.js";
 import { COMMAND_LIMITS } from "../commands/command-limits.js";
 import type { CommandEvidenceRef } from "../../shared/types.js";
@@ -182,6 +188,30 @@ export async function executeProjectTool(
       break;
     case "browser_get_network_summary":
       result = await handleBrowserTabAction(call, "get_network", validation.args as BrowserTabRefArgs, ctx);
+      break;
+    case "browser_list_profiles":
+      result = await handleBrowserListProfiles(call, ctx);
+      break;
+    case "browser_create_session":
+      result = await handleBrowserCreateSession(call, validation.args as BrowserCreateSessionArgs, ctx);
+      break;
+    case "browser_use_session":
+      result = await handleBrowserUseSession(call, validation.args as BrowserUseSessionArgs, ctx);
+      break;
+    case "browser_wait_for":
+      result = await handleBrowserWaitFor(call, validation.args as BrowserWaitForArgs, ctx);
+      break;
+    case "start_project_process":
+      result = await handleStartProjectProcess(call, validation.args as StartProjectProcessArgs, ctx);
+      break;
+    case "list_project_processes":
+      result = await handleListProjectProcesses(call, ctx);
+      break;
+    case "read_project_process_output":
+      result = await handleReadProjectProcessOutput(call, validation.args as ReadProjectProcessOutputArgs, ctx);
+      break;
+    case "stop_project_process":
+      result = await handleStopProjectProcess(call, validation.args as StopProjectProcessArgs, ctx);
       break;
   }
 
@@ -1191,4 +1221,180 @@ async function handleBrowserScroll(
     const msg = err instanceof Error ? err.message : String(err);
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
   }
+}
+
+// ── Browser Runtime V1.1 handlers ──────────────────────────────────────────
+
+async function handleBrowserListProfiles(
+  call: ForgeToolCall,
+  _ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const profiles = bm.listBrowserProfilesPublic();
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: { profiles, total: profiles.length } } };
+}
+
+async function handleBrowserCreateSession(
+  call: ForgeToolCall,
+  args: BrowserCreateSessionArgs,
+  _ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  try {
+    // Resolve profile
+    let profileId = args.profile_id;
+    if (!profileId) {
+      const profiles = bm.listBrowserProfilesPublic();
+      const def = profiles.find((p) => p.isDefault) ?? profiles[0];
+      if (!def) {
+        return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'NO_PROFILE', errorMessage: 'No browser profiles exist. Create a profile first in Browser Settings.' } };
+      }
+      profileId = def.id;
+    }
+    const session = await bm.createBrowserSession(profileId, args.name ? { name: args.name } : undefined);
+    const tabId = session.activeTabId ?? session.tabIds[0] ?? null;
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { sessionId: session.id, tabId, profileId: session.profileId } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserUseSession(
+  call: ForgeToolCall,
+  args: BrowserUseSessionArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  try {
+    const result = await bm.bootstrapAgentControl({
+      requestId: ctx.requestId,
+      conversationId: ctx.conversationId,
+      agentRunId: ctx.requestId, // use requestId as agentRunId proxy
+      ...(args.session_id !== undefined && { sessionId: args.session_id }),
+      ...(args.tab_id !== undefined && { tabId: args.tab_id }),
+      ...(args.purpose !== undefined && { purpose: args.purpose }),
+    });
+    if (!result.ok) {
+      const codeMap: Record<string, string> = {
+        policy_off: 'BROWSER_ACCESS_DENIED',
+        policy_rejected: 'BROWSER_ACCESS_DENIED',
+        session_error: 'SESSION_ERROR',
+        no_profile: 'NO_PROFILE',
+      };
+      return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: codeMap[result.reason] ?? 'TOOL_ERROR', errorMessage: result.message } };
+    }
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { sessionId: result.sessionId, tabId: result.tabId, agentControlEstablished: true, policyDecision: result.policyDecision } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserWaitFor(
+  call: ForgeToolCall,
+  args: BrowserWaitForArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const { BROWSER_LIMITS } = await import('../../shared/types.js');
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control. Call browser_use_session first.' } };
+
+  const timeoutMs = Math.min(args.timeout_ms ?? 10_000, BROWSER_LIMITS.MAX_WAIT_FOR_MS);
+  const deadline = Date.now() + timeoutMs;
+  const POLL_MS = 500;
+
+  try {
+    let met = false;
+    while (Date.now() < deadline && !met) {
+      const snapshot = await bm.agentReadPage(ctrl, args.tab_id);
+      switch (args.condition) {
+        case 'page_load':
+          met = true; // page was readable — it loaded
+          break;
+        case 'text_present':
+          met = !!args.value && snapshot.text.includes(args.value);
+          break;
+        case 'text_absent':
+          met = !args.value || !snapshot.text.includes(args.value);
+          break;
+        case 'url_matches':
+          met = !!args.value && snapshot.url.includes(args.value);
+          break;
+      }
+      if (!met) await new Promise((r) => setTimeout(r, POLL_MS));
+    }
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { met, condition: args.condition, timedOut: !met } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+// ── Dev Process handlers ────────────────────────────────────────────────────
+
+async function handleStartProjectProcess(
+  call: ForgeToolCall,
+  args: StartProjectProcessArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const { startDevProcess, resolveDevProcessCwd } = await import('../commands/dev-process-manager.js');
+
+  const cwdAbsolute = resolveDevProcessCwd(ctx.projectRoot, args.cwd_relative);
+  if (!cwdAbsolute) {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'PATH_TRAVERSAL', errorMessage: 'cwd_relative would escape the project root.' } };
+  }
+
+  try {
+    const record = startDevProcess({
+      executable: args.executable,
+      args: args.args,
+      cwdAbsolute,
+      projectId: ctx.projectId,
+      conversationId: ctx.conversationId,
+      requestId: ctx.requestId,
+      agentRunId: ctx.requestId,
+      ...(args.purpose !== undefined && { purpose: args.purpose }),
+    });
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { processId: record.id, state: record.state, detectedUrls: record.detectedUrls } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'SPAWN_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleListProjectProcesses(
+  call: ForgeToolCall,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const { listDevProcesses } = await import('../commands/dev-process-manager.js');
+  const processes = listDevProcesses(ctx.projectId);
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: { processes, total: processes.length } } };
+}
+
+async function handleReadProjectProcessOutput(
+  call: ForgeToolCall,
+  args: ReadProjectProcessOutputArgs,
+  _ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const { readDevProcessOutput } = await import('../commands/dev-process-manager.js');
+  const { found, output } = readDevProcessOutput(args.process_id);
+  if (!found) {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'NOT_FOUND', errorMessage: `No active process with id: ${args.process_id}` } };
+  }
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: { processId: args.process_id, output } } };
+}
+
+async function handleStopProjectProcess(
+  call: ForgeToolCall,
+  args: StopProjectProcessArgs,
+  _ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const { stopDevProcess } = await import('../commands/dev-process-manager.js');
+  const { found } = stopDevProcess(args.process_id);
+  if (!found) {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'NOT_FOUND', errorMessage: `No active process with id: ${args.process_id}` } };
+  }
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: { processId: args.process_id, stopped: true } } };
 }

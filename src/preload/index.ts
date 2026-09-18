@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -41,6 +41,7 @@ import type {
   BrowserRuntimeState,
   BrowserAgentControl,
   BrowserPendingApproval,
+  DevProcessRecord,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -630,6 +631,12 @@ const forgeApi = {
       ipcRenderer.on(BROWSER_IPC.AGENT_CONTROL_CHANGED, listener);
       return () => ipcRenderer.removeListener(BROWSER_IPC.AGENT_CONTROL_CHANGED, listener);
     },
+
+    onRequestShowBrowser: (cb: (payload: { sessionId?: string; tabId?: string }) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { sessionId?: string; tabId?: string }) => cb(payload);
+      ipcRenderer.on(BROWSER_IPC.REQUEST_SHOW_BROWSER, listener);
+      return () => ipcRenderer.removeListener(BROWSER_IPC.REQUEST_SHOW_BROWSER, listener);
+    },
   },
 
   // ── Reliability (V0.9) ────────────────────────────────────────────────────
@@ -653,6 +660,24 @@ const forgeApi = {
       const listener = (_event: Electron.IpcRendererEvent, inc: ForgeIncident) => cb(inc);
       ipcRenderer.on(RELIABILITY_IPC.INCIDENT_RECORDED, listener);
       return () => ipcRenderer.removeListener(RELIABILITY_IPC.INCIDENT_RECORDED, listener);
+    },
+  },
+
+  // ── Dev Process (Browser Runtime V1.1) ────────────────────────────────────
+  devProcess: {
+    list: (projectId?: string): Promise<DevProcessRecord[]> =>
+      ipcRenderer.invoke(DEV_PROCESS_IPC.LIST, projectId),
+
+    readOutput: (processId: string): Promise<{ found: boolean; output: string }> =>
+      ipcRenderer.invoke(DEV_PROCESS_IPC.READ_OUTPUT, processId),
+
+    stop: (processId: string): Promise<{ found: boolean }> =>
+      ipcRenderer.invoke(DEV_PROCESS_IPC.STOP, processId),
+
+    onStateChanged: (cb: (record: DevProcessRecord) => void): UnsubFn => {
+      const listener = (_event: Electron.IpcRendererEvent, record: DevProcessRecord) => cb(record);
+      ipcRenderer.on(DEV_PROCESS_IPC.STATE_CHANGED, listener);
+      return () => ipcRenderer.removeListener(DEV_PROCESS_IPC.STATE_CHANGED, listener);
     },
   },
 };

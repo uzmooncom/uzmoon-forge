@@ -1489,6 +1489,8 @@ export const BROWSER_LIMITS = {
   MAX_SCREENSHOT_WIDTH: 1280,
   /** Max screenshot height */
   MAX_SCREENSHOT_HEIGHT: 800,
+  /** Max ms to wait in browser_wait_for */
+  MAX_WAIT_FOR_MS: 30_000,
 } as const;
 
 /** IPC channels for Browser Runtime V1 */
@@ -1528,6 +1530,52 @@ export const BROWSER_IPC = {
   APPROVAL_REQUESTED:    "browser:approvalRequested",
   AGENT_CONTROL_CHANGED: "browser:agentControlChanged",
   DOWNLOAD_STARTED:      "browser:downloadStarted",
+  // Main → Renderer (send): request UI to show browser workspace
+  REQUEST_SHOW_BROWSER:  "browser:requestShowBrowser",
+} as const;
+
+// ── Dev Process (Long-Running Project Processes) ──────────────────────────
+
+export type DevProcessState =
+  | "proposed"
+  | "awaiting_approval"
+  | "starting"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "failed";
+
+export type DevProcessReadyState = "unknown" | "detecting" | "ready" | "timeout";
+
+export interface DevProcessRecord {
+  id: string;
+  projectId: string;
+  conversationId?: string;
+  requestId?: string;
+  agentRunId?: string;
+  /** Structured command spec — shell:false always */
+  executable: string;
+  args: string[];
+  cwd: string;
+  state: DevProcessState;
+  readyState: DevProcessReadyState;
+  /** Detected localhost URLs from process output */
+  detectedUrls: string[];
+  /** Primary ready URL (first detected and probed OK) */
+  readyUrl?: string;
+  pid?: number;
+  startedAt: number;
+  stoppedAt?: number;
+  /** Whether the user explicitly started this (survives agent run end) */
+  userOwned: boolean;
+}
+
+export const DEV_PROCESS_IPC = {
+  LIST:           "devProcess:list",
+  READ_OUTPUT:    "devProcess:readOutput",
+  STOP:           "devProcess:stop",
+  // Main → Renderer push
+  STATE_CHANGED:  "devProcess:stateChanged",
 } as const;
 
 /** V0.9 IPC channels for reliability */

@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } fr
 import { randomUUID, createHash } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -25,6 +25,7 @@ import { queueManager, cancelStream, getActiveStreamId, setSecretGetter, deleteO
 import { tryGetIncidentRecorder, assertInvariant } from "../reliability/index.js";
 import * as commandManager from "../commands/command-manager.js";
 import * as browserManager from "../browser/browser-manager.js";
+import * as devProcessManager from "../commands/dev-process-manager.js";
 import { buildGitHubIssuePayload } from "../reliability/sanitizer.js";
 void sweepOrphanedSnapshots; // imported for startup use — called from main.ts
 
@@ -1591,5 +1592,21 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   ipcMain.handle(
     BROWSER_IPC.GET_RUNTIME_STATE,
     (_e: IpcMainInvokeEvent) => browserManager.getBrowserRuntimeState()
+  );
+
+  // ── Dev Process IPC ─────────────────────────────────────────────────────
+  ipcMain.handle(
+    DEV_PROCESS_IPC.LIST,
+    (_e: IpcMainInvokeEvent, projectId?: string) => devProcessManager.listDevProcesses(projectId)
+  );
+
+  ipcMain.handle(
+    DEV_PROCESS_IPC.READ_OUTPUT,
+    (_e: IpcMainInvokeEvent, processId: string) => devProcessManager.readDevProcessOutput(processId)
+  );
+
+  ipcMain.handle(
+    DEV_PROCESS_IPC.STOP,
+    (_e: IpcMainInvokeEvent, processId: string) => devProcessManager.stopDevProcess(processId)
   );
 }

@@ -497,9 +497,17 @@ function EmptyState({ onCreateSession }: { onCreateSession: () => void }) {
 
 interface BrowserWorkspaceProps {
   onOpenSettings: () => void;
+  requestedSessionId?: string;
+  requestedTabId?: string;
+  onRequestedSessionHandled?: () => void;
 }
 
-export default function BrowserWorkspace({ onOpenSettings: _onOpenSettings }: BrowserWorkspaceProps) {
+export default function BrowserWorkspace({
+  onOpenSettings: _onOpenSettings,
+  requestedSessionId,
+  requestedTabId,
+  onRequestedSessionHandled,
+}: BrowserWorkspaceProps) {
   const [runtimeState, setRuntimeState] = useState<BrowserRuntimeState | null>(null);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -546,6 +554,20 @@ export default function BrowserWorkspace({ onOpenSettings: _onOpenSettings }: Br
       setActiveTabId(sess.activeTabId);
     }
   }, [runtimeState, activeSessionId, activeTabId]);
+
+  // Handle agent-requested session/tab navigation (from browser_use_session tool)
+  useEffect(() => {
+    if (!requestedSessionId && !requestedTabId) return;
+    if (requestedSessionId) {
+      setActiveSessionId(requestedSessionId);
+      void window.forgeApi.browser.activateSession(requestedSessionId);
+    }
+    if (requestedTabId) {
+      setActiveTabId(requestedTabId);
+      void window.forgeApi.browser.activateTab(requestedTabId);
+    }
+    onRequestedSessionHandled?.();
+  }, [requestedSessionId, requestedTabId, onRequestedSessionHandled]);
 
   const profiles = useMemo(() => runtimeState?.profiles ?? [], [runtimeState]);
   const sessions = useMemo(() => runtimeState?.sessions ?? [], [runtimeState]);

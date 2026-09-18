@@ -70,6 +70,18 @@ interface MainShellProps {
 function MainShell({ onOpenSettings }: MainShellProps) {
   const [view, setView] = useState<AppView>("chat");
   const [activeProject, setActiveProject] = useState<Project | null>(null);
+  const [requestedBrowserSession, setRequestedBrowserSession] = useState<{ sessionId?: string; tabId?: string } | null>(null);
+
+  // Listen for agent-requested browser navigation
+  useEffect(() => {
+    const unsub = window.forgeApi.browser.onRequestShowBrowser((payload) => {
+      setView("browser");
+      if (payload.sessionId || payload.tabId) {
+        setRequestedBrowserSession(payload);
+      }
+    });
+    return () => unsub();
+  }, []);
 
   const handleOpenProject = (project: Project) => {
     setActiveProject(project);
@@ -147,6 +159,9 @@ function MainShell({ onOpenSettings }: MainShellProps) {
           ) : view === "browser" ? (
             <BrowserWorkspace
               onOpenSettings={onOpenSettings}
+              {...(requestedBrowserSession?.sessionId !== undefined && { requestedSessionId: requestedBrowserSession.sessionId })}
+              {...(requestedBrowserSession?.tabId !== undefined && { requestedTabId: requestedBrowserSession.tabId })}
+              onRequestedSessionHandled={() => setRequestedBrowserSession(null)}
             />
           ) : (
             <ProjectsScreen

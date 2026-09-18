@@ -92,7 +92,17 @@ export type KnownToolName =
   | "browser_scroll"
   | "browser_screenshot"
   | "browser_get_console"
-  | "browser_get_network_summary";
+  | "browser_get_network_summary"
+  // ── Browser Runtime V1.1 ──────────────────────────────────────────
+  | "browser_list_profiles"
+  | "browser_create_session"
+  | "browser_use_session"
+  | "browser_wait_for"
+  // ── Dev Process (Long-Running Project Processes) ──────────────────
+  | "start_project_process"
+  | "list_project_processes"
+  | "read_project_process_output"
+  | "stop_project_process";
 
 export const KNOWN_TOOL_NAMES = new Set<string>([
   "list_directory",
@@ -124,6 +134,16 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   "browser_screenshot",
   "browser_get_console",
   "browser_get_network_summary",
+  // Browser Runtime V1.1
+  "browser_list_profiles",
+  "browser_create_session",
+  "browser_use_session",
+  "browser_wait_for",
+  // Dev Process
+  "start_project_process",
+  "list_project_processes",
+  "read_project_process_output",
+  "stop_project_process",
 ]);
 
 // ── Validation result ───────────────────────────────────────────────────────
@@ -176,7 +196,16 @@ export interface ValidationOk {
     | BrowserFillArgs
     | BrowserSelectArgs
     | BrowserPressKeyArgs
-    | BrowserScrollArgs;
+    | BrowserScrollArgs
+    // Browser Runtime V1.1
+    | BrowserCreateSessionArgs
+    | BrowserUseSessionArgs
+    | BrowserWaitForArgs
+    // Dev Process
+    | StartProjectProcessArgs
+    | ReadProjectProcessOutputArgs
+    | StopProjectProcessArgs
+    | Record<string, never>;
 }
 
 export interface ValidationError {
@@ -250,6 +279,16 @@ export function validateToolCall(call: ForgeToolCall): ValidationResult {
     case "browser_screenshot":      return validateBrowserTabRef("browser_screenshot", args);
     case "browser_get_console":     return validateBrowserTabRef("browser_get_console", args);
     case "browser_get_network_summary": return validateBrowserTabRef("browser_get_network_summary", args);
+    // ── Browser Runtime V1.1 ──────────────────────────────────────────
+    case "browser_list_profiles":   return { ok: true, toolName: "browser_list_profiles", args: {} };
+    case "browser_create_session":  return validateBrowserCreateSession(args);
+    case "browser_use_session":     return validateBrowserUseSession(args);
+    case "browser_wait_for":        return validateBrowserWaitFor(args);
+    // ── Dev Process ───────────────────────────────────────────────────
+    case "start_project_process":        return validateStartProjectProcess(args);
+    case "list_project_processes":       return { ok: true, toolName: "list_project_processes", args: {} };
+    case "read_project_process_output":  return validateReadProjectProcessOutput(args);
+    case "stop_project_process":         return validateStopProjectProcess(args);
   }
 }
 
@@ -960,7 +999,105 @@ const TOOL_DEFS: Array<{
       'Returns URL (sensitive params redacted), method, HTTP status, resource type, timestamp.',
     parameters: { type: 'object', properties: { tab_id: { type: 'string', description: 'The tab_id.' } }, required: ['tab_id'] },
   },
-];
+  // ── Browser Runtime V1.1 ────────────────────────────────────────────────
+  {
+    name: 'browser_list_profiles',
+    description: 'List all browser profiles (persistent and private). Returns profile IDs, names, and agent access policy.',
+    parameters: { type: 'object', properties: {} as Record<string, unknown>, required: [] as never[] },
+  },
+  {
+    name: 'browser_create_session',
+    description: 'Create a new browser session for a given profile. Returns the session ID and an initial tab ID ready for use.',
+    parameters: {
+      type: 'object',
+      properties: {
+        profile_id: { type: 'string', description: 'Profile ID (from browser_list_profiles). If omitted, uses the default persistent profile.' },
+        name: { type: 'string', description: 'Optional human-readable session name.' },
+      },
+      required: [] as never[],
+    },
+  },
+  {
+    name: 'browser_use_session',
+    description:
+      'Establish browser agent control for this request. ' +
+      'Resolves a suitable session (existing or new), requests UI to show the browser, and returns the active tab_id. ' +
+      'ALWAYS call this before any browser interaction tool (browser_open_url, browser_click, etc.). ' +
+      'If agent access requires approval, this tool waits for the user to approve or reject.',
+    parameters: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: 'Preferred session ID. If omitted, Forge selects the best available session.' },
+        tab_id: { type: 'string', description: 'Preferred tab ID within the session. If omitted, uses the active tab.' },
+        purpose: { type: 'string', description: 'Brief description of what the agent intends to do (shown in approval UI).' },
+      },
+      required: [] as never[],
+    },
+  },
+  {
+    name: 'browser_wait_for',
+    description:
+      'Wait until a condition is true in the browser tab. ' +
+      'Conditions: page_load (wait for load to complete), text_present (text appears), text_absent (text disappears), url_matches (URL contains substring). ' +
+      'Bounded timeout — do not use arbitrary sleeps instead.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tab_id: { type: 'string', description: 'The tab_id.' },
+        condition: { type: 'string', enum: ['page_load', 'text_present', 'text_absent', 'url_matches'], description: 'Condition to wait for.' },
+        value: { type: 'string', description: 'Required for text_present, text_absent, url_matches.' },
+        timeout_ms: { type: 'number', description: 'Max wait in ms (default 10000, max 30000).' },
+      },
+      required: ['tab_id', 'condition'],
+    },
+  },
+  // ── Dev Process (Long-Running Project Processes) ─────────────────────────
+  {
+    name: 'start_project_process',
+    description:
+      'Start a long-running project process (e.g. dev server: pnpm dev, npm run dev). ' +
+      'The process stays alive after the agent run ends until explicitly stopped. ' +
+      'Forge detects the localhost URL from output and reports it when ready. ' +
+      'Do NOT use run_command for dev servers — use this tool instead.',
+    parameters: {
+      type: 'object',
+      properties: {
+        executable: { type: 'string', description: 'Executable to run (e.g. "pnpm", "npm", "bun").' },
+        args: { type: 'array', items: { type: 'string' }, description: 'Arguments (e.g. ["run", "dev"]).' },
+        cwd_relative: { type: 'string', description: 'Working directory relative to project root.' },
+        purpose: { type: 'string', description: 'What this process does (shown in UI).' },
+      },
+      required: ['executable', 'args'],
+    },
+  },
+  {
+    name: 'list_project_processes',
+    description: 'List all running long-running project processes. Returns process IDs, state, detected URLs, and ready status.',
+    parameters: { type: 'object', properties: {} as Record<string, unknown>, required: [] as never[] },
+  },
+  {
+    name: 'read_project_process_output',
+    description: 'Read the output buffer of a running project process. Returns bounded stdout/stderr text.',
+    parameters: {
+      type: 'object',
+      properties: {
+        process_id: { type: 'string', description: 'Process ID (from start_project_process or list_project_processes).' },
+      },
+      required: ['process_id'],
+    },
+  },
+  {
+    name: 'stop_project_process',
+    description: 'Stop a running project process by ID. Terminates the process tree cleanly.',
+    parameters: {
+      type: 'object',
+      properties: {
+        process_id: { type: 'string', description: 'Process ID to stop.' },
+      },
+      required: ['process_id'],
+    },
+  },
+] as Array<{ name: KnownToolName; description: string; parameters: Record<string, unknown> }>;
 
 
 // ── Browser Runtime V1 arg interfaces ──────────────────────────────────────
@@ -1019,6 +1156,45 @@ export interface BrowserScrollArgs {
   tab_id: string;
   delta_x?: number;
   delta_y?: number;
+}
+
+// ── Browser Runtime V1.1 arg interfaces ────────────────────────────────────
+
+export interface BrowserCreateSessionArgs {
+  profile_id?: string;
+  name?: string;
+}
+
+export interface BrowserUseSessionArgs {
+  session_id?: string;
+  tab_id?: string;
+  purpose?: string;
+}
+
+export type BrowserWaitCondition = 'page_load' | 'text_present' | 'text_absent' | 'url_matches';
+
+export interface BrowserWaitForArgs {
+  tab_id: string;
+  condition: BrowserWaitCondition;
+  value?: string;
+  timeout_ms?: number;
+}
+
+// ── Dev Process arg interfaces ──────────────────────────────────────────────
+
+export interface StartProjectProcessArgs {
+  executable: string;
+  args: string[];
+  cwd_relative?: string;
+  purpose?: string;
+}
+
+export interface ReadProjectProcessOutputArgs {
+  process_id: string;
+}
+
+export interface StopProjectProcessArgs {
+  process_id: string;
 }
 
 // ── Browser validators ─────────────────────────────────────────────────────
@@ -1160,6 +1336,113 @@ function validateBrowserScroll(args: Record<string, unknown>): ValidationResult 
 }
 
 /** Build OpenAI-format tool definitions */
+// ── Browser Runtime V1.1 validators ───────────────────────────────────────
+
+function validateBrowserCreateSession(args: Record<string, unknown>): ValidationResult {
+  const r: BrowserCreateSessionArgs = {};
+  if (args['profile_id'] !== undefined) {
+    if (typeof args['profile_id'] !== 'string' || !args['profile_id']) {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_create_session: profile_id must be a non-empty string' };
+    }
+    r.profile_id = args['profile_id'] as string;
+  }
+  if (args['name'] !== undefined) {
+    if (typeof args['name'] !== 'string') {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_create_session: name must be a string' };
+    }
+    r.name = args['name'] as string;
+  }
+  return { ok: true, toolName: 'browser_create_session', args: r };
+}
+
+function validateBrowserUseSession(args: Record<string, unknown>): ValidationResult {
+  const r: BrowserUseSessionArgs = {};
+  if (args['session_id'] !== undefined) {
+    if (typeof args['session_id'] !== 'string' || !args['session_id']) {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_use_session: session_id must be a non-empty string' };
+    }
+    r.session_id = args['session_id'] as string;
+  }
+  if (args['tab_id'] !== undefined) {
+    if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_use_session: tab_id must be a non-empty string' };
+    }
+    r.tab_id = args['tab_id'] as string;
+  }
+  if (args['purpose'] !== undefined) {
+    if (typeof args['purpose'] !== 'string') {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_use_session: purpose must be a string' };
+    }
+    r.purpose = args['purpose'] as string;
+  }
+  return { ok: true, toolName: 'browser_use_session', args: r };
+}
+
+function validateBrowserWaitFor(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_wait_for: tab_id must be a non-empty string' };
+  }
+  const VALID_CONDITIONS = ['page_load', 'text_present', 'text_absent', 'url_matches'] as const;
+  if (!VALID_CONDITIONS.includes(args['condition'] as BrowserWaitCondition)) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: `browser_wait_for: condition must be one of ${VALID_CONDITIONS.join(', ')}` };
+  }
+  const r: BrowserWaitForArgs = { tab_id: args['tab_id'] as string, condition: args['condition'] as BrowserWaitCondition };
+  if (args['value'] !== undefined) {
+    if (typeof args['value'] !== 'string') {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_wait_for: value must be a string' };
+    }
+    r.value = args['value'] as string;
+  }
+  if (args['timeout_ms'] !== undefined) {
+    if (typeof args['timeout_ms'] !== 'number' || args['timeout_ms'] <= 0) {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_wait_for: timeout_ms must be a positive number' };
+    }
+    r.timeout_ms = args['timeout_ms'] as number;
+  }
+  return { ok: true, toolName: 'browser_wait_for', args: r };
+}
+
+// ── Dev Process validators ──────────────────────────────────────────────────
+
+function validateStartProjectProcess(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['executable'] !== 'string' || !args['executable']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'start_project_process: executable must be a non-empty string' };
+  }
+  if (!Array.isArray(args['args'])) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'start_project_process: args must be an array' };
+  }
+  const r: StartProjectProcessArgs = { executable: args['executable'] as string, args: args['args'] as string[] };
+  if (args['cwd_relative'] !== undefined) {
+    if (typeof args['cwd_relative'] !== 'string') {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'start_project_process: cwd_relative must be a string' };
+    }
+    r.cwd_relative = args['cwd_relative'] as string;
+  }
+  if (args['purpose'] !== undefined) {
+    if (typeof args['purpose'] !== 'string') {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'start_project_process: purpose must be a string' };
+    }
+    r.purpose = args['purpose'] as string;
+  }
+  return { ok: true, toolName: 'start_project_process', args: r };
+}
+
+function validateReadProjectProcessOutput(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['process_id'] !== 'string' || !args['process_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'read_project_process_output: process_id must be a non-empty string' };
+  }
+  const r: ReadProjectProcessOutputArgs = { process_id: args['process_id'] as string };
+  return { ok: true, toolName: 'read_project_process_output', args: r };
+}
+
+function validateStopProjectProcess(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['process_id'] !== 'string' || !args['process_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'stop_project_process: process_id must be a non-empty string' };
+  }
+  const r: StopProjectProcessArgs = { process_id: args['process_id'] as string };
+  return { ok: true, toolName: 'stop_project_process', args: r };
+}
+
 export function buildOpenAIToolDefs(): OpenAIToolDef[] {
   return TOOL_DEFS.map((def) => ({
     type: "function",
