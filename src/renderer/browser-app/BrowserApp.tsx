@@ -23,6 +23,8 @@ import type {
   BrowserAgentControl,
   BrowserPendingApproval,
 } from "@shared/types.js";
+import { BookmarksPanel } from "./BookmarksPanel.js";
+import { HistoryPanel } from "./HistoryPanel.js";
 
 // ── Icons ──────────────────────────────────────────────────────────────────
 
@@ -637,6 +639,7 @@ export default function BrowserApp() {
   const [agentControl, setAgentControl] = useState<BrowserAgentControl | null>(null);
   const [pendingApproval, setPendingApproval] = useState<BrowserPendingApproval | null>(null);
   const [showProfilePanel, setShowProfilePanel] = useState(false);
+  const [sidePanel, setSidePanel] = useState<"bookmarks" | "history" | null>(null);
   const addressInputRef = useRef<HTMLInputElement | null>(null);
 
   // Subscribe to runtime state push events
@@ -840,6 +843,37 @@ export default function BrowserApp() {
           >
             Forge Browser
           </span>
+          <div className="flex-1" />
+          {/* Sidebar toggles */}
+          <div className="flex items-center gap-1 no-drag">
+            <button
+              className={`p-1.5 rounded-lg transition-colors ${
+                sidePanel === "bookmarks"
+                  ? "bg-[#6366f1]/20 text-[#6366f1]"
+                  : "text-white/25 hover:text-white/60 hover:bg-white/5"
+              }`}
+              onClick={() => setSidePanel((p) => p === "bookmarks" ? null : "bookmarks")}
+              title="Bookmarks"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <path d="M3 2h8a1 1 0 011 1v9l-5-2.5L2 12V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button
+              className={`p-1.5 rounded-lg transition-colors ${
+                sidePanel === "history"
+                  ? "bg-[#6366f1]/20 text-[#6366f1]"
+                  : "text-white/25 hover:text-white/60 hover:bg-white/5"
+              }`}
+              onClick={() => setSidePanel((p) => p === "history" ? null : "history")}
+              title="History"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.3" />
+                <path d="M7 4.5V7l2 1.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -898,11 +932,30 @@ export default function BrowserApp() {
             />
           </div>
 
-          {/* Browser view area (transparent — WebContentsView renders below in this window) */}
-          <BrowserViewOverlay
-            sessionId={activeSessionId}
-            activeTabId={activeTabId}
-          />
+          {/* Browser view area + sidebar */}
+          <div className="flex-1 flex overflow-hidden">
+            <BrowserViewOverlay
+              sessionId={activeSessionId}
+              activeTabId={activeTabId}
+            />
+
+            {/* Side panel (bookmarks / history) */}
+            {sidePanel && (
+              <div className="w-72 border-l border-white/5 flex flex-col overflow-hidden bg-[#0d0d0f]">
+                {sidePanel === "bookmarks" ? (
+                  <BookmarksPanel
+                    profileId={activeSession?.profileId ?? null}
+                    onNavigate={(url) => { void handleNavigate(url); setSidePanel(null); }}
+                  />
+                ) : (
+                  <HistoryPanel
+                    profileId={activeSession?.profileId ?? null}
+                    onNavigate={(url) => { void handleNavigate(url); setSidePanel(null); }}
+                  />
+                )}
+              </div>
+            )}
+          </div>
 
           {/* Agent / user control bar */}
           {activeSession && agentControl ? (

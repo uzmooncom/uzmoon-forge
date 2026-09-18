@@ -592,6 +592,14 @@ function _wireTabEvents(tabId: string, view: import("electron").WebContentsView)
     _elementRefs.delete(tabId);
     pushToRenderer(BROWSER_IPC.TAB_UPDATED, getBrowserTab(true, tabId));
     emitTrace("BROWSER_NAVIGATION_COMPLETED", randomUUID(), { tabId, url, title });
+    // Record navigation in history (skips private profiles and internal URLs)
+    const tabForHistory = getBrowserTab(true, tabId);
+    if (tabForHistory) {
+      const sessionForHistory = getBrowserSession(true, tabForHistory.sessionId);
+      if (sessionForHistory) {
+        recordNavigation(sessionForHistory.profileId, url, title);
+      }
+    }
   });
 
   wc.on("did-fail-load", (_ev, code, desc, validatedUrl) => {
