@@ -30,6 +30,22 @@ const TOOL_RISK_MAP: Record<string, BrowserActionRisk> = {
   browser_screenshot:         "READ",
   browser_get_console:        "READ",
   browser_get_network_summary:"READ",
+  // Browser Runtime V3 — Extended Interaction
+  browser_hover:              "INTERACTION",
+  browser_double_click:       "INTERACTION",
+  browser_drag:               "INTERACTION",
+  browser_focus:              "INTERACTION",
+  browser_clear:              "INTERACTION",
+  browser_scroll_into_view:   "READ",
+  browser_checkbox:           "INTERACTION",
+  browser_upload_file:        "UPLOAD",
+  browser_get_media:          "READ",
+  browser_control_media:      "INTERACTION",
+  browser_handle_dialog:      "INTERACTION",
+  // Browser Runtime V2.1 (read-only tools)
+  is_browser_open:            "READ",
+  get_browser_status:         "READ",
+  browser_open:               "READ",
 };
 
 /** Extra risk overrides based on URL/action context. */

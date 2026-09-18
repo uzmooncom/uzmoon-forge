@@ -24,7 +24,7 @@
  *
  * Does NOT know about IPC, Electron, or the renderer.
  */
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
 import type {
   AgentConfig,
   ForgeToolCall,
@@ -35,6 +35,7 @@ import type {
   NormalizedAgentDecision,
   AgentRun,
   AgentRunState,
+  AgentGoalState,
 } from "../../shared/types.js";
 import { makeRequest } from "./client.js";
 import type { SimpleMessage } from "./client.js";
@@ -310,10 +311,39 @@ export function normalizeDecision(
       };
     }
     const proposalFenceRaw = extractProposalFenceRaw(text);
+    // In project mode: attempt to parse structured ForgeAgentFinal JSON
+    let outcome: import('../../shared/types.js').ForgeAgentFinal | undefined;
+    if (isProjectMode) {
+      try {
+        const candidate = JSON.parse(parsed.content) as Record<string, unknown>;
+        if (typeof candidate.status === 'string' && ['completed','blocked','failed'].includes(candidate.status) && typeof candidate.summary === 'string') {
+          outcome = {
+            status: candidate.status as 'completed' | 'blocked' | 'failed',
+            summary: candidate.summary,
+            ...(Array.isArray(candidate.evidenceRefs) && { evidenceRefs: candidate.evidenceRefs as string[] }),
+          };
+          // Enforce: summary must be an intent statement, not verbose prose
+          // (structural guard: summary must be <= 300 chars for intent-only)
+          if (outcome.summary.length > 500) {
+            outcome.summary = outcome.summary.slice(0, 500);
+          }
+        } else if (typeof candidate.status !== 'undefined') {
+          // Status was present but malformed
+          return {
+            kind: "invalid",
+            reason: "AGENT_FINAL_MISSING_STATUS",
+            recoverable: true,
+          };
+        }
+      } catch {
+        // Not JSON — that's acceptable; content is prose summary
+      }
+    }
     return {
       kind: "final",
-      content: parsed.content,
+      content: isProjectMode && outcome ? outcome.summary : parsed.content,
       ...(proposalFenceRaw !== undefined && { proposalFenceRaw }),
+      ...(outcome !== undefined && { outcome }),
     };
   }
 
@@ -448,6 +478,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     toolStepCount: 0,
     recoveryCount: 0,
     readByteCount: 0,
+    stuckScore: 0,
   };
 
   // Start trace for this request
@@ -489,6 +520,22 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   let finalText = "";
   let proposalFenceRaw: string | undefined;
   let budgetExhausted = false;
+
+  // Loop detection state (request-scoped)
+  const STALL_THRESHOLD = 3; // consecutive identical observation+action hashes → stall
+  const goalState: AgentGoalState = {
+    requestId,
+    conversationId,
+    goal: "",
+    lastObservationHash: "",
+    lastActionSignature: "",
+    stuckScore: 0,
+    sameObservationCount: 0,
+    sameActionCount: 0,
+    effectObserved: false,
+    toolCallCount: 0,
+    replanCount: 0,
+  };
 
   // starting → waiting_for_model
   transition(run, "waiting_for_model", tracer);
@@ -670,6 +717,48 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       messages.push(...resultMessages);
 
       run.toolStepCount++;
+
+      // ── Loop detection ──────────────────────────────────────────────────
+      // Hash the current observation (model text) and action (tool calls+args)
+      // to detect when the model is stuck repeating the same steps.
+      const obsHash = createHash("sha256").update(turnText.slice(0, 2048)).digest("hex").slice(0, 16);
+      const actSig = decision.calls.map((c) => `${c.name}:${JSON.stringify(c.arguments ?? {})}`).join("|");
+      const actHash = createHash("sha256").update(actSig).digest("hex").slice(0, 16);
+      goalState.toolCallCount += decision.calls.length;
+      if (obsHash === goalState.lastObservationHash) {
+        goalState.sameObservationCount++;
+      } else {
+        goalState.sameObservationCount = 0;
+      }
+      if (actHash === goalState.lastActionSignature) {
+        goalState.sameActionCount++;
+      } else {
+        goalState.sameActionCount = 0;
+      }
+      if (goalState.sameObservationCount > 0 && goalState.sameActionCount > 0) {
+        goalState.stuckScore++;
+        run.stuckScore = goalState.stuckScore;
+        if (goalState.stuckScore >= STALL_THRESHOLD) {
+          assertInvariant(
+            "AGENT_GOAL_NOT_STALLED",
+            false,
+            { stuckScore: goalState.stuckScore, obsHash, actHash, step: run.toolStepCount, requestId },
+            { requestId, conversationId, hint: "loop detection" }
+          );
+          transition(run, "failed", tracer);
+          run.failureCode = "AGENT_GOAL_STALLED";
+          run.failureMessage = `Agent loop stalled after ${goalState.stuckScore} identical steps`;
+          throw new AgentLoopError("PROTOCOL_RECOVERY_EXHAUSTED", `Agent stalled: ${goalState.stuckScore} identical steps`);
+        }
+      } else {
+        goalState.stuckScore = 0;
+        run.stuckScore = 0;
+      }
+      goalState.lastObservationHash = obsHash;
+      goalState.lastActionSignature = actHash;
+      run.lastObservationHash = obsHash;
+      run.lastActionHash = actHash;
+      // ── End loop detection ───────────────────────────────────────────────
 
       // executing_tools → continuing
       transition(run, "continuing", tracer);

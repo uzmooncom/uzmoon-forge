@@ -742,6 +742,8 @@ export type NormalizedAgentDecision =
       kind: "final";
       content: string;
       proposalFenceRaw?: string;
+      /** Structured outcome parsed from forge_final JSON (project mode) */
+      outcome?: ForgeAgentFinal;
     }
   | {
       /**
@@ -752,6 +754,47 @@ export type NormalizedAgentDecision =
       reason: string;
       recoverable: boolean;
     };
+
+/**
+ * V0.9 — Structured outcome that model must provide inside forge_final envelope.
+ * status: 'completed' = goal achieved; 'blocked' = could not proceed;
+ * 'failed' = goal not achieved.
+ */
+export interface ForgeAgentFinal {
+  status: "completed" | "blocked" | "failed";
+  summary: string;
+  evidenceRefs?: string[];
+}
+
+/**
+ * Request-scoped goal progress state for loop/stall detection.
+ * Created at processItem start, updated on each tool call.
+ */
+export interface AgentGoalState {
+  requestId: string;
+  conversationId: string;
+  goal: string;
+  stuckScore: number;
+  lastObservationHash: string;
+  lastActionSignature: string;
+  sameObservationCount: number;
+  sameActionCount: number;
+  effectObserved: boolean;
+  toolCallCount: number;
+  replanCount: number;
+}
+
+/**
+ * Pending browser JS dialog awaiting agent or policy decision.
+ */
+export interface BrowserPendingDialog {
+  id: string;
+  tabId: string;
+  type: "alert" | "confirm" | "prompt" | "beforeunload";
+  message: string;
+  defaultValue?: string;  // for prompt dialogs
+  requestedAt: number;
+}
 
 /**
  * V0.6 — Agent run state machine states.
@@ -765,6 +808,7 @@ export type AgentRunState =
   | "executing_tools"
   | "continuing"
   | "finalizing"
+  | "waiting_for_human"
   | "completed"
   | "cancelled"
   | "failed";
@@ -786,6 +830,12 @@ export interface AgentRun {
   readByteCount: number;
   failureCode?: string;
   failureMessage?: string;
+  /** Loop/stall detection: number of consecutive repeated observations */
+  stuckScore: number;
+  /** Hash of last observation for stall detection */
+  lastObservationHash?: string;
+  /** Hash of last action signature for stall detection */
+  lastActionHash?: string;
 }
 
 /** IPC channels for V0.4 agent tool ledger */
@@ -849,7 +899,17 @@ export type ForgeFailureCode =
   | "BROWSER_PRIVATE_SESSION_CLOSED"
   | "BROWSER_DOWNLOAD_BLOCKED"
   | "BROWSER_UNSAFE_URL"
-  | "BROWSER_CONTENT_TOO_LARGE";
+  | "BROWSER_CONTENT_TOO_LARGE"
+  | "BROWSER_DIALOG_DEADLOCK"
+  | "BROWSER_HUMAN_TAKEOVER"
+  | "BROWSER_UPLOAD_FAILED"
+  | "BROWSER_MEDIA_NOT_FOUND"
+  | "BROWSER_FRAME_NOT_FOUND"
+  | "BROWSER_SHADOW_ROOT_CLOSED"
+  | "AGENT_GOAL_STALLED"
+  | "AGENT_FINAL_INTENT_ONLY"
+  | "AGENT_FINAL_MISSING_STATUS"
+  | "AGENT_WAITING_FOR_HUMAN";
 
 /** Severity levels for invariants and incidents */
 export type ForgeSeverity = "critical" | "high" | "medium" | "low";
@@ -1508,6 +1568,34 @@ export interface BrowserAgentBudget {
   readBytesUsed: number;
 }
 
+/** Extended wait conditions for browser_wait_for */
+export type BrowserWaitConditionExtended =
+  | "page_load"
+  | "text_present"
+  | "text_absent"
+  | "url_matches"
+  | "url_equals"
+  | "title_contains"
+  | "element_present"
+  | "element_absent"
+  | "element_enabled"
+  | "navigation_settled"
+  | "network_quiet";
+
+/** Media state exposed to model (sensitive URL parts redacted) */
+export interface BrowserMediaState {
+  ref: string;
+  elementTag: "video" | "audio";
+  srcRedacted: string;
+  paused: boolean;
+  muted: boolean;
+  volume: number;
+  currentTime: number;
+  duration: number;
+  readyState: number;
+  visible: boolean;
+}
+
 /** Browser operation limits */
 export const BROWSER_LIMITS = {
   /** Max agent browser actions per AgentRun */
@@ -1598,6 +1686,17 @@ export const BROWSER_IPC = {
   BROWSER_STATUS:        "browser:status",
   // Approval dialog shown in browser renderer
   APPROVAL_SHOW:         "browser:approvalShow",
+  // Agent run waiting for human (CAPTCHA/MFA)
+  WAITING_FOR_HUMAN:     "browser:waitingForHuman",
+  // Agent control released (terminal path)
+  AGENT_CONTROL_RELEASED: "browser:agentControlReleased",
+  // JS dialog intercepted — notify renderer (for agent tools)
+  DIALOG_PENDING:        "browser:dialogPending",
+  DIALOG_RESOLVED:       "browser:dialogResolved",
+  // Human takeover detected
+  HUMAN_TAKEOVER:        "browser:humanTakeover",
+  // Return control to agent
+  RETURN_CONTROL:        "browser:returnControl",
 } as const;
 
 // ── Dev Process (Long-Running Project Processes) ──────────────────────────

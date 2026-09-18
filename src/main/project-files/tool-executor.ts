@@ -34,6 +34,17 @@ import {
   type BrowserCreateSessionArgs,
   type BrowserUseSessionArgs,
   type BrowserWaitForArgs,
+  type BrowserHoverArgs,
+  type BrowserDoubleClickArgs,
+  type BrowserDragArgs,
+  type BrowserFocusArgs,
+  type BrowserClearArgs,
+  type BrowserScrollIntoViewArgs,
+  type BrowserCheckboxArgs,
+  type BrowserUploadFileArgs,
+  type BrowserGetMediaArgs,
+  type BrowserControlMediaArgs,
+  type BrowserHandleDialogArgs,
   type StartProjectProcessArgs,
   type ReadProjectProcessOutputArgs,
   type StopProjectProcessArgs,
@@ -200,6 +211,40 @@ export async function executeProjectTool(
       break;
     case "browser_wait_for":
       result = await handleBrowserWaitFor(call, validation.args as BrowserWaitForArgs, ctx);
+      break;
+    // ── Browser Runtime V3 — Extended Interaction ────────────────────────
+    case "browser_hover":
+      result = await handleBrowserRefAction(call, "hover", validation.args as BrowserHoverArgs, ctx);
+      break;
+    case "browser_double_click":
+      result = await handleBrowserRefAction(call, "double_click", validation.args as BrowserDoubleClickArgs, ctx);
+      break;
+    case "browser_focus":
+      result = await handleBrowserRefAction(call, "focus", validation.args as BrowserFocusArgs, ctx);
+      break;
+    case "browser_clear":
+      result = await handleBrowserRefAction(call, "clear", validation.args as BrowserClearArgs, ctx);
+      break;
+    case "browser_scroll_into_view":
+      result = await handleBrowserRefAction(call, "scroll_into_view", validation.args as BrowserScrollIntoViewArgs, ctx);
+      break;
+    case "browser_drag":
+      result = await handleBrowserDrag(call, validation.args as BrowserDragArgs, ctx);
+      break;
+    case "browser_checkbox":
+      result = await handleBrowserCheckbox(call, validation.args as BrowserCheckboxArgs, ctx);
+      break;
+    case "browser_upload_file":
+      result = await handleBrowserUploadFile(call, validation.args as BrowserUploadFileArgs, ctx);
+      break;
+    case "browser_get_media":
+      result = await handleBrowserGetMedia(call, validation.args as BrowserGetMediaArgs, ctx);
+      break;
+    case "browser_control_media":
+      result = await handleBrowserControlMedia(call, validation.args as BrowserControlMediaArgs, ctx);
+      break;
+    case "browser_handle_dialog":
+      result = await handleBrowserHandleDialog(call, validation.args as BrowserHandleDialogArgs, ctx);
       break;
     case "is_browser_open":
       result = await handleIsBrowserOpen(call, ctx);
@@ -1189,8 +1234,7 @@ async function handleBrowserSelect(
   const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
   if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
   try {
-    // For select elements, fill with the option value
-    await bm.agentFill(ctrl, args.tab_id, args.ref, args.value);
+    await bm.agentSelect(ctrl, args.tab_id, args.ref, args.value);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref, value: args.value } } };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1331,6 +1375,37 @@ async function handleBrowserWaitFor(
         case 'url_matches':
           met = !!args.value && snapshot.url.includes(args.value);
           break;
+        case 'url_equals':
+          met = !!args.value && snapshot.url === args.value;
+          break;
+        case 'title_contains':
+          met = !!args.value && snapshot.title.toLowerCase().includes(args.value.toLowerCase());
+          break;
+        case 'element_present':
+          // value is a ref string — check if it exists in the element list
+          met = !!args.value && snapshot.elements.some((el: { ref: string }) => el.ref === args.value);
+          break;
+        case 'element_absent':
+          met = !args.value || !snapshot.elements.some((el: { ref: string }) => el.ref === args.value);
+          break;
+        case 'element_enabled': {
+          // value is a ref string — check if element exists and is not disabled
+          const target = args.value ? snapshot.elements.find((el: { ref: string; disabled?: boolean }) => el.ref === args.value) : null;
+          met = !!target && target.disabled !== true;
+          break;
+        }
+        case 'navigation_settled':
+          // agentReadPage succeeding means the page content is stable
+          // Additional check: URL should not be about:blank
+          met = snapshot.url !== 'about:blank' && snapshot.url !== '';
+          break;
+        case 'network_quiet': {
+          // Check if recent network activity has settled (no requests in last 500ms)
+          const netSummary = bm.agentGetNetworkSummary(ctrl, args.tab_id);
+          const since = Date.now() - 1000;
+          met = netSummary.filter((r: { timestamp: number }) => r.timestamp > since).length === 0;
+          break;
+        }
       }
       if (!met) await new Promise((r) => setTimeout(r, POLL_MS));
     }
@@ -1371,6 +1446,145 @@ async function handleBrowserOpen(
     bm.requestShowBrowser();
     const isOpen = bm.isBrowserWindowOpen();
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { opened: true, alreadyOpen: isOpen } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+// ── Browser Runtime V3 handlers ───────────────────────────────────────────
+
+/** Generic handler for single-ref actions (hover, double_click, focus, clear, scroll_into_view). */
+async function handleBrowserRefAction(
+  call: ForgeToolCall,
+  action: 'hover' | 'double_click' | 'focus' | 'clear' | 'scroll_into_view',
+  args: { tab_id: string; ref: string },
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    switch (action) {
+      case 'hover':           await bm.agentHover(ctrl, args.tab_id, args.ref); break;
+      case 'double_click':    await bm.agentDoubleClick(ctrl, args.tab_id, args.ref); break;
+      case 'focus':           await bm.agentFocus(ctrl, args.tab_id, args.ref); break;
+      case 'clear':           await bm.agentClear(ctrl, args.tab_id, args.ref); break;
+      case 'scroll_into_view': await bm.agentScrollIntoView(ctrl, args.tab_id, args.ref); break;
+    }
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref, action } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserDrag(
+  call: ForgeToolCall,
+  args: BrowserDragArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    await bm.agentDrag(ctrl, args.tab_id, args.source_ref, args.target_ref);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, sourceRef: args.source_ref, targetRef: args.target_ref } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserCheckbox(
+  call: ForgeToolCall,
+  args: BrowserCheckboxArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    await bm.agentCheckbox(ctrl, args.tab_id, args.ref, args.checked);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref, checked: args.checked } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserUploadFile(
+  call: ForgeToolCall,
+  args: BrowserUploadFileArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    // Security: file must be within the project root
+    const path_ = await import('path');
+    const resolvedPath = path_.resolve(args.file_path);
+    if (!resolvedPath.startsWith(ctx.projectRoot)) {
+      return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'browser_upload_file: file must be within the project root' } };
+    }
+    const result = await bm.agentUploadFile(ctrl, args.tab_id, args.ref, resolvedPath);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref, ...result } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const code = msg.startsWith('BROWSER_UPLOAD_FAILED') ? 'UPLOAD_FAILED' : 'TOOL_ERROR';
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: code, errorMessage: msg } };
+  }
+}
+
+async function handleBrowserGetMedia(
+  call: ForgeToolCall,
+  args: BrowserGetMediaArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    const media = await bm.agentGetMedia(ctrl, args.tab_id);
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, media, count: media.length } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserControlMedia(
+  call: ForgeToolCall,
+  args: BrowserControlMediaArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    const result = await bm.agentControlMedia(ctrl, args.tab_id, args.action as never, args.ref, args.value);
+    return { result: { callId: call.callId, toolName: call.name, ok: result.ok, data: { tabId: args.tab_id, action: args.action, ...result } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+async function handleBrowserHandleDialog(
+  call: ForgeToolCall,
+  args: BrowserHandleDialogArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
+  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  try {
+    const resolved = bm.resolvePendingDialog(args.tab_id, args.dialog_id, args.action, args.value);
+    if (!resolved) {
+      return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'DIALOG_NOT_FOUND', errorMessage: `No pending dialog with id ${args.dialog_id} in tab ${args.tab_id}` } };
+    }
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, dialogId: args.dialog_id, action: args.action } } };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };

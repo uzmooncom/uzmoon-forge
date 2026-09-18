@@ -600,6 +600,8 @@ function _wireTabEvents(tabId: string, view: import("electron").WebContentsView)
         recordNavigation(sessionForHistory.profileId, url, title);
       }
     }
+    // Install dialog interceptors so window.alert/confirm/prompt are interceptable
+    installDialogInterceptor(tabId).catch(() => { /* non-fatal */ });
   });
 
   wc.on("did-fail-load", (_ev, code, desc, validatedUrl) => {
@@ -1501,6 +1503,538 @@ export function agentGetNetworkSummary(
     resourceType: e.resourceType,
     timestamp: e.timestamp,
   }));
+}
+
+// ── Browser Runtime V3 — Extended Interaction ──────────────────────────────
+
+/** Generic ref resolver used by multiple V3 actions. Searches standard selectors + shadow DOM. */
+const _RESOLVE_REF_SCRIPT = `
+(function resolveRef(refTarget) {
+  const SELECTORS = [
+    'button', 'a[href]', 'input', 'select', 'textarea',
+    '[role="button"]', '[role="link"]', '[role="textbox"]',
+    '[role="checkbox"]', '[role="radio"]', '[role="combobox"]',
+    'h1', 'h2', 'h3', '[tabindex]', '[contenteditable]',
+  ];
+  function collectNodes(root) {
+    const found = Array.from(root.querySelectorAll(SELECTORS.join(',')));
+    const shadows = [];
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) shadows.push(...collectNodes(el.shadowRoot));
+    }
+    return [...found, ...shadows];
+  }
+  const nodes = collectNodes(document);
+  const MAX_ELEMENTS = 500;
+  let refCounter = { b: 0, l: 0, i: 0, s: 0, t: 0, h: 0, o: 0 };
+  for (const node of nodes.slice(0, MAX_ELEMENTS)) {
+    const tag = node.tagName.toLowerCase();
+    const role = node.getAttribute ? (node.getAttribute('role') || tag) : tag;
+    let prefix = 'o';
+    if (tag === 'button' || role === 'button') prefix = 'b';
+    else if (tag === 'a') prefix = 'l';
+    else if (tag === 'input' || tag === 'textarea' || role === 'textbox') prefix = 'i';
+    else if (tag === 'select' || role === 'combobox') prefix = 's';
+    else if (['h1','h2','h3'].includes(tag)) prefix = 'h';
+    const r = prefix + (++refCounter[prefix] || 0);
+    if (r === refTarget) return node;
+  }
+  return null;
+})
+`;
+
+/** Hover over an element by ref (triggers mouseenter/mouseover). */
+export async function agentHover(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+  ref: string,
+): Promise<void> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  const tab = getBrowserTab(true, tabId);
+  if (!view || !tab) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _checkElementRefCurrent(tabId, tab.navigationGeneration);
+  _incrementBudget(ctrl.requestId, "action");
+  try {
+    await view.webContents.executeJavaScript(`
+      (function() {
+        const resolve = ${_RESOLVE_REF_SCRIPT};
+        const node = resolve(${JSON.stringify(ref)});
+        if (!node) return false;
+        node.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+        node.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        return true;
+      })()
+    `);
+  } catch (err) {
+    throw new Error(`BROWSER_ACTION_FAILED: hover failed — ${(err as Error).message}`);
+  }
+  emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "hover", tabId, ref });
+}
+
+/** Double-click an element by ref. */
+export async function agentDoubleClick(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+  ref: string,
+): Promise<void> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  const tab = getBrowserTab(true, tabId);
+  if (!view || !tab) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _checkElementRefCurrent(tabId, tab.navigationGeneration);
+  _incrementBudget(ctrl.requestId, "action");
+  try {
+    await view.webContents.executeJavaScript(`
+      (function() {
+        const resolve = ${_RESOLVE_REF_SCRIPT};
+        const node = resolve(${JSON.stringify(ref)});
+        if (!node) return false;
+        node.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }));
+        return true;
+      })()
+    `);
+  } catch (err) {
+    throw new Error(`BROWSER_ACTION_FAILED: double_click failed — ${(err as Error).message}`);
+  }
+  emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "double_click", tabId, ref });
+}
+
+/** Drag source element and drop onto target element. */
+export async function agentDrag(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+  sourceRef: string,
+  targetRef: string,
+): Promise<void> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  const tab = getBrowserTab(true, tabId);
+  if (!view || !tab) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _checkElementRefCurrent(tabId, tab.navigationGeneration);
+  _incrementBudget(ctrl.requestId, "action");
+  try {
+    await view.webContents.executeJavaScript(`
+      (function() {
+        const resolve = ${_RESOLVE_REF_SCRIPT};
+        const src = resolve(${JSON.stringify(sourceRef)});
+        const tgt = resolve(${JSON.stringify(targetRef)});
+        if (!src || !tgt) return false;
+        const dt = new DataTransfer();
+        src.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        tgt.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        tgt.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        src.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        return true;
+      })()
+    `);
+  } catch (err) {
+    throw new Error(`BROWSER_ACTION_FAILED: drag failed — ${(err as Error).message}`);
+  }
+  emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "drag", tabId, sourceRef, targetRef });
+}
+
+/** Focus an element without clicking. */
+export async function agentFocus(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+  ref: string,
+): Promise<void> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  const tab = getBrowserTab(true, tabId);
+  if (!view || !tab) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _checkElementRefCurrent(tabId, tab.navigationGeneration);
+  _incrementBudget(ctrl.requestId, "action");
+  try {
+    await view.webContents.executeJavaScript(`
+      (function() {
+        const resolve = ${_RESOLVE_REF_SCRIPT};
+        const node = resolve(${JSON.stringify(ref)});
+        if (!node) return false;
+        node.focus();
+        return true;
+      })()
+    `);
+  } catch (err) {
+    throw new Error(`BROWSER_ACTION_FAILED: focus failed — ${(err as Error).message}`);
+  }
+  emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "focus", tabId, ref });
+}
+
+/** Clear an input or contenteditable element. */
+export async function agentClear(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+  ref: string,
+): Promise<void> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  const tab = getBrowserTab(true, tabId);
+  if (!view || !tab) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _checkElementRefCurrent(tabId, tab.navigationGeneration);
+  _incrementBudget(ctrl.requestId, "action");
+  try {
+    await view.webContents.executeJavaScript(`
+      (function() {
+        const resolve = ${_RESOLVE_REF_SCRIPT};
+        const node = resolve(${JSON.stringify(ref)});
+        if (!node) return false;
+        if ('value' in node) {
+          node.value = '';
+          node.dispatchEvent(new Event('input', { bubbles: true }));
+          node.dispatchEvent(new Event('change', { bubbles: true }));
+        } else if (node.contentEditable === 'true') {
+          node.textContent = '';
+          node.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        return true;
+      })()
+    `);
+  } catch (err) {
+    throw new Error(`BROWSER_ACTION_FAILED: clear failed — ${(err as Error).message}`);
+  }
+  emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "clear", tabId, ref });
+}
+
+/** Scroll an element into the viewport. */
+export async function agentScrollIntoView(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+  ref: string,
+): Promise<void> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  const tab = getBrowserTab(true, tabId);
+  if (!view || !tab) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _checkElementRefCurrent(tabId, tab.navigationGeneration);
+  _incrementBudget(ctrl.requestId, "action");
+  try {
+    await view.webContents.executeJavaScript(`
+      (function() {
+        const resolve = ${_RESOLVE_REF_SCRIPT};
+        const node = resolve(${JSON.stringify(ref)});
+        if (!node) return false;
+        node.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        return true;
+      })()
+    `);
+  } catch (err) {
+    throw new Error(`BROWSER_ACTION_FAILED: scroll_into_view failed — ${(err as Error).message}`);
+  }
+  emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "scroll_into_view", tabId, ref });
+}
+
+/** Set checked state of a checkbox or radio button. */
+export async function agentCheckbox(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+  ref: string,
+  checked: boolean,
+): Promise<void> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  const tab = getBrowserTab(true, tabId);
+  if (!view || !tab) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _checkElementRefCurrent(tabId, tab.navigationGeneration);
+  _incrementBudget(ctrl.requestId, "action");
+  try {
+    await view.webContents.executeJavaScript(`
+      (function() {
+        const resolve = ${_RESOLVE_REF_SCRIPT};
+        const node = resolve(${JSON.stringify(ref)});
+        if (!node) return false;
+        const el = node;
+        if (el.type !== 'checkbox' && el.type !== 'radio') return false;
+        if (el.checked !== ${checked}) {
+          el.click(); // triggers change event naturally
+        }
+        return true;
+      })()
+    `);
+  } catch (err) {
+    throw new Error(`BROWSER_ACTION_FAILED: checkbox failed — ${(err as Error).message}`);
+  }
+  emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "checkbox", tabId, ref, checked });
+}
+
+/** Set a native <select> element to the given option value — proper implementation. */
+export async function agentSelect(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+  ref: string,
+  value: string,
+): Promise<void> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  const tab = getBrowserTab(true, tabId);
+  if (!view || !tab) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _checkElementRefCurrent(tabId, tab.navigationGeneration);
+  _incrementBudget(ctrl.requestId, "action");
+  try {
+    await view.webContents.executeJavaScript(`
+      (function() {
+        const resolve = ${_RESOLVE_REF_SCRIPT};
+        const node = resolve(${JSON.stringify(ref)});
+        if (!node) return false;
+        if (node.tagName && node.tagName.toLowerCase() === 'select') {
+          node.value = ${JSON.stringify(value)};
+          node.dispatchEvent(new Event('change', { bubbles: true }));
+          node.dispatchEvent(new Event('input', { bubbles: true }));
+        } else {
+          // contenteditable or custom combobox — fall back to fill
+          node.focus();
+          if ('value' in node) {
+            node.value = ${JSON.stringify(value)};
+            node.dispatchEvent(new Event('input', { bubbles: true }));
+            node.dispatchEvent(new Event('change', { bubbles: true }));
+          } else {
+            node.textContent = ${JSON.stringify(value)};
+            node.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        }
+        return true;
+      })()
+    `);
+  } catch (err) {
+    throw new Error(`BROWSER_ACTION_FAILED: select failed — ${(err as Error).message}`);
+  }
+  emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "select", tabId, ref, value });
+}
+
+/** Inject a file into an input[type=file] element via DataTransfer simulation. */
+export async function agentUploadFile(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+  ref: string,
+  filePath: string,
+): Promise<{ fileName: string; fileSizeBytes: number }> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  const tab = getBrowserTab(true, tabId);
+  if (!view || !tab) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _checkElementRefCurrent(tabId, tab.navigationGeneration);
+
+  // Read file content from disk — must be project-scoped path
+  let fileContent: Buffer;
+  let fileName: string;
+  try {
+    fileContent = fs.readFileSync(filePath);
+    fileName = path.basename(filePath);
+  } catch (err) {
+    throw new Error(`BROWSER_UPLOAD_FAILED: cannot read file ${filePath} — ${(err as Error).message}`);
+  }
+
+  _incrementBudget(ctrl.requestId, "action");
+
+  // Inject via executeJavaScript — build a File object from base64 content
+  const base64 = fileContent.toString("base64");
+  const mimeType = _guessMimeType(filePath);
+  try {
+    const injected = await view.webContents.executeJavaScript(`
+      (function() {
+        const resolve = ${_RESOLVE_REF_SCRIPT};
+        const node = resolve(${JSON.stringify(ref)});
+        if (!node || node.tagName.toLowerCase() !== 'input' || node.type !== 'file') return false;
+        const byteStr = atob(${JSON.stringify(base64)});
+        const bytes = new Uint8Array(byteStr.length);
+        for (let i = 0; i < byteStr.length; i++) bytes[i] = byteStr.charCodeAt(i);
+        const blob = new Blob([bytes], { type: ${JSON.stringify(mimeType)} });
+        const file = new File([blob], ${JSON.stringify(fileName)}, { type: ${JSON.stringify(mimeType)} });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        Object.defineProperty(node, 'files', { value: dt.files, writable: false });
+        node.dispatchEvent(new Event('change', { bubbles: true }));
+        node.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()
+    `);
+    if (!injected) throw new Error("BROWSER_UPLOAD_FAILED: element ref not found or not an input[type=file]");
+  } catch (err) {
+    if ((err as Error).message.startsWith("BROWSER_UPLOAD_FAILED")) throw err;
+    throw new Error(`BROWSER_UPLOAD_FAILED: injection failed — ${(err as Error).message}`);
+  }
+
+  emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "upload_file", tabId, ref, fileName, fileSizeBytes: fileContent.length });
+  return { fileName, fileSizeBytes: fileContent.length };
+}
+
+function _guessMimeType(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const mimeMap: Record<string, string> = {
+    '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
+    '.svg': 'image/svg+xml', '.txt': 'text/plain', '.csv': 'text/csv',
+    '.json': 'application/json', '.zip': 'application/zip',
+    '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xls': 'application/vnd.ms-excel', '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  };
+  return mimeMap[ext] ?? 'application/octet-stream';
+}
+
+/** Enumerate all video/audio elements in the tab. */
+export async function agentGetMedia(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+): Promise<import('../../shared/types.js').BrowserMediaState[]> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  if (!view) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _incrementBudget(ctrl.requestId, "action");
+  try {
+    const result = await view.webContents.executeJavaScript(`
+      (function() {
+        const elements = Array.from(document.querySelectorAll('video, audio'));
+        let counter = { video: 0, audio: 0 };
+        return elements.map(el => {
+          const tag = el.tagName.toLowerCase();
+          const ref = 'media-' + tag + '-' + (++counter[tag]);
+          const rect = el.getBoundingClientRect();
+          const srcRaw = el.src || el.currentSrc || '';
+          // Redact auth tokens from src URLs
+          let srcRedacted = srcRaw;
+          try { const u = new URL(srcRaw); u.searchParams.delete('token'); u.searchParams.delete('key'); srcRedacted = u.toString(); } catch {}
+          return {
+            ref,
+            elementTag: tag,
+            srcRedacted,
+            paused: el.paused,
+            muted: el.muted,
+            volume: el.volume,
+            currentTime: el.currentTime,
+            duration: isFinite(el.duration) ? el.duration : -1,
+            readyState: el.readyState,
+            visible: rect.width > 0 && rect.height > 0,
+          };
+        });
+      })()
+    `);
+    return result as import('../../shared/types.js').BrowserMediaState[];
+  } catch (err) {
+    throw new Error(`BROWSER_MEDIA_NOT_FOUND: cannot enumerate media — ${(err as Error).message}`);
+  }
+}
+
+/** Control a media element (play/pause/mute/etc.). */
+export async function agentControlMedia(
+  ctrl: BrowserAgentControl,
+  tabId: string,
+  action: import('../../shared/types.js').BrowserMediaState['ref'] extends string ? import('../../main/../main/agent-client/tool-types.js').BrowserMediaAction : never,
+  ref: string | undefined,
+  value: number | undefined,
+): Promise<{ ok: boolean; targetRef?: string }> {
+  validateAgentControl(ctrl.sessionId, ctrl.requestId, ctrl.tabId);
+  _checkActionBudget(ctrl.requestId, "action");
+  const view = _tabViews.get(tabId);
+  if (!view) throw new Error(`BROWSER_TAB_NOT_FOUND: ${tabId}`);
+  _incrementBudget(ctrl.requestId, "action");
+  try {
+    const result = await view.webContents.executeJavaScript(`
+      (function() {
+        const refTarget = ${JSON.stringify(ref ?? null)};
+        const actionName = ${JSON.stringify(action)};
+        const actionValue = ${JSON.stringify(value ?? null)};
+        let elements = Array.from(document.querySelectorAll('video, audio'));
+        let target = null;
+        if (refTarget) {
+          let counter = { video: 0, audio: 0 };
+          for (const el of elements) {
+            const tag = el.tagName.toLowerCase();
+            const r = 'media-' + tag + '-' + (++counter[tag]);
+            if (r === refTarget) { target = el; break; }
+          }
+        } else {
+          // Target first playing (not paused) or first audible element
+          target = elements.find(el => !el.paused && !el.muted) || elements.find(el => !el.paused) || elements[0] || null;
+        }
+        if (!target) return { ok: false };
+        if (actionName === 'play') target.play();
+        else if (actionName === 'pause') target.pause();
+        else if (actionName === 'mute') target.muted = true;
+        else if (actionName === 'unmute') target.muted = false;
+        else if (actionName === 'set_volume') target.volume = Math.max(0, Math.min(1, actionValue));
+        else if (actionName === 'seek') target.currentTime = actionValue;
+        else if (actionName === 'fullscreen_mute') { elements.forEach(el => el.muted = true); }
+        return { ok: true };
+      })()
+    `);
+    return result as { ok: boolean; targetRef?: string };
+  } catch (err) {
+    throw new Error(`BROWSER_ACTION_FAILED: control_media failed — ${(err as Error).message}`);
+  }
+}
+
+// ── Dialog interception ────────────────────────────────────────────────────
+
+/** Pending JS dialogs per tab: tabId → array of pending dialogs */
+const _pendingDialogs = new Map<string, import('../../shared/types.js').BrowserPendingDialog[]>();
+/** Dialog resolve callbacks: dialogId → resolve function */
+const _dialogResolvers = new Map<string, (result: { action: 'accept' | 'dismiss'; value?: string }) => void>();
+
+/**
+ * Install dialog interceptors in a tab via executeJavaScript.
+ * Called in did-finish-load. Overrides window.alert/confirm/prompt
+ * to emit IPC bridge messages instead of blocking.
+ */
+export async function installDialogInterceptor(tabId: string): Promise<void> {
+  const view = _tabViews.get(tabId);
+  if (!view) return;
+  try {
+    await view.webContents.executeJavaScript(`
+      (function() {
+        if (window.__forgeDialogInstalled) return;
+        window.__forgeDialogInstalled = true;
+        function sendDialog(type, message, defaultValue) {
+          return new Promise(function(resolve) {
+            const id = 'dialog-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+            window.__forgeDialogCallbacks = window.__forgeDialogCallbacks || {};
+            window.__forgeDialogCallbacks[id] = resolve;
+            window.postMessage({ __forge: true, type: 'dialog', dialogType: type, message, defaultValue, id }, '*');
+          });
+        }
+        window.alert = function(msg) { sendDialog('alert', String(msg)); };
+        window.confirm = function(msg) { return sendDialog('confirm', String(msg)); };
+        window.prompt = function(msg, def) { return sendDialog('prompt', String(msg), def); };
+      })()
+    `);
+  } catch { /* non-fatal — page may not support it */ }
+}
+
+/** Register a pending dialog (called from the WebContents dialog event listener). */
+export function registerPendingDialog(tabId: string, dialog: import('../../shared/types.js').BrowserPendingDialog): void {
+  const arr = _pendingDialogs.get(tabId) ?? [];
+  arr.push(dialog);
+  _pendingDialogs.set(tabId, arr);
+  pushToRenderer(BROWSER_IPC.DIALOG_PENDING, { tabId, dialog });
+}
+
+/** Resolve a pending dialog (called by browser_handle_dialog tool). */
+export function resolvePendingDialog(tabId: string, dialogId: string, action: 'accept' | 'dismiss', value?: string): boolean {
+  const arr = _pendingDialogs.get(tabId);
+  if (!arr) return false;
+  const idx = arr.findIndex((d) => d.id === dialogId);
+  if (idx === -1) return false;
+  arr.splice(idx, 1);
+  if (arr.length === 0) _pendingDialogs.delete(tabId); else _pendingDialogs.set(tabId, arr);
+  const resolver = _dialogResolvers.get(dialogId);
+  if (resolver) { resolver({ action, ...(value !== undefined && { value }) }); _dialogResolvers.delete(dialogId); }
+  pushToRenderer(BROWSER_IPC.DIALOG_RESOLVED, { tabId, dialogId, action });
+  return true;
+}
+
+/** Get pending dialogs for a tab. */
+export function getPendingDialogs(tabId: string): import('../../shared/types.js').BrowserPendingDialog[] {
+  return (_pendingDialogs.get(tabId) ?? []).slice();
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────

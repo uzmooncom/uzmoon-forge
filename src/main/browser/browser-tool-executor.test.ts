@@ -11,7 +11,7 @@
  * - `browser_select` args use `ref` + `value` (not `element_ref` / `option_value`)
  * - `browser_open_url` calls `bm.agentOpenUrl(ctrl, tabId, url)` (not `navigateTab`)
  * - `browser_close_tab` calls `bm.closeBrowserTab()` unconditionally (no tab existence check)
- * - `browser_select` uses `bm.agentFill` internally
+ * - `browser_select` uses `bm.agentSelect` internally
  * - Results return `data` field (not `output`)
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -39,11 +39,27 @@ const mockBm = {
   agentClick: vi.fn(),
   agentType: vi.fn(),
   agentFill: vi.fn(),
+  agentSelect: vi.fn(),
   agentPressKey: vi.fn(),
   agentScroll: vi.fn(),
   agentScreenshot: vi.fn(),
   agentGetConsole: vi.fn(),
   agentGetNetworkSummary: vi.fn(),
+  // Browser Runtime V3
+  agentHover: vi.fn(),
+  agentDoubleClick: vi.fn(),
+  agentDrag: vi.fn(),
+  agentFocus: vi.fn(),
+  agentClear: vi.fn(),
+  agentScrollIntoView: vi.fn(),
+  agentCheckbox: vi.fn(),
+  agentUploadFile: vi.fn(),
+  agentGetMedia: vi.fn(),
+  agentControlMedia: vi.fn(),
+  resolvePendingDialog: vi.fn(),
+  isBrowserWindowOpen: vi.fn(),
+  getBrowserStatus: vi.fn(),
+  requestShowBrowser: vi.fn(),
 };
 
 vi.mock("../browser/browser-manager.js", () => mockBm);
@@ -399,14 +415,13 @@ describe("browser_fill", () => {
 // ── browser_select ────────────────────────────────────────────────────────
 
 describe("browser_select", () => {
-  it("calls agentFill (internally) with ctrl, tab_id, ref, value", async () => {
-    // browser_select uses agentFill internally with option value
-    mockBm.agentFill.mockResolvedValue(undefined);
+  it("calls agentSelect with ctrl, tab_id, ref, value", async () => {
+    mockBm.agentSelect.mockResolvedValue(undefined);
     await executeProjectTool(
       makeCall("browser_select", { tab_id: "tab-1", ref: "s1", value: "option-1" }),
       makeCtx(),
     );
-    expect(mockBm.agentFill).toHaveBeenCalledWith(mockCtrl, "tab-1", "s1", "option-1");
+    expect(mockBm.agentSelect).toHaveBeenCalledWith(mockCtrl, "tab-1", "s1", "option-1");
   });
 
   it("returns error when no agent control", async () => {
@@ -496,5 +511,167 @@ describe("browser_get_network_summary", () => {
     mockBm.agentGetNetworkSummary.mockReturnValue([]);
     const r = await executeProjectTool(makeCall("browser_get_network_summary", { tab_id: "tab-1" }), makeCtx());
     expect(r.result.ok).toBe(true);
+  });
+});
+
+// ── Browser Runtime V3 — Extended Interaction ─────────────────────────────
+
+describe("browser_hover", () => {
+  it("calls agentHover with ctrl, tab_id, ref", async () => {
+    mockBm.agentHover.mockResolvedValue(undefined);
+    await executeProjectTool(makeCall("browser_hover", { tab_id: "tab-1", ref: "b3" }), makeCtx());
+    expect(mockBm.agentHover).toHaveBeenCalledWith(mockCtrl, "tab-1", "b3");
+  });
+  it("returns error when no agent control", async () => {
+    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    const r = await executeProjectTool(makeCall("browser_hover", { tab_id: "tab-1", ref: "b3" }), makeCtx());
+    expect(r.result.ok).toBe(false);
+  });
+});
+
+describe("browser_double_click", () => {
+  it("calls agentDoubleClick with ctrl, tab_id, ref", async () => {
+    mockBm.agentDoubleClick.mockResolvedValue(undefined);
+    await executeProjectTool(makeCall("browser_double_click", { tab_id: "tab-1", ref: "b2" }), makeCtx());
+    expect(mockBm.agentDoubleClick).toHaveBeenCalledWith(mockCtrl, "tab-1", "b2");
+  });
+  it("returns error when no agent control", async () => {
+    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    const r = await executeProjectTool(makeCall("browser_double_click", { tab_id: "tab-1", ref: "b2" }), makeCtx());
+    expect(r.result.ok).toBe(false);
+  });
+});
+
+describe("browser_drag", () => {
+  it("calls agentDrag with ctrl, tab_id, sourceRef, targetRef", async () => {
+    mockBm.agentDrag.mockResolvedValue(undefined);
+    await executeProjectTool(makeCall("browser_drag", { tab_id: "tab-1", source_ref: "b1", target_ref: "b2" }), makeCtx());
+    expect(mockBm.agentDrag).toHaveBeenCalledWith(mockCtrl, "tab-1", "b1", "b2");
+  });
+  it("returns error when no agent control", async () => {
+    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    const r = await executeProjectTool(makeCall("browser_drag", { tab_id: "tab-1", source_ref: "b1", target_ref: "b2" }), makeCtx());
+    expect(r.result.ok).toBe(false);
+  });
+});
+
+describe("browser_focus", () => {
+  it("calls agentFocus with ctrl, tab_id, ref", async () => {
+    mockBm.agentFocus.mockResolvedValue(undefined);
+    await executeProjectTool(makeCall("browser_focus", { tab_id: "tab-1", ref: "i1" }), makeCtx());
+    expect(mockBm.agentFocus).toHaveBeenCalledWith(mockCtrl, "tab-1", "i1");
+  });
+});
+
+describe("browser_clear", () => {
+  it("calls agentClear with ctrl, tab_id, ref", async () => {
+    mockBm.agentClear.mockResolvedValue(undefined);
+    await executeProjectTool(makeCall("browser_clear", { tab_id: "tab-1", ref: "i2" }), makeCtx());
+    expect(mockBm.agentClear).toHaveBeenCalledWith(mockCtrl, "tab-1", "i2");
+  });
+});
+
+describe("browser_scroll_into_view", () => {
+  it("calls agentScrollIntoView with ctrl, tab_id, ref", async () => {
+    mockBm.agentScrollIntoView.mockResolvedValue(undefined);
+    await executeProjectTool(makeCall("browser_scroll_into_view", { tab_id: "tab-1", ref: "o5" }), makeCtx());
+    expect(mockBm.agentScrollIntoView).toHaveBeenCalledWith(mockCtrl, "tab-1", "o5");
+  });
+});
+
+describe("browser_checkbox", () => {
+  it("calls agentCheckbox with ctrl, tab_id, ref, checked=true", async () => {
+    mockBm.agentCheckbox.mockResolvedValue(undefined);
+    await executeProjectTool(makeCall("browser_checkbox", { tab_id: "tab-1", ref: "i3", checked: true }), makeCtx());
+    expect(mockBm.agentCheckbox).toHaveBeenCalledWith(mockCtrl, "tab-1", "i3", true);
+  });
+  it("calls agentCheckbox with checked=false", async () => {
+    mockBm.agentCheckbox.mockResolvedValue(undefined);
+    await executeProjectTool(makeCall("browser_checkbox", { tab_id: "tab-1", ref: "i3", checked: false }), makeCtx());
+    expect(mockBm.agentCheckbox).toHaveBeenCalledWith(mockCtrl, "tab-1", "i3", false);
+  });
+});
+
+describe("browser_upload_file", () => {
+  it("rejects files outside project root", async () => {
+    const r = await executeProjectTool(
+      makeCall("browser_upload_file", { tab_id: "tab-1", ref: "i4", file_path: "/etc/passwd" }),
+      makeCtx(),
+    );
+    expect(r.result.ok).toBe(false);
+    expect(r.result.errorCode).toBe("ACCESS_DENIED");
+  });
+  it("returns error when no agent control", async () => {
+    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    const r = await executeProjectTool(
+      makeCall("browser_upload_file", { tab_id: "tab-1", ref: "i4", file_path: "/project/file.txt" }),
+      makeCtx(),
+    );
+    expect(r.result.ok).toBe(false);
+    expect(r.result.errorCode).toBe("ACCESS_DENIED");
+  });
+});
+
+describe("browser_get_media", () => {
+  it("calls agentGetMedia and returns count", async () => {
+    const media = [{ ref: "media-video-1", elementTag: "video", srcRedacted: "", paused: true, muted: false, volume: 1, currentTime: 0, duration: 60, readyState: 4, visible: true }];
+    mockBm.agentGetMedia.mockResolvedValue(media);
+    const r = await executeProjectTool(makeCall("browser_get_media", { tab_id: "tab-1" }), makeCtx());
+    expect(r.result.ok).toBe(true);
+    expect((r.result as { ok: true; data: { count: number } }).data.count).toBe(1);
+  });
+  it("returns error when no agent control", async () => {
+    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    const r = await executeProjectTool(makeCall("browser_get_media", { tab_id: "tab-1" }), makeCtx());
+    expect(r.result.ok).toBe(false);
+  });
+});
+
+describe("browser_control_media", () => {
+  it("calls agentControlMedia and returns ok", async () => {
+    mockBm.agentControlMedia.mockResolvedValue({ ok: true });
+    const r = await executeProjectTool(
+      makeCall("browser_control_media", { tab_id: "tab-1", action: "pause" }),
+      makeCtx(),
+    );
+    expect(r.result.ok).toBe(true);
+    expect(mockBm.agentControlMedia).toHaveBeenCalledWith(mockCtrl, "tab-1", "pause", undefined, undefined);
+  });
+  it("passes ref and value when provided", async () => {
+    mockBm.agentControlMedia.mockResolvedValue({ ok: true });
+    await executeProjectTool(
+      makeCall("browser_control_media", { tab_id: "tab-1", action: "set_volume", ref: "media-video-1", value: 0.5 }),
+      makeCtx(),
+    );
+    expect(mockBm.agentControlMedia).toHaveBeenCalledWith(mockCtrl, "tab-1", "set_volume", "media-video-1", 0.5);
+  });
+});
+
+describe("browser_handle_dialog", () => {
+  it("calls resolvePendingDialog and returns ok", async () => {
+    mockBm.resolvePendingDialog.mockReturnValue(true);
+    const r = await executeProjectTool(
+      makeCall("browser_handle_dialog", { tab_id: "tab-1", dialog_id: "dialog-123", action: "accept" }),
+      makeCtx(),
+    );
+    expect(r.result.ok).toBe(true);
+    expect(mockBm.resolvePendingDialog).toHaveBeenCalledWith("tab-1", "dialog-123", "accept", undefined);
+  });
+  it("returns error when dialog not found", async () => {
+    mockBm.resolvePendingDialog.mockReturnValue(false);
+    const r = await executeProjectTool(
+      makeCall("browser_handle_dialog", { tab_id: "tab-1", dialog_id: "no-such", action: "dismiss" }),
+      makeCtx(),
+    );
+    expect(r.result.ok).toBe(false);
+    expect(r.result.errorCode).toBe("DIALOG_NOT_FOUND");
+  });
+  it("returns error when no agent control", async () => {
+    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    const r = await executeProjectTool(
+      makeCall("browser_handle_dialog", { tab_id: "tab-1", dialog_id: "d1", action: "accept" }),
+      makeCtx(),
+    );
+    expect(r.result.ok).toBe(false);
   });
 });

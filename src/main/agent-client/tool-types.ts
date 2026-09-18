@@ -98,6 +98,18 @@ export type KnownToolName =
   | "browser_create_session"
   | "browser_use_session"
   | "browser_wait_for"
+  // ── Browser Runtime V3 — Extended Interaction ────────────────────
+  | "browser_hover"
+  | "browser_double_click"
+  | "browser_drag"
+  | "browser_focus"
+  | "browser_clear"
+  | "browser_scroll_into_view"
+  | "browser_checkbox"
+  | "browser_upload_file"
+  | "browser_get_media"
+  | "browser_control_media"
+  | "browser_handle_dialog"
   // ── Browser Runtime V2.1 (read-only + open) ───────────────────────
   | "is_browser_open"
   | "get_browser_status"
@@ -143,6 +155,18 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   "browser_create_session",
   "browser_use_session",
   "browser_wait_for",
+  // Browser Runtime V3 — Extended Interaction
+  "browser_hover",
+  "browser_double_click",
+  "browser_drag",
+  "browser_focus",
+  "browser_clear",
+  "browser_scroll_into_view",
+  "browser_checkbox",
+  "browser_upload_file",
+  "browser_get_media",
+  "browser_control_media",
+  "browser_handle_dialog",
   // Browser Runtime V2.1
   "is_browser_open",
   "get_browser_status",
@@ -209,6 +233,18 @@ export interface ValidationOk {
     | BrowserCreateSessionArgs
     | BrowserUseSessionArgs
     | BrowserWaitForArgs
+    // Browser Runtime V3
+    | BrowserHoverArgs
+    | BrowserDoubleClickArgs
+    | BrowserDragArgs
+    | BrowserFocusArgs
+    | BrowserClearArgs
+    | BrowserScrollIntoViewArgs
+    | BrowserCheckboxArgs
+    | BrowserUploadFileArgs
+    | BrowserGetMediaArgs
+    | BrowserControlMediaArgs
+    | BrowserHandleDialogArgs
     // Dev Process
     | StartProjectProcessArgs
     | ReadProjectProcessOutputArgs
@@ -292,6 +328,18 @@ export function validateToolCall(call: ForgeToolCall): ValidationResult {
     case "browser_create_session":  return validateBrowserCreateSession(args);
     case "browser_use_session":     return validateBrowserUseSession(args);
     case "browser_wait_for":        return validateBrowserWaitFor(args);
+    // ── Browser Runtime V3 — Extended Interaction ─────────────────────
+    case "browser_hover":           return validateBrowserRefOnly("browser_hover", args);
+    case "browser_double_click":    return validateBrowserRefOnly("browser_double_click", args);
+    case "browser_drag":            return validateBrowserDrag(args);
+    case "browser_focus":           return validateBrowserRefOnly("browser_focus", args);
+    case "browser_clear":           return validateBrowserRefOnly("browser_clear", args);
+    case "browser_scroll_into_view": return validateBrowserRefOnly("browser_scroll_into_view", args);
+    case "browser_checkbox":        return validateBrowserCheckbox(args);
+    case "browser_upload_file":     return validateBrowserUploadFile(args);
+    case "browser_get_media":       return validateBrowserTabRef("browser_get_media", args);
+    case "browser_control_media":   return validateBrowserControlMedia(args);
+    case "browser_handle_dialog":   return validateBrowserHandleDialog(args);
     // ── Browser Runtime V2.1 ──────────────────────────────────────────
     case "is_browser_open":        return { ok: true, toolName: "is_browser_open", args: {} };
     case "get_browser_status":     return { ok: true, toolName: "get_browser_status", args: {} };
@@ -1050,18 +1098,75 @@ const TOOL_DEFS: Array<{
     name: 'browser_wait_for',
     description:
       'Wait until a condition is true in the browser tab. ' +
-      'Conditions: page_load (wait for load to complete), text_present (text appears), text_absent (text disappears), url_matches (URL contains substring). ' +
+      'Conditions: page_load, text_present, text_absent, url_matches, url_equals, title_contains, ' +
+      'element_present, element_absent, element_enabled, navigation_settled, network_quiet. ' +
       'Bounded timeout — do not use arbitrary sleeps instead.',
     parameters: {
       type: 'object',
       properties: {
         tab_id: { type: 'string', description: 'The tab_id.' },
-        condition: { type: 'string', enum: ['page_load', 'text_present', 'text_absent', 'url_matches'], description: 'Condition to wait for.' },
-        value: { type: 'string', description: 'Required for text_present, text_absent, url_matches.' },
+        condition: { type: 'string', enum: ['page_load', 'text_present', 'text_absent', 'url_matches', 'url_equals', 'title_contains', 'element_present', 'element_absent', 'element_enabled', 'navigation_settled', 'network_quiet'], description: 'Condition to wait for.' },
+        value: { type: 'string', description: 'Required for text_present, text_absent, url_matches, url_equals, title_contains, element_present/absent/enabled (element ref).' },
         timeout_ms: { type: 'number', description: 'Max wait in ms (default 10000, max 30000).' },
       },
       required: ['tab_id', 'condition'],
     },
+  },
+  // ── Browser Runtime V3 — Extended Interaction ────────────────────────────
+  {
+    name: 'browser_hover',
+    description: 'Move the mouse over an element without clicking. Triggers hover/tooltip state. Use before browser_click when a hover menu must open first.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, ref: { type: 'string', description: 'Element ref from browser_read_page.' } }, required: ['tab_id', 'ref'] },
+  },
+  {
+    name: 'browser_double_click',
+    description: 'Double-click an element. Use for opening items in file managers, activating inline editors, or any UI that requires double-click.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, ref: { type: 'string', description: 'Element ref from browser_read_page.' } }, required: ['tab_id', 'ref'] },
+  },
+  {
+    name: 'browser_drag',
+    description: 'Drag an element from source_ref and drop it on target_ref. Uses synthetic drag events.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, source_ref: { type: 'string', description: 'Element ref to drag.' }, target_ref: { type: 'string', description: 'Element ref to drop onto.' } }, required: ['tab_id', 'source_ref', 'target_ref'] },
+  },
+  {
+    name: 'browser_focus',
+    description: 'Focus an element without clicking or typing. Use to trigger focus-dependent validation or expand a widget.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, ref: { type: 'string', description: 'Element ref from browser_read_page.' } }, required: ['tab_id', 'ref'] },
+  },
+  {
+    name: 'browser_clear',
+    description: 'Clear the value of an input or contenteditable element, leaving it empty. Use before browser_fill when the existing value must be replaced.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, ref: { type: 'string', description: 'Element ref from browser_read_page.' } }, required: ['tab_id', 'ref'] },
+  },
+  {
+    name: 'browser_scroll_into_view',
+    description: 'Scroll the page so that an element is visible in the viewport. Use before interacting with elements that are below/above the fold.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, ref: { type: 'string', description: 'Element ref from browser_read_page.' } }, required: ['tab_id', 'ref'] },
+  },
+  {
+    name: 'browser_checkbox',
+    description: 'Set the checked state of a checkbox or radio input. Use instead of browser_click for reliable boolean state control.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, ref: { type: 'string', description: 'Element ref from browser_read_page.' }, checked: { type: 'boolean', description: 'Target checked state (true = check, false = uncheck).' } }, required: ['tab_id', 'ref', 'checked'] },
+  },
+  {
+    name: 'browser_upload_file',
+    description: 'Upload a file to an <input type="file"> element. The file must be a project-scoped path returned from read_file or a FileRef. The file content is injected via DataTransfer — no file dialog appears.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, ref: { type: 'string', description: 'Input[type=file] element ref.' }, file_path: { type: 'string', description: 'Absolute project-scoped file path.' } }, required: ['tab_id', 'ref', 'file_path'] },
+  },
+  {
+    name: 'browser_get_media',
+    description: 'Enumerate all <video> and <audio> elements in the current tab. Returns ref, tag, src (redacted), paused, muted, volume, currentTime, duration, and visible status. Use before browser_control_media.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' } }, required: ['tab_id'] },
+  },
+  {
+    name: 'browser_control_media',
+    description: 'Control a media element (video or audio). Actions: play, pause, mute, unmute, set_volume (value 0–1), seek (value = seconds), fullscreen_mute (mutes all). Omit ref to target the currently playing/audible media.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, action: { type: 'string', enum: ['play', 'pause', 'mute', 'unmute', 'set_volume', 'seek', 'fullscreen_mute'] }, ref: { type: 'string', description: 'Media element ref (optional — targets audible/playing if omitted).' }, value: { type: 'number', description: 'For set_volume (0–1) or seek (seconds).' } }, required: ['tab_id', 'action'] },
+  },
+  {
+    name: 'browser_handle_dialog',
+    description: 'Respond to a pending JS dialog (alert/confirm/prompt) intercepted in the browser tab. Call browser_read_page to see pending dialogs, then use this to accept or dismiss. For prompt dialogs, provide value.',
+    parameters: { type: 'object', properties: { tab_id: { type: 'string' }, dialog_id: { type: 'string', description: 'Dialog ID from the pending dialog list.' }, action: { type: 'string', enum: ['accept', 'dismiss'] }, value: { type: 'string', description: 'For prompt dialogs: the value to submit.' } }, required: ['tab_id', 'dialog_id', 'action'] },
   },
   // ── Browser Runtime V2.1 ────────────────────────────────────────────────
   {
@@ -1209,13 +1314,94 @@ export interface BrowserUseSessionArgs {
   purpose?: string;
 }
 
-export type BrowserWaitCondition = 'page_load' | 'text_present' | 'text_absent' | 'url_matches';
+/** Legacy 4-condition type kept for back-compat; new code uses BrowserWaitConditionExtended */
+export type BrowserWaitCondition =
+  | 'page_load'
+  | 'text_present'
+  | 'text_absent'
+  | 'url_matches'
+  | 'url_equals'
+  | 'title_contains'
+  | 'element_present'
+  | 'element_absent'
+  | 'element_enabled'
+  | 'navigation_settled'
+  | 'network_quiet';
 
 export interface BrowserWaitForArgs {
   tab_id: string;
   condition: BrowserWaitCondition;
   value?: string;
   timeout_ms?: number;
+}
+
+// ── Browser Runtime V3 arg interfaces ──────────────────────────────────────
+
+export interface BrowserHoverArgs {
+  tab_id: string;
+  ref: string;
+}
+
+export interface BrowserDoubleClickArgs {
+  tab_id: string;
+  ref: string;
+}
+
+export interface BrowserDragArgs {
+  tab_id: string;
+  source_ref: string;
+  target_ref: string;
+}
+
+export interface BrowserFocusArgs {
+  tab_id: string;
+  ref: string;
+}
+
+export interface BrowserClearArgs {
+  tab_id: string;
+  ref: string;
+}
+
+export interface BrowserScrollIntoViewArgs {
+  tab_id: string;
+  ref: string;
+}
+
+export interface BrowserCheckboxArgs {
+  tab_id: string;
+  ref: string;
+  checked: boolean;
+}
+
+export interface BrowserUploadFileArgs {
+  tab_id: string;
+  ref: string;
+  /** Approved file path (project-scoped absolute path from FileRef) */
+  file_path: string;
+}
+
+export interface BrowserGetMediaArgs {
+  tab_id: string;
+}
+
+export type BrowserMediaAction = 'play' | 'pause' | 'mute' | 'unmute' | 'set_volume' | 'seek' | 'fullscreen_mute';
+
+export interface BrowserControlMediaArgs {
+  tab_id: string;
+  action: BrowserMediaAction;
+  /** Target media element ref (from browser_get_media). Omit to target playing/audible media. */
+  ref?: string;
+  /** For set_volume: 0.0–1.0 */
+  value?: number;
+}
+
+export interface BrowserHandleDialogArgs {
+  tab_id: string;
+  dialog_id: string;
+  action: 'accept' | 'dismiss';
+  /** For prompt dialogs: the value to submit */
+  value?: string;
 }
 
 // ── Dev Process arg interfaces ──────────────────────────────────────────────
@@ -1420,7 +1606,7 @@ function validateBrowserWaitFor(args: Record<string, unknown>): ValidationResult
   if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
     return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_wait_for: tab_id must be a non-empty string' };
   }
-  const VALID_CONDITIONS = ['page_load', 'text_present', 'text_absent', 'url_matches'] as const;
+  const VALID_CONDITIONS: BrowserWaitCondition[] = ['page_load', 'text_present', 'text_absent', 'url_matches', 'url_equals', 'title_contains', 'element_present', 'element_absent', 'element_enabled', 'navigation_settled', 'network_quiet'];
   if (!VALID_CONDITIONS.includes(args['condition'] as BrowserWaitCondition)) {
     return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: `browser_wait_for: condition must be one of ${VALID_CONDITIONS.join(', ')}` };
   }
@@ -1438,6 +1624,103 @@ function validateBrowserWaitFor(args: Record<string, unknown>): ValidationResult
     r.timeout_ms = args['timeout_ms'] as number;
   }
   return { ok: true, toolName: 'browser_wait_for', args: r };
+}
+
+// ── Browser Runtime V3 validators ─────────────────────────────────────────
+
+/** Validates any tool that needs tab_id + ref only */
+function validateBrowserRefOnly(toolName: KnownToolName, args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: `${toolName}: tab_id must be a non-empty string` };
+  }
+  if (typeof args['ref'] !== 'string' || !args['ref']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: `${toolName}: ref must be a non-empty string` };
+  }
+  return { ok: true, toolName, args: { tab_id: args['tab_id'] as string, ref: args['ref'] as string } };
+}
+
+function validateBrowserDrag(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_drag: tab_id must be a non-empty string' };
+  }
+  if (typeof args['source_ref'] !== 'string' || !args['source_ref']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_drag: source_ref must be a non-empty string' };
+  }
+  if (typeof args['target_ref'] !== 'string' || !args['target_ref']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_drag: target_ref must be a non-empty string' };
+  }
+  const r: BrowserDragArgs = { tab_id: args['tab_id'] as string, source_ref: args['source_ref'] as string, target_ref: args['target_ref'] as string };
+  return { ok: true, toolName: 'browser_drag', args: r };
+}
+
+function validateBrowserCheckbox(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_checkbox: tab_id must be a non-empty string' };
+  }
+  if (typeof args['ref'] !== 'string' || !args['ref']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_checkbox: ref must be a non-empty string' };
+  }
+  if (typeof args['checked'] !== 'boolean') {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_checkbox: checked must be a boolean' };
+  }
+  const r: BrowserCheckboxArgs = { tab_id: args['tab_id'] as string, ref: args['ref'] as string, checked: args['checked'] as boolean };
+  return { ok: true, toolName: 'browser_checkbox', args: r };
+}
+
+function validateBrowserUploadFile(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_upload_file: tab_id must be a non-empty string' };
+  }
+  if (typeof args['ref'] !== 'string' || !args['ref']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_upload_file: ref must be a non-empty string' };
+  }
+  if (typeof args['file_path'] !== 'string' || !args['file_path']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_upload_file: file_path must be a non-empty string' };
+  }
+  const r: BrowserUploadFileArgs = { tab_id: args['tab_id'] as string, ref: args['ref'] as string, file_path: args['file_path'] as string };
+  return { ok: true, toolName: 'browser_upload_file', args: r };
+}
+
+const VALID_MEDIA_ACTIONS: BrowserMediaAction[] = ['play', 'pause', 'mute', 'unmute', 'set_volume', 'seek', 'fullscreen_mute'];
+
+function validateBrowserControlMedia(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_control_media: tab_id must be a non-empty string' };
+  }
+  if (!VALID_MEDIA_ACTIONS.includes(args['action'] as BrowserMediaAction)) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: `browser_control_media: action must be one of ${VALID_MEDIA_ACTIONS.join(', ')}` };
+  }
+  const r: BrowserControlMediaArgs = { tab_id: args['tab_id'] as string, action: args['action'] as BrowserMediaAction };
+  if (args['ref'] !== undefined) {
+    if (typeof args['ref'] !== 'string') return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_control_media: ref must be a string' };
+    r.ref = args['ref'] as string;
+  }
+  if (args['value'] !== undefined) {
+    if (typeof args['value'] !== 'number') return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_control_media: value must be a number' };
+    if ((r.action === 'set_volume') && (args['value'] as number < 0 || args['value'] as number > 1)) {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_control_media: volume value must be between 0.0 and 1.0' };
+    }
+    r.value = args['value'] as number;
+  }
+  return { ok: true, toolName: 'browser_control_media', args: r };
+}
+
+function validateBrowserHandleDialog(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['tab_id'] !== 'string' || !args['tab_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_handle_dialog: tab_id must be a non-empty string' };
+  }
+  if (typeof args['dialog_id'] !== 'string' || !args['dialog_id']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_handle_dialog: dialog_id must be a non-empty string' };
+  }
+  if (args['action'] !== 'accept' && args['action'] !== 'dismiss') {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_handle_dialog: action must be "accept" or "dismiss"' };
+  }
+  const r: BrowserHandleDialogArgs = { tab_id: args['tab_id'] as string, dialog_id: args['dialog_id'] as string, action: args['action'] as 'accept' | 'dismiss' };
+  if (args['value'] !== undefined) {
+    if (typeof args['value'] !== 'string') return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'browser_handle_dialog: value must be a string' };
+    r.value = args['value'] as string;
+  }
+  return { ok: true, toolName: 'browser_handle_dialog', args: r };
 }
 
 // ── Dev Process validators ──────────────────────────────────────────────────
