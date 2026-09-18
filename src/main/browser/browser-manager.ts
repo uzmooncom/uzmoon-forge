@@ -131,6 +131,17 @@ const _screenshotEvidence = new Map<string, string[]>();
 /** Whether the standalone browser window is currently open */
 let _browserWindowOpen = false;
 
+/** Injected callback to open the standalone browser window — avoids circular dep with browser-window-controller */
+let _ensureWindowOpen: (() => void) | null = null;
+
+/**
+ * Register a callback that opens the standalone browser window.
+ * Called by the app bootstrap (handlers.ts) so browser-manager never imports browser-window-controller.
+ */
+export function setEnsureWindowOpenFn(fn: () => void): void {
+  _ensureWindowOpen = fn;
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function bumpRevision(): void {
@@ -248,6 +259,55 @@ export function setBrowserNativeWindow(
 ): void {
   _browserWindow = win;
   _browserWindowOpen = win !== null;
+
+  // When the native window becomes available, hydrate any tabs that were created
+  // before the window existed (i.e. no WebContentsView yet).
+  if (win !== null && electronWebContentsView) {
+    void _hydrateOrphanedTabs(win);
+  }
+}
+
+/**
+ * Create WebContentsViews for any tabs that exist in DB but have no live view.
+ * Happens when bootstrapAgentControl creates a session/tab before the browser window opens.
+ */
+async function _hydrateOrphanedTabs(win: import("electron").BrowserWindow): Promise<void> {
+  if (!electronWebContentsView) return;
+  const sessions = listBrowserSessions(true);
+  for (const session of sessions) {
+    if (session.lifecycle !== "active") continue;
+    const profile = getBrowserProfile(true, session.profileId);
+    if (!profile) continue;
+    const partition = profilePartition(profile);
+    for (const tabId of session.tabIds) {
+      if (_tabViews.has(tabId)) continue; // already has a view
+      const tab = getBrowserTab(true, tabId);
+      if (!tab) continue;
+
+      try {
+        const wc = new electronWebContentsView({
+          webPreferences: {
+            partition,
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+          },
+        });
+        win.contentView.addChildView(wc);
+        _tabViews.set(tabId, wc);
+        _wireTabEvents(tabId, wc);
+        wc.setVisible(false);
+
+        // Navigate to the tab's URL if it's not about:blank
+        if (tab.url && tab.url !== "about:blank") {
+          await wc.webContents.loadURL(tab.url).catch(() => { /* non-fatal */ });
+        }
+      } catch {
+        // Non-fatal: if hydration fails for a tab, agent will get an error
+        // on first use and can retry
+      }
+    }
+  }
 }
 
 /**
@@ -1013,6 +1073,13 @@ export async function bootstrapAgentControl(opts: {
   purpose?: string;
 }): Promise<BootstrapResult> {
   try {
+    // 0. Ensure the browser window is open so WebContentsViews can be created
+    //    for any tabs we create below. This must happen before ensureDefaultSession()
+    //    to avoid tabs being created with no WebContentsView (they'd be DB-only).
+    if (!_browserWindow && _ensureWindowOpen) {
+      _ensureWindowOpen();
+    }
+
     // 1. Resolve or create session
     let session: BrowserSession;
     let resolvedTabId: string;

@@ -777,6 +777,7 @@ export class QueueManager {
     activeControllers.set(streamId, { controller, convId: conversationId });
     convToStream.set(conversationId, streamId);
 
+
     const startTime = Date.now();
 
     // Register live run entry so the renderer can hydrate on remount

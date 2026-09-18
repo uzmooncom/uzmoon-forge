@@ -191,6 +191,10 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   // Inject secret getter into QueueManager so it can resolve apiKey by profileId
   setSecretGetter((profileId: string) => secrets.get(profileId));
 
+  // Inject openBrowserWindow into browserManager so bootstrapAgentControl can open
+  // the browser window before creating tabs — avoids tabs with no WebContentsView
+  browserManager.setEnsureWindowOpenFn(() => browserWindowController.openBrowserWindow());
+
   // ── Resolve default agent profile ──────────────────────────────────────
 
   function resolveDefaultProfileId(): string | null {
