@@ -21,6 +21,7 @@ import type {
   BrowserTab,
   BrowserRuntimeState,
   BrowserAgentControl,
+  BrowserPendingApproval,
 } from "@shared/types.js";
 
 // ── Icons ──────────────────────────────────────────────────────────────────
@@ -263,6 +264,84 @@ function AddressBar({ url, loading, inputRef, onNavigate, onBack, onForward, onR
 }
 
 // ── AgentControlBar ────────────────────────────────────────────────────────
+
+// ── Approval Dialog ────────────────────────────────────────────────────────
+
+const RISK_META: Record<string, { label: string; color: string; icon: string }> = {
+  READ:           { label: "Read page",       color: "text-blue-400",   icon: "👁" },
+  NAVIGATION:     { label: "Navigate",        color: "text-green-400",  icon: "→" },
+  INTERACTION:    { label: "Click / type",    color: "text-yellow-400", icon: "🖱" },
+  FORM_SUBMISSION:{ label: "Submit form",     color: "text-orange-400", icon: "📤" },
+  DOWNLOAD:       { label: "Download file",   color: "text-orange-400", icon: "⬇" },
+  UPLOAD:         { label: "Upload file",     color: "text-orange-400", icon: "⬆" },
+  AUTHENTICATION: { label: "Log in",          color: "text-red-400",    icon: "🔑" },
+  ACCOUNT_CHANGE: { label: "Account change",  color: "text-red-400",    icon: "⚠" },
+  DESTRUCTIVE:    { label: "Destructive action", color: "text-red-500", icon: "🗑" },
+};
+
+function ApprovalDialog({ approval, onApprove, onReject }: {
+  approval: BrowserPendingApproval;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  const meta = RISK_META[approval.risk] ?? { label: approval.risk, color: "text-white/50", icon: "?" };
+  let hostname = approval.url;
+  try { hostname = new URL(approval.url).hostname; } catch { /* noop */ }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.7)" }}>
+      <div className="bg-[#18181b] border border-white/10 rounded-2xl shadow-2xl w-[420px] max-w-[90vw] overflow-hidden">
+        {/* Header */}
+        <div className="px-5 pt-5 pb-4 border-b border-white/5">
+          <div className="flex items-center gap-2 mb-1">
+            <span className={`text-sm font-semibold ${meta.color}`}>{meta.icon} {meta.label}</span>
+          </div>
+          <p className="text-xs text-white/40">
+            Agent wants to perform an action on <span className="text-white/70 font-medium">{hostname}</span>
+          </p>
+        </div>
+
+        {/* Body */}
+        <div className="px-5 py-4 space-y-3">
+          <div>
+            <p className="text-xs text-white/40 uppercase tracking-wide mb-1">Action</p>
+            <p className="text-sm text-white/80 leading-snug">{approval.action}</p>
+          </div>
+          {approval.agentPurpose && (
+            <div>
+              <p className="text-xs text-white/40 uppercase tracking-wide mb-1">Purpose</p>
+              <p className="text-sm text-white/60 leading-snug italic">{approval.agentPurpose}</p>
+            </div>
+          )}
+          <div>
+            <p className="text-xs text-white/40 uppercase tracking-wide mb-1">URL</p>
+            <p className="text-xs text-white/50 font-mono break-all leading-snug">{approval.url}</p>
+          </div>
+        </div>
+
+        {/* Actions */}
+        <div className="px-5 pb-5 flex gap-3">
+          <button
+            className="flex-1 px-4 py-2 rounded-xl text-sm font-medium bg-white/5 hover:bg-white/10 text-white/60 hover:text-white/80 transition-all"
+            onClick={onReject}
+          >
+            Deny
+          </button>
+          <button
+            className={`flex-1 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${
+              ["DESTRUCTIVE", "ACCOUNT_CHANGE", "AUTHENTICATION"].includes(approval.risk)
+                ? "bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300"
+                : "bg-[#6366f1]/20 hover:bg-[#6366f1]/30 text-[#6366f1] hover:text-[#818cf8]"
+            }`}
+            onClick={onApprove}
+          >
+            Allow
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 interface AgentControlBarProps {
   control: BrowserAgentControl;
@@ -556,6 +635,7 @@ export default function BrowserApp() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [agentControl, setAgentControl] = useState<BrowserAgentControl | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<BrowserPendingApproval | null>(null);
   const [showProfilePanel, setShowProfilePanel] = useState(false);
   const addressInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -574,6 +654,10 @@ export default function BrowserApp() {
       setAgentControl(control);
     });
 
+    const unsubApproval = window.forgeApi.browser.onApprovalRequested((approval) => {
+      setPendingApproval(approval);
+    });
+
     // Initial load
     void window.forgeApi.browser.getRuntimeState().then(setRuntimeState);
 
@@ -582,6 +666,7 @@ export default function BrowserApp() {
       unsubSession();
       unsubTab();
       unsubControl();
+      unsubApproval();
     };
   }, []);
 
@@ -732,6 +817,18 @@ export default function BrowserApp() {
 
   const hasSession = sessions.length > 0 && activeSession !== null;
 
+  const handleApprove = useCallback(async () => {
+    if (!pendingApproval) return;
+    setPendingApproval(null);
+    await window.forgeApi.browser.approveAction(pendingApproval.id);
+  }, [pendingApproval]);
+
+  const handleReject = useCallback(async () => {
+    if (!pendingApproval) return;
+    setPendingApproval(null);
+    await window.forgeApi.browser.rejectAction(pendingApproval.id);
+  }, [pendingApproval]);
+
   return (
     <div className="flex flex-col h-full bg-[#0d0d0f]">
       {/* Titlebar drag region — space for macOS traffic lights (hiddenInset) */}
@@ -819,6 +916,15 @@ export default function BrowserApp() {
             <UserControlBar onReturnToAgent={handleReturnToAgent} />
           ) : null}
         </div>
+      )}
+
+      {/* Approval dialog overlay */}
+      {pendingApproval && (
+        <ApprovalDialog
+          approval={pendingApproval}
+          onApprove={handleApprove}
+          onReject={handleReject}
+        />
       )}
     </div>
   );
