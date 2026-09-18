@@ -30,6 +30,7 @@ export interface AgentConfig {
   model: string;
   apiKeyHeader?: string;
   timeoutMs?: number;
+  capabilities?: ProviderCapabilities;
 }
 
 /** Canonical per-agent connection profile. */
@@ -53,6 +54,11 @@ export interface AgentProfile {
   lastConnectionTestAt?: number;
   /** true if removed but history references remain */
   archived?: boolean;
+  /**
+   * Explicit provider capability override. When set, beats all model-name heuristics.
+   * Unknown custom endpoints without this field default to all-false (safe).
+   */
+  capabilities?: ProviderCapabilities;
 }
 
 export type ConnectionStatus =
@@ -753,6 +759,16 @@ export type NormalizedAgentDecision =
       kind: "invalid";
       reason: string;
       recoverable: boolean;
+    }
+  | {
+      /**
+       * Human intervention required. The run suspends in `waiting_for_human` state
+       * until the user clicks "Return Control".
+       * Only set when forge_final contains a structurally valid `blocker` object.
+       */
+      kind: "human_required";
+      reason: HumanRequiredReason;
+      content: string;
     };
 
 /**
@@ -760,10 +776,50 @@ export type NormalizedAgentDecision =
  * status: 'completed' = goal achieved; 'blocked' = could not proceed;
  * 'failed' = goal not achieved.
  */
+/**
+ * Structured reason a browser task requires human intervention.
+ * Only runtime/tool evidence or a structurally validated agent decision may
+ * set this. Keyword inference is never used.
+ */
+export type HumanRequiredKind =
+  | "captcha"
+  | "mfa"
+  | "passkey"
+  | "credentials"
+  | "browser_permission"
+  | "explicit_user_takeover"
+  | "unsupported_human_only_step";
+
+export interface HumanRequiredReason {
+  kind: HumanRequiredKind;
+  description: string;
+  browserContextRef?: { sessionId: string; tabId: string };
+  evidenceRefs?: string[];
+}
+
+/**
+ * Explicit provider capability flags for an AgentProfile.
+ * Explicit override wins over all model-name heuristics.
+ * Unknown custom endpoints default to unknown/false for all capabilities.
+ */
+export interface ProviderCapabilities {
+  vision?: boolean;
+  tools?: boolean;
+  json?: boolean;
+  streaming?: boolean;
+  maxContextTokens?: number;
+}
+
 export interface ForgeAgentFinal {
   status: "completed" | "blocked" | "failed";
   summary: string;
   evidenceRefs?: string[];
+  /** Structured blocker — required when status is "blocked" */
+  blocker?: {
+    kind: HumanRequiredKind;
+    description: string;
+    evidenceRefs?: string[];
+  };
 }
 
 /**
@@ -836,6 +892,12 @@ export interface AgentRun {
   lastObservationHash?: string;
   /** Hash of last action signature for stall detection */
   lastActionHash?: string;
+  /**
+   * Set to true when the run has entered a terminal state (completed/cancelled/failed).
+   * Once true, all further callbacks (onChunk, onToolStart, onToolEnd) are no-ops.
+   * This is the canonical authority — renderer guards are defensive UI only.
+   */
+  terminated: boolean;
 }
 
 /** IPC channels for V0.4 agent tool ledger */

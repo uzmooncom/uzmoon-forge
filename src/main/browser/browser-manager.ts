@@ -75,7 +75,12 @@ try {
 /** Live WebContentsView per tabId */
 const _tabViews = new Map<string, import("electron").WebContentsView>();
 
-/** Active agent control tokens keyed by sessionId */
+/**
+ * Active agent control tokens keyed by tabId.
+ * Invariant: one interactive AgentRun per TAB, not per session.
+ * Conversation A can control Tab-2 and Conversation B can control Tab-5
+ * within the same browser session simultaneously.
+ */
 const _agentControls = new Map<string, BrowserAgentControl>();
 
 /** Agent run budgets keyed by requestId */
@@ -159,9 +164,17 @@ function buildRuntimeState(): BrowserRuntimeState {
     sessions,
     tabs,
     activeSessionId: _activeSessionId,
-    agentControl: _activeSessionId
-      ? (_agentControls.get(_activeSessionId) ?? null)
-      : null,
+    agentControl: (() => {
+      // Find agent control for the active tab (key is tabId now)
+      if (!_activeSessionId) return null;
+      const sess = getBrowserSession(true, _activeSessionId);
+      if (!sess) return null;
+      for (const tabId of sess.tabIds) {
+        const ctrl = _agentControls.get(tabId);
+        if (ctrl) return ctrl;
+      }
+      return null;
+    })(),
     revision: _revision,
   };
 }
@@ -461,8 +474,15 @@ export async function closeBrowserSession(sessionId: string): Promise<void> {
     _saveRestoreState(sessionId);
   }
 
-  // Revoke any agent control
-  _agentControls.delete(sessionId);
+  // Revoke any agent control (tab-scoped — delete all tabs for this session)
+  for (const tabId of session.tabIds) {
+    const ctrl = _agentControls.get(tabId);
+    if (ctrl) {
+      _agentBudgets.delete(ctrl.requestId);
+      _screenshotEvidence.delete(ctrl.requestId);
+      _agentControls.delete(tabId);
+    }
+  }
 
   // Release all tab views
   for (const tabId of session.tabIds) {
@@ -620,12 +640,13 @@ function _wireTabEvents(tabId: string, view: import("electron").WebContentsView)
   wc.on("render-process-gone", () => {
     updateBrowserTab(true, tabId, { loadState: "crashed" });
     _elementRefs.delete(tabId);
-    // Release agent control if this tab was controlled
-    for (const [sessId, ctrl] of _agentControls) {
-      if (ctrl.tabId === tabId) {
-        _agentControls.delete(sessId);
-        pushToRenderer(BROWSER_IPC.AGENT_CONTROL_CHANGED, null);
-      }
+    // Release agent control if this tab was controlled (O(1) now that key is tabId)
+    if (_agentControls.has(tabId)) {
+      const ctrl = _agentControls.get(tabId)!;
+      _agentBudgets.delete(ctrl.requestId);
+      _screenshotEvidence.delete(ctrl.requestId);
+      _agentControls.delete(tabId);
+      pushToRenderer(BROWSER_IPC.AGENT_CONTROL_CHANGED, null);
     }
     assertInvariant("BROWSER_CRASH_RELEASED", true, { tabId });
     pushToRenderer(BROWSER_IPC.TAB_UPDATED, getBrowserTab(true, tabId));
@@ -699,12 +720,13 @@ export function closeBrowserTab(tabId: string): void {
   const tab = getBrowserTab(true, tabId);
   if (!tab) return;
 
-  // Revoke agent control if this was the controlled tab
-  for (const [sessId, ctrl] of _agentControls) {
-    if (ctrl.tabId === tabId) {
-      _agentControls.delete(sessId);
-      pushToRenderer(BROWSER_IPC.AGENT_CONTROL_CHANGED, null);
-    }
+  // Revoke agent control if this was the controlled tab (O(1) since key is tabId)
+  if (_agentControls.has(tabId)) {
+    const ctrl = _agentControls.get(tabId)!;
+    _agentBudgets.delete(ctrl.requestId);
+    _screenshotEvidence.delete(ctrl.requestId);
+    _agentControls.delete(tabId);
+    pushToRenderer(BROWSER_IPC.AGENT_CONTROL_CHANGED, null);
   }
 
   _releaseTabView(tabId);
@@ -859,7 +881,8 @@ export function grantAgentControl(control: BrowserAgentControl): void {
     { sessionId: control.sessionId, profileId: session.profileId },
   );
 
-  _agentControls.set(control.sessionId, control);
+  // Key by tabId — one AgentRun per tab, not per session
+  _agentControls.set(control.tabId, control);
   _agentBudgets.set(control.requestId, {
     actionsUsed: 0,
     navigationsUsed: 0,
@@ -875,12 +898,36 @@ export function grantAgentControl(control: BrowserAgentControl): void {
   });
 }
 
+/**
+ * Release agent interactive control for a specific tab.
+ * Does NOT clear _conversationBrowserBinding — the conversation context persists.
+ */
 export function revokeAgentControl(sessionId: string): void {
-  const ctrl = _agentControls.get(sessionId);
-  _agentControls.delete(sessionId);
+  // Find the ctrl by sessionId (for backward compat with callers that pass sessionId)
+  // Since the new key is tabId, iterate to find by sessionId
+  let tabIdToDelete: string | undefined;
+  for (const [tabId, ctrl] of _agentControls) {
+    if (ctrl.sessionId === sessionId) {
+      tabIdToDelete = tabId;
+      _agentBudgets.delete(ctrl.requestId);
+      _screenshotEvidence.delete(ctrl.requestId);
+      break;
+    }
+  }
+  if (tabIdToDelete) _agentControls.delete(tabIdToDelete);
+  pushToRenderer(BROWSER_IPC.AGENT_CONTROL_CHANGED, null);
+}
+
+/**
+ * Release agent interactive control for a specific tab by tabId (preferred — O(1)).
+ * Does NOT clear _conversationBrowserBinding.
+ */
+export function releaseAgentInteractiveControl(tabId: string): void {
+  const ctrl = _agentControls.get(tabId);
   if (ctrl) {
     _agentBudgets.delete(ctrl.requestId);
     _screenshotEvidence.delete(ctrl.requestId);
+    _agentControls.delete(tabId);
   }
   pushToRenderer(BROWSER_IPC.AGENT_CONTROL_CHANGED, null);
 }
@@ -1143,6 +1190,20 @@ export async function agentOpenUrl(
   _incrementBudget(ctrl.requestId, "navigation");
   await navigateTab(tabId, url);
   emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "open_url", tabId, url });
+}
+
+/**
+ * Returns true if the tab's WebContents is currently loading (navigating).
+ * Used by browser_wait_for 'navigation_settled' condition.
+ */
+export function isTabLoading(tabId: string): boolean {
+  const view = _tabViews.get(tabId);
+  if (!view) return false;
+  try {
+    return view.webContents.isLoading();
+  } catch {
+    return false;
+  }
 }
 
 /** Extract a bounded semantic snapshot of the page for agent consumption. */
@@ -2114,9 +2175,8 @@ export function getBrowserStatus(): BrowserStatusSnapshot {
   const activeProfile = activeSession
     ? state.profiles.find((p) => p.id === activeSession.profileId) ?? null
     : null;
-  const agentControl = state.activeSessionId
-    ? (_agentControls.get(state.activeSessionId) ?? null)
-    : null;
+  // _agentControls is now keyed by tabId — look up via the active tab
+  const agentControl = activeTabId ? (_agentControls.get(activeTabId) ?? null) : null;
   return {
     isWindowOpen: _browserWindowOpen,
     tabCount: state.tabs.length,
@@ -2146,13 +2206,21 @@ export async function resolveAgentBrowserTarget(
     return { ctrl: existingByRequest, errorMessage: null };
   }
 
-  // 2. Check conversation binding (cross-turn persistence)
+  // 2. Check conversation binding (cross-turn persistence) — validate before reusing
   const binding = _conversationBrowserBinding.get(conversationId);
   if (binding) {
-    const ctrl = _agentControls.get(binding.sessionId);
+    // Look up by tabId (canonical key)
+    const ctrl = _agentControls.get(binding.tabId);
     if (ctrl) {
-      return { ctrl, errorMessage: null };
+      // Validate session is still alive before reusing
+      const sess = getBrowserSession(true, binding.sessionId);
+      const tab = getBrowserTab(true, binding.tabId);
+      if (sess && tab) {
+        return { ctrl, errorMessage: null };
+      }
     }
+    // Stale binding — clear it and fall through to bootstrap
+    _conversationBrowserBinding.delete(conversationId);
   }
 
   // 3. Bootstrap a new agent control
@@ -2169,7 +2237,8 @@ export async function resolveAgentBrowserTarget(
       sessionId: result.sessionId,
       tabId: result.tabId,
     });
-    const ctrl = _agentControls.get(result.sessionId);
+    // Look up by tabId (canonical key)
+    const ctrl = _agentControls.get(result.tabId);
     if (ctrl) return { ctrl, errorMessage: null };
     return { ctrl: null, errorMessage: "Could not acquire browser access. Try opening the browser first." };
   }

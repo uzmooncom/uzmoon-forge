@@ -59,7 +59,7 @@ function makeBaseOpts(
     onIntermediateText: vi.fn(),
     onToolStart: vi.fn(),
     onToolEnd: vi.fn(),
-    signal: { aborted: false },
+    signal: new AbortController().signal,
     ...overrides,
   };
 }
@@ -418,13 +418,16 @@ describe("Agent loop — V0.6 runtime", () => {
 
   // ── Cancellation ────────────────────────────────────────────────────────
   it("respects signal.aborted before first turn", async () => {
-    const signal = { aborted: true };
+    const controller = new AbortController();
+    controller.abort();
     await expect(
-      runAgentLoop(makeBaseOpts({ signal }))
+      runAgentLoop(makeBaseOpts({ signal: controller.signal }))
     ).rejects.toThrow(AgentLoopError);
 
     try {
-      await runAgentLoop(makeBaseOpts({ signal }));
+      const ctrl2 = new AbortController();
+      ctrl2.abort();
+      await runAgentLoop(makeBaseOpts({ signal: ctrl2.signal }));
     } catch (err) {
       expect(err instanceof AgentLoopError && err.code === "CANCELLED").toBe(true);
     }
@@ -432,15 +435,15 @@ describe("Agent loop — V0.6 runtime", () => {
   });
 
   it("respects signal.aborted mid-recovery (project mode)", async () => {
-    const signal = { aborted: false };
+    const controller = new AbortController();
     // First turn: naked prose → triggers recovery
     mockMakeRequest.mockImplementationOnce(async () => {
-      signal.aborted = true; // abort during second turn setup
+      controller.abort(); // abort during second turn setup
       return "devam ediyorum";
     });
 
     await expect(
-      runAgentLoop(makeBaseOpts({ isProjectMode: true, signal }))
+      runAgentLoop(makeBaseOpts({ isProjectMode: true, signal: controller.signal }))
     ).rejects.toThrow(AgentLoopError);
   });
 
@@ -552,8 +555,10 @@ describe("Agent loop — V0.6 runtime", () => {
       result: { callId: "c1", toolName: "list_directory", ok: true, data: { entries: [] } },
       durationMs: 5,
     });
-    // Global chat: final turn is naked prose
-    mockMakeRequest.mockResolvedValueOnce("The project has 5 files.");
+    // Global chat: after tool use, must use forge_final
+    mockMakeRequest.mockResolvedValueOnce(
+      '```forge_final\n{"status":"completed","summary":"Listed files.","content":"The project has 5 files."}\n```'
+    );
 
     const result = await runAgentLoop(makeBaseOpts({ isProjectMode: false }));
     expect(result.finalText).toBe("The project has 5 files.");

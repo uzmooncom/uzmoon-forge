@@ -146,7 +146,7 @@ interface RequestOptions {
   onChunk?: (text: string) => void;
   /** Called when a complete tool call is extracted from the stream */
   onToolCall?: (call: ForgeToolCall) => void;
-  signal?: { aborted: boolean };
+  signal?: AbortSignal;
 }
 
 function getEndpointUrl(cfg: AgentConfig): string {
@@ -342,6 +342,16 @@ export function makeRequest(opts: RequestOptions): Promise<string> {
         reject(err);
       }
     });
+
+    // Wire abort signal to destroy the request
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy();
+        reject(new Error("cancelled"));
+        return;
+      }
+      signal.addEventListener('abort', () => { req.destroy(); reject(new Error('cancelled')); }, { once: true });
+    }
 
     req.write(body);
     req.end();

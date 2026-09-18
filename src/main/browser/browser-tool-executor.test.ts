@@ -111,6 +111,7 @@ function makeCtx(overrides?: Partial<ToolExecutionContext>): ToolExecutionContex
     conversationId: "conv-1",
     readBytesUsed: 0,
     commandsRunThisRequest: 0,
+    signal: new AbortController().signal,
     ...overrides,
   };
 }

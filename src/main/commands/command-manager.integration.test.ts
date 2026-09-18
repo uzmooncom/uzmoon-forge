@@ -84,6 +84,7 @@ function makeCtx(overrides: Partial<ToolExecutionContext> = {}): ToolExecutionCo
     conversationId: randomUUID(),
     readBytesUsed: 0,
     commandsRunThisRequest: 0,
+    signal: new AbortController().signal,
     ...overrides,
   };
 }

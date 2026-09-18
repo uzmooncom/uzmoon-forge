@@ -52,7 +52,7 @@ function makeBaseOpts(overrides: Partial<Parameters<typeof runAgentLoop>[0]> = {
     onChunk: vi.fn(),
     onToolStart: vi.fn(),
     onToolEnd: vi.fn(),
-    signal: { aborted: false },
+    signal: new AbortController().signal,
     ...overrides,
   };
 }
@@ -99,8 +99,10 @@ describe("Agent loop — forge_tool fence fallback", () => {
       durationMs: 42,
     });
 
-    // Second turn: model gives final answer
-    mockMakeRequest.mockResolvedValueOnce("I can see src/a.ts and src/b.ts.");
+    // Second turn: model gives final answer (forge_final required after tool use)
+    mockMakeRequest.mockResolvedValueOnce(
+      '```forge_final\n{"status":"completed","summary":"Listed files.","content":"I can see src/a.ts and src/b.ts."}\n```'
+    );
 
     const opts = makeBaseOpts();
     const result = await runAgentLoop(opts);
@@ -128,7 +130,9 @@ describe("Agent loop — forge_tool fence fallback", () => {
       result: { callId: "call-2", toolName: "read_file", ok: true, data: { content: "export default {};" } },
       durationMs: 10,
     });
-    mockMakeRequest.mockResolvedValueOnce("The file exports nothing.");
+    mockMakeRequest.mockResolvedValueOnce(
+      '```forge_final\n{"status":"completed","summary":"Read file.","content":"The file exports nothing."}\n```'
+    );
 
     const result = await runAgentLoop(makeBaseOpts());
     expect(result.finalText).toBe("The file exports nothing.");
@@ -164,15 +168,16 @@ describe("Agent loop — forge_tool fence fallback", () => {
   });
 
   it("respects signal.aborted and throws cancelled before first turn", async () => {
-    const signal = { aborted: true };
-    const opts = makeBaseOpts({ signal });
+    const controller = new AbortController();
+    controller.abort();
+    const opts = makeBaseOpts({ signal: controller.signal });
 
     await expect(runAgentLoop(opts)).rejects.toThrow("cancelled");
     expect(mockMakeRequest).toHaveBeenCalledTimes(0);
   });
 
   it("respects signal.aborted mid-loop after tool execution", async () => {
-    const signal = { aborted: false };
+    const controller = new AbortController();
 
     const toolFence = [
       "Checking.",
@@ -183,14 +188,14 @@ describe("Agent loop — forge_tool fence fallback", () => {
 
     mockMakeRequest.mockResolvedValueOnce(toolFence);
     mockExecuteProjectTool.mockImplementationOnce(async () => {
-      signal.aborted = true; // Abort during tool execution
+      controller.abort(); // Abort during tool execution
       return {
         result: { callId: "call-x", toolName: "list_directory", ok: true, data: {} },
         durationMs: 1,
       };
     });
 
-    const opts = makeBaseOpts({ signal });
+    const opts = makeBaseOpts({ signal: controller.signal });
     await expect(runAgentLoop(opts)).rejects.toThrow("cancelled");
   });
 
@@ -222,7 +227,9 @@ describe("Agent loop — forge_tool fence fallback", () => {
       durationMs: 15,
     });
 
-    mockMakeRequest.mockResolvedValueOnce("The file is empty.");
+    mockMakeRequest.mockResolvedValueOnce(
+      '```forge_final\n{"status":"completed","summary":"Read file.","content":"The file is empty."}\n```'
+    );
 
     const result = await runAgentLoop(makeBaseOpts());
 
@@ -253,7 +260,9 @@ describe("Agent loop — forge_tool fence fallback", () => {
       durationMs: 5,
     });
 
-    mockMakeRequest.mockResolvedValueOnce("The file does not exist.");
+    mockMakeRequest.mockResolvedValueOnce(
+      '```forge_final\n{"status":"completed","summary":"Read failed.","content":"The file does not exist."}\n```'
+    );
 
     const result = await runAgentLoop(makeBaseOpts());
 
@@ -279,7 +288,9 @@ describe("Agent loop — forge_tool fence fallback", () => {
     mockMakeRequest
       .mockResolvedValueOnce(listFence)
       .mockResolvedValueOnce(searchFence)
-      .mockResolvedValueOnce("Done.");
+      .mockResolvedValueOnce(
+        '```forge_final\n{"status":"completed","summary":"Done.","content":"Done."}\n```'
+      );
 
     mockExecuteProjectTool
       .mockResolvedValueOnce({

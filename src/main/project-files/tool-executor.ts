@@ -65,6 +65,8 @@ export interface ToolExecutionContext {
   readBytesUsed: number;
   /** Number of run_command calls issued this agent run (mutable — executor increments it) */
   commandsRunThisRequest: number;
+  /** Abort signal — all long-running tool operations must honour this */
+  signal: AbortSignal;
 }
 
 export interface ToolExecutionResult {
@@ -1377,10 +1379,23 @@ async function handleBrowserWaitFor(
   const timeoutMs = Math.min(args.timeout_ms ?? 10_000, BROWSER_LIMITS.MAX_WAIT_FOR_MS);
   const deadline = Date.now() + timeoutMs;
   const POLL_MS = 500;
+  const QUIET_WINDOW_MS = 800;
+
+  // Build an abort-aware sleep helper that rejects when signal fires
+  const abortError = new Error('CANCELLED');
+  const sleepOrAbort = (ms: number): Promise<void> =>
+    new Promise((resolve, reject) => {
+      if (ctx.signal.aborted) { reject(abortError); return; }
+      const timer = setTimeout(resolve, ms);
+      ctx.signal.addEventListener('abort', () => { clearTimeout(timer); reject(abortError); }, { once: true });
+    });
 
   try {
     let met = false;
-    while (Date.now() < deadline && !met) {
+    // For navigation_settled: track last URL for stability check
+    let lastNavUrl = '';
+
+    while (Date.now() < deadline && !met && !ctx.signal.aborted) {
       const snapshot = await bm.agentReadPage(ctrl, args.tab_id);
       switch (args.condition) {
         case 'page_load':
@@ -1402,35 +1417,66 @@ async function handleBrowserWaitFor(
           met = !!args.value && snapshot.title.toLowerCase().includes(args.value.toLowerCase());
           break;
         case 'element_present':
-          // value is a ref string — check if it exists in the element list
           met = !!args.value && snapshot.elements.some((el: { ref: string }) => el.ref === args.value);
           break;
         case 'element_absent':
           met = !args.value || !snapshot.elements.some((el: { ref: string }) => el.ref === args.value);
           break;
         case 'element_enabled': {
-          // value is a ref string — check if element exists and is not disabled
           const target = args.value ? snapshot.elements.find((el: { ref: string; disabled?: boolean }) => el.ref === args.value) : null;
           met = !!target && target.disabled !== true;
           break;
         }
-        case 'navigation_settled':
-          // agentReadPage succeeding means the page content is stable
-          // Additional check: URL should not be about:blank
-          met = snapshot.url !== 'about:blank' && snapshot.url !== '';
+        case 'navigation_settled': {
+          // Require: non-blank URL, URL stable across two polls, page not loading, has content
+          const url = snapshot.url;
+          if (url && url !== 'about:blank' && url !== '') {
+            const isLoading = bm.isTabLoading(ctrl.tabId);
+            const urlStable = url === lastNavUrl;
+            const hasContent = snapshot.elements.length > 0;
+            met = !isLoading && urlStable && hasContent;
+          }
+          lastNavUrl = snapshot.url ?? '';
           break;
+        }
         case 'network_quiet': {
-          // Check if recent network activity has settled (no requests in last 500ms)
+          // Check both: no active non-long-lived requests AND no recent completions
           const netSummary = bm.agentGetNetworkSummary(ctrl, args.tab_id);
-          const since = Date.now() - 1000;
-          met = netSummary.filter((r: { timestamp: number }) => r.timestamp > since).length === 0;
+          const now = Date.now();
+          const LONG_LIVED_TYPES = new Set(['websocket', 'eventsource', 'ping']);
+          // Active = started but completedAt undefined or in the future
+          const activePending = (netSummary as Array<{ type?: string; completedAt?: number; timestamp: number }>).filter((r) =>
+            !LONG_LIVED_TYPES.has(r.type ?? '') &&
+            (r.completedAt === undefined || r.completedAt > now - 50)
+          );
+          // Recently completed within quiet window
+          const recentCompleted = (netSummary as Array<{ type?: string; completedAt?: number; timestamp: number }>).filter((r) =>
+            !LONG_LIVED_TYPES.has(r.type ?? '') &&
+            r.completedAt !== undefined &&
+            r.completedAt > now - QUIET_WINDOW_MS
+          );
+          met = activePending.length === 0 && recentCompleted.length === 0;
           break;
         }
       }
-      if (!met) await new Promise((r) => setTimeout(r, POLL_MS));
+      if (!met) {
+        try {
+          await sleepOrAbort(POLL_MS);
+        } catch {
+          // Abort fired — exit loop
+          break;
+        }
+      }
+    }
+
+    if (ctx.signal.aborted) {
+      return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'CANCELLED', errorMessage: 'Cancelled' } };
     }
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { met, condition: args.condition, timedOut: !met } } };
   } catch (err) {
+    if (err instanceof Error && err.message === 'CANCELLED') {
+      return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'CANCELLED', errorMessage: 'Cancelled' } };
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
   }

@@ -36,6 +36,8 @@ import type {
   AgentRun,
   AgentRunState,
   AgentGoalState,
+  HumanRequiredReason,
+  HumanRequiredKind,
 } from "../../shared/types.js";
 import { makeRequest } from "./client.js";
 import type { SimpleMessage } from "./client.js";
@@ -101,8 +103,19 @@ export interface AgentLoopOptions {
   onToolStart: (call: ForgeToolCall) => void;
   /** Called when a tool call completes */
   onToolEnd: (call: ForgeToolCall, result: ForgeToolResult, durationMs: number) => void;
-  /** Abort signal — loop checks before each turn */
-  signal: { aborted: boolean };
+  /** Abort signal — loop checks before each turn and during tool execution */
+  signal: AbortSignal;
+  /**
+   * Called when the agent determines human intervention is required (structured blocker).
+   * Returns a Promise that resolves when the user clicks "Return Control".
+   * Rejects (via signal abort) when the user cancels.
+   */
+  /**
+   * Optional — if omitted, human_required decisions resolve immediately
+   * (run continues as if the user returned control immediately).
+   * The QueueManager always provides a real implementation.
+   */
+  onWaitingForHuman?: (reason: HumanRequiredReason) => Promise<void>;
 }
 
 export interface AgentLoopResult {
@@ -258,9 +271,10 @@ export function stripForgeFences(text: string): string {
  * Priority order:
  * 1. Native tool calls (from provider callbacks) → tool_calls
  * 2. forge_tool fences in text → tool_calls
- * 3. forge_final envelope in text → final (with optional proposalFenceRaw)
+ * 3. forge_final envelope in text → final / human_required (with optional proposalFenceRaw)
  * 4. isProjectMode: naked prose / empty → invalid (recoverable)
- * 5. !isProjectMode (Global Chat): any text → final
+ * 5. !isProjectMode (Global Chat) + toolStepCount > 0 + no forge_final → invalid (recoverable)
+ * 6. !isProjectMode (Global Chat) + no tool calls: any text → final
  *
  * Budget-exhausted path is handled in the loop (tools are not passed to the
  * model, so native tool calls cannot occur; forge_tool fences are rejected).
@@ -269,7 +283,8 @@ export function normalizeDecision(
   rawText: string,
   nativeToolCalls: ForgeToolCall[],
   isProjectMode: boolean,
-  budgetExhausted: boolean
+  budgetExhausted: boolean,
+  toolStepCount?: number
 ): NormalizedAgentDecision {
   const text = rawText ?? "";
 
@@ -312,19 +327,58 @@ export function normalizeDecision(
       };
     }
     const proposalFenceRaw = extractProposalFenceRaw(text);
-    // In project mode: attempt to parse structured ForgeAgentFinal JSON
+    // Parse structured ForgeAgentFinal JSON (both project mode and global chat with tools)
     let outcome: import('../../shared/types.js').ForgeAgentFinal | undefined;
-    if (isProjectMode) {
+    const shouldParseStructured = isProjectMode || (toolStepCount !== undefined && toolStepCount > 0);
+    if (shouldParseStructured) {
       try {
         const candidate = JSON.parse(parsed.content) as Record<string, unknown>;
         if (typeof candidate.status === 'string' && ['completed','blocked','failed'].includes(candidate.status) && typeof candidate.summary === 'string') {
+          // ── Structured blocker validation (status === 'blocked') ────────────
+          if (candidate.status === 'blocked') {
+            // A blocked result MUST contain a structurally valid blocker object.
+            // No keyword inference — only explicit structured protocol.
+            const VALID_HUMAN_KINDS: HumanRequiredKind[] = [
+              'captcha', 'mfa', 'passkey', 'credentials',
+              'browser_permission', 'explicit_user_takeover', 'unsupported_human_only_step',
+            ];
+            const blocker = candidate.blocker as Record<string, unknown> | undefined;
+            const blockerKind = blocker?.kind as string | undefined;
+            const blockerDesc = blocker?.description as string | undefined;
+
+            if (
+              blocker &&
+              typeof blockerKind === 'string' &&
+              (VALID_HUMAN_KINDS as string[]).includes(blockerKind) &&
+              typeof blockerDesc === 'string'
+            ) {
+              // Valid structured blocker → human_required decision
+              const reason: HumanRequiredReason = {
+                kind: blockerKind as HumanRequiredKind,
+                description: blockerDesc,
+                ...(Array.isArray(blocker.evidenceRefs) && { evidenceRefs: blocker.evidenceRefs as string[] }),
+              };
+              return {
+                kind: 'human_required',
+                reason,
+                content: typeof candidate.content === 'string' ? candidate.content : candidate.summary as string,
+              };
+            } else {
+              // Blocked without valid structured blocker → recovery/fail
+              return {
+                kind: 'invalid',
+                reason: 'BLOCKED_WITHOUT_STRUCTURED_BLOCKER',
+                recoverable: true,
+              };
+            }
+          }
+
           outcome = {
-            status: candidate.status as 'completed' | 'blocked' | 'failed',
+            status: candidate.status as 'completed' | 'failed',
             summary: candidate.summary,
             ...(Array.isArray(candidate.evidenceRefs) && { evidenceRefs: candidate.evidenceRefs as string[] }),
           };
           // Enforce: summary must be an intent statement, not verbose prose
-          // (structural guard: summary must be <= 300 chars for intent-only)
           if (outcome.summary.length > 500) {
             outcome.summary = outcome.summary.slice(0, 500);
           }
@@ -337,12 +391,14 @@ export function normalizeDecision(
           };
         }
       } catch {
-        // Not JSON — that's acceptable; content is prose summary
+        // Not JSON — that's acceptable; content is prose summary (global chat only)
       }
     }
     return {
       kind: "final",
-      content: isProjectMode && outcome ? outcome.summary : parsed.content,
+      content: (isProjectMode || (toolStepCount !== undefined && toolStepCount > 0)) && outcome
+        ? outcome.summary
+        : parsed.content,
       ...(proposalFenceRaw !== undefined && { proposalFenceRaw }),
       ...(outcome !== undefined && { outcome }),
     };
@@ -361,7 +417,23 @@ export function normalizeDecision(
     };
   }
 
-  // ── 5. Global Chat: accept naked prose as final ───────────────────────────
+  // ── 5. Global Chat with tool steps: naked prose after tool use → invalid ──
+  // When the run has already executed tool calls, the model MUST use forge_final.
+  // Bare narration after real-world actions is not a valid final answer.
+  // Exception: budgetExhausted=true means we asked the model to summarize with no tools;
+  // we accept plain prose in that case (atypical but correct).
+  if (!isProjectMode && toolStepCount !== undefined && toolStepCount > 0 && !budgetExhausted) {
+    if (text.trim().length === 0) {
+      return { kind: "invalid", reason: "EMPTY_RESPONSE", recoverable: true };
+    }
+    return {
+      kind: "invalid",
+      reason: "NAKED_PROSE_AFTER_TOOL_USE_GLOBAL_CHAT",
+      recoverable: true,
+    };
+  }
+
+  // ── 6. Global Chat (pure conversational): accept naked prose as final ─────
   return { kind: "final", content: text };
 }
 
@@ -372,13 +444,14 @@ export function normalizeDecision(
  * Any transition not in this map is a runtime bug — throws immediately.
  */
 const VALID_TRANSITIONS: Partial<Record<AgentRunState, AgentRunState[]>> = {
-  queued:             ["starting"],
-  starting:           ["waiting_for_model"],
-  waiting_for_model:  ["processing_turn", "cancelled", "failed"],
-  processing_turn:    ["executing_tools", "finalizing", "continuing", "cancelled", "failed"],
-  executing_tools:    ["continuing", "cancelled", "failed"],
-  continuing:         ["waiting_for_model", "finalizing", "cancelled", "failed"],
-  finalizing:         ["completed", "failed"],
+  queued:              ["starting"],
+  starting:            ["waiting_for_model"],
+  waiting_for_model:   ["processing_turn", "cancelled", "failed"],
+  processing_turn:     ["executing_tools", "finalizing", "continuing", "waiting_for_human", "cancelled", "failed"],
+  executing_tools:     ["continuing", "cancelled", "failed"],
+  continuing:          ["waiting_for_model", "finalizing", "cancelled", "failed"],
+  finalizing:          ["completed", "failed"],
+  waiting_for_human:   ["continuing", "cancelled", "failed"],
   // Terminal states — no outgoing transitions (checked via 'completed'/'cancelled'/'failed')
 };
 
@@ -509,6 +582,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     onToolStart,
     onToolEnd,
     signal,
+    onWaitingForHuman,
   } = opts;
 
   // ── Initialize AgentRun ────────────────────────────────────────────────────
@@ -524,6 +598,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     recoveryCount: 0,
     readByteCount: 0,
     stuckScore: 0,
+    terminated: false,
   };
 
   // Start trace for this request
@@ -549,6 +624,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     conversationId,
     readBytesUsed: 0,
     commandsRunThisRequest: 0,
+    signal,
   };
 
   // Accumulated results
@@ -588,6 +664,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   // Check for initial cancellation
   if (signal.aborted) {
     transition(run, "cancelled", tracer);
+    run.terminated = true;
+    run.completedAt = Date.now();
     run.failureCode = "CANCELLED";
     run.failureMessage = "Run cancelled before start";
     try { tracer?.emit(requestId, "RUN_CANCELLED", { reason: "cancelled before start" }); } catch { /* */ }
@@ -600,6 +678,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     // Check for cancellation before each turn
     if (signal.aborted) {
       transition(run, "cancelled", tracer);
+      run.terminated = true;
+      run.completedAt = Date.now();
       run.failureCode = "CANCELLED";
       run.failureMessage = "Run cancelled during execution";
       try { tracer?.emit(requestId, "RUN_CANCELLED", { reason: "cancelled during execution", step: run.toolStepCount }); } catch { /* */ }
@@ -676,7 +756,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       turnText,
       nativeToolCallsThisTurn,
       isProjectMode,
-      budgetExhausted
+      budgetExhausted,
+      run.toolStepCount
     );
     try {
       tracer?.emit(requestId, "PROVIDER_RESPONSE_NORMALIZED", {
@@ -830,6 +911,43 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       continue;
     }
 
+    // ── CASE: human_required ─────────────────────────────────────────────────
+    if (decision.kind === "human_required") {
+      // Suspend the run in waiting_for_human state.
+      // The run does NOT terminate — it resumes when the user returns control.
+      transition(run, "waiting_for_human", tracer);
+      try {
+        tracer?.emit(requestId, "RUN_STATE_CHANGED", { state: "waiting_for_human", reason: decision.reason.kind });
+      } catch { /* */ }
+
+      try {
+        // onWaitingForHuman resolves when user clicks "Return Control"
+        // or rejects when the request is cancelled
+        await (onWaitingForHuman ? onWaitingForHuman(decision.reason) : Promise.resolve());
+      } catch {
+        // Cancelled while waiting — terminate run
+        transition(run, "cancelled", tracer);
+        run.terminated = true;
+        run.completedAt = Date.now();
+        try { tracer?.emit(requestId, "RUN_CANCELLED", { reason: "cancelled during waiting_for_human" }); } catch { /* */ }
+        try { tracer?.endTrace(requestId, "cancelled"); } catch { /* */ }
+        throw new AgentLoopError("CANCELLED", "Cancelled while waiting for human");
+      }
+
+      // User returned control — inject system message and continue
+      messages.push({
+        role: "user",
+        content:
+          "[FORGE_SYSTEM] User has returned control. Continue the task from where you left off. " +
+          "Take a fresh observation of the current state before proceeding.",
+      });
+
+      // waiting_for_human → continuing → waiting_for_model
+      transition(run, "continuing", tracer);
+      transition(run, "waiting_for_model", tracer);
+      continue;
+    }
+
     // ── CASE: final ────────────────────────────────────────────────────────────
     if (decision.kind === "final") {
       // INV: TERMINAL_TURN_ONLY — the final turn must have non-empty content (or be global chat)
@@ -860,6 +978,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
       // finalizing → completed
       transition(run, "completed", tracer);
+      run.terminated = true;
+      run.completedAt = Date.now();
       try { tracer?.emit(requestId, "RUN_COMPLETED", { stepCount: run.toolStepCount, durationMs: Date.now() - run.startedAt }); } catch { /* */ }
       try { tracer?.endTrace(requestId, "completed"); } catch { /* */ }
       break;
@@ -876,6 +996,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       if (!decision.recoverable) {
         // Unrecoverable (e.g. MULTIPLE_FINAL_ENVELOPES) — fail immediately
         transition(run, "failed", tracer);
+        run.terminated = true;
+        run.completedAt = Date.now();
         run.failureCode = decision.reason;
         run.failureMessage = `Unrecoverable protocol error: ${decision.reason}`;
         try { tracer?.emit(requestId, "RUN_FAILED", { failureCode: "PROTOCOL_RECOVERY_EXHAUSTED", reason: decision.reason }); } catch { /* */ }
@@ -902,6 +1024,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
       if (run.recoveryCount > MAX_PROTOCOL_RECOVERY_TURNS) {
         transition(run, "failed", tracer);
+        run.terminated = true;
+        run.completedAt = Date.now();
         run.failureCode = "PROTOCOL_RECOVERY_EXHAUSTED";
         run.failureMessage = `Model returned ${run.recoveryCount} consecutive invalid responses`;
         try { tracer?.emit(requestId, "RUN_FAILED", { failureCode: "PROTOCOL_RECOVERY_EXHAUSTED", recoveryCount: run.recoveryCount }); } catch { /* */ }
@@ -962,7 +1086,7 @@ export async function attemptBudgetFinalization(
   apiKey: string,
   messages: SimpleMessage[],
   system: string | undefined,
-  signal: { aborted: boolean },
+  signal: AbortSignal,
   onChunk: (chunk: string) => void,
   isProjectMode: boolean
 ): Promise<{ finalText: string; proposalFenceRaw: string | undefined }> {

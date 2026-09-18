@@ -11,7 +11,7 @@
  */
 import { randomUUID, createHash } from "crypto";
 import { WebContents } from "electron";
-import { IPC, EDIT_IPC } from "../../shared/types.js";
+import { IPC, EDIT_IPC, BROWSER_IPC } from "../../shared/types.js";
 import { assertInvariant } from "../reliability/invariants.js";
 import { tryGetTraceRecorder } from "../reliability/index.js";
 import type { QueueItem, ChatMessage, Conversation, ContextRef, RequestContextLedger, ForgeToolCall, ForgeToolResult, ConvRuntimeState } from "../../shared/types.js";
@@ -448,18 +448,37 @@ export function setSecretGetter(fn: SecretGetter): void {
 
 // ── Active stream signals ──────────────────────────────────────────────────
 
-/** streamId → abort signal, keyed by conversationId */
-const activeStreams = new Map<string, { aborted: boolean; convId: string }>();
+/** streamId → AbortController + conversationId */
+const activeControllers = new Map<string, { controller: AbortController; convId: string }>();
 /** conversationId → streamId */
 const convToStream = new Map<string, string>();
+
+/**
+ * conversationId → resolver that resumes a run suspended in waiting_for_human.
+ * Calling the resolver with no argument resumes (user returned control).
+ * Calling with an error rejects (run cancelled while waiting).
+ */
+const returnControlResolvers = new Map<string, { resolve: () => void; reject: (err: Error) => void }>();
 
 export function getActiveStreamId(convId: string): string | undefined {
   return convToStream.get(convId);
 }
 
 export function cancelStream(streamId: string): void {
-  const sig = activeStreams.get(streamId);
-  if (sig) sig.aborted = true;
+  const entry = activeControllers.get(streamId);
+  if (entry) entry.controller.abort();
+}
+
+/**
+ * Called when the user clicks "Return Control" after the agent surfaced a blocker.
+ * Resolves the waiting_for_human suspension so the run continues.
+ */
+export function returnControl(conversationId: string): void {
+  const resolver = returnControlResolvers.get(conversationId);
+  if (resolver) {
+    returnControlResolvers.delete(conversationId);
+    resolver.resolve();
+  }
 }
 
 // ── Active run registry ────────────────────────────────────────────────────
@@ -754,8 +773,8 @@ export class QueueManager {
     }
 
     const streamId = randomUUID();
-    const signal = { aborted: false, convId: conversationId };
-    activeStreams.set(streamId, signal);
+    const controller = new AbortController();
+    activeControllers.set(streamId, { controller, convId: conversationId });
     convToStream.set(conversationId, streamId);
 
     const startTime = Date.now();
@@ -1053,7 +1072,28 @@ Rules:
         requestId,
         conversationId,
         isProjectMode: isProjectConversation,
-        signal,
+        signal: controller.signal,
+        onWaitingForHuman: (reason) => {
+          return new Promise<void>((resolve, reject) => {
+            // Store resolver so returnControl() can resume the run
+            returnControlResolvers.set(conversationId, { resolve, reject });
+            // Emit event so the renderer can show a "Return Control" button
+            this.send(BROWSER_IPC.WAITING_FOR_HUMAN, {
+              streamId,
+              conversationId,
+              reason,
+            });
+            // Set item to paused so the panel reflects suspended state
+            db.updateQueueItem(true, conversationId, item.id, { status: "paused" });
+            db.setQueuePaused(true, conversationId, true);
+            this.pushQueueState(conversationId);
+            // Wire signal abort to reject the promise (run cancelled while waiting)
+            controller.signal.addEventListener('abort', () => {
+              returnControlResolvers.delete(conversationId);
+              reject(new Error('CANCELLED'));
+            }, { once: true });
+          });
+        },
         onChunk: (chunk) => {
           this.send(IPC.CHAT_STREAM_CHUNK, { streamId, chunk });
         },
@@ -1133,7 +1173,7 @@ Rules:
         );
       }
 
-      activeStreams.delete(streamId);
+      activeControllers.delete(streamId);
       convToStream.delete(conversationId);
       activeRunRegistry.delete(conversationId);
 
@@ -1504,7 +1544,7 @@ Rules:
 
       this.pushQueueState(conversationId);
     } catch (err: unknown) {
-      activeStreams.delete(streamId);
+      activeControllers.delete(streamId);
       convToStream.delete(conversationId);
       activeRunRegistry.delete(conversationId);
 
@@ -1568,21 +1608,6 @@ Rules:
       // No intermediate narration is persisted — only one error ChatMessage.
       // INV: ONE_RUN_ONE_VISIBLE_FAILURE — exactly one error message per failed run.
       if (err instanceof AgentLoopError) {
-        // Special case: AGENT_WAITING_FOR_HUMAN is not a failure — it's a pause.
-        // The queue item stays in "processing" conceptually but we emit a UI notification.
-        // The run resumes when the user clicks "Return Control" (BROWSER_IPC.RETURN_CONTROL).
-        if (err.code === "AGENT_WAITING_FOR_HUMAN") {
-          db.updateQueueItem(true, conversationId, item.id, {
-            status: "paused",
-            lastError: "Waiting for human input in browser. Click 'Return Control' when done.",
-          });
-          db.setQueuePaused(true, conversationId, true);
-          const { BROWSER_IPC } = await import("../../shared/types.js");
-          this.send(BROWSER_IPC.WAITING_FOR_HUMAN, { conversationId, streamId, requestId });
-          this.pushQueueState(conversationId);
-          activeRunRegistry.delete(conversationId);
-          return;
-        }
         let errorContent: string;
         switch (err.code) {
           case "PROTOCOL_RECOVERY_EXHAUSTED":
@@ -1817,7 +1842,7 @@ const _activeProcessingPromises = new Set<Promise<void>>();
  */
 export async function drainForTest(): Promise<void> {
   // Abort all active streams so running processItem calls exit at the next abort-check
-  for (const sig of activeStreams.values()) sig.aborted = true;
+  for (const entry of activeControllers.values()) entry.controller.abort();
   // Wait for all in-flight promises to settle
   const snapshot = Array.from(_activeProcessingPromises);
   if (snapshot.length > 0) {
@@ -1826,10 +1851,11 @@ export async function drainForTest(): Promise<void> {
 }
 
 export function _resetQueueManagerForTest(): void {
-  // Abort all in-flight signals (idempotent — drainForTest may have already done this)
-  for (const sig of activeStreams.values()) sig.aborted = true;
-  activeStreams.clear();
+  // Abort all in-flight controllers (idempotent — drainForTest may have already done this)
+  for (const entry of activeControllers.values()) entry.controller.abort();
+  activeControllers.clear();
   convToStream.clear();
+  returnControlResolvers.clear();
   activeRunRegistry.clear();
   processing.clear();
   _activeProcessingPromises.clear();

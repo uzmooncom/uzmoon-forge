@@ -21,7 +21,7 @@ import * as projectFiles from "../project-files/service.js";
 import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
 import { testConnection } from "../agent-client/client.js";
-import { queueManager, cancelStream, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots } from "../queue/QueueManager.js";
+import { queueManager, cancelStream, returnControl, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots } from "../queue/QueueManager.js";
 import { tryGetIncidentRecorder, assertInvariant } from "../reliability/index.js";
 import * as commandManager from "../commands/command-manager.js";
 import * as browserManager from "../browser/browser-manager.js";
@@ -1651,9 +1651,9 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
 
   ipcMain.handle(
     BROWSER_IPC.RETURN_CONTROL,
-    async (_e: IpcMainInvokeEvent, conversationId: string) => {
-      // Resume the queue — the agent was waiting for human browser interaction
-      await queueManager.resume(conversationId);
+    (_e: IpcMainInvokeEvent, conversationId: string) => {
+      // Signal the in-flight onWaitingForHuman promise to resolve (user returned control)
+      returnControl(conversationId);
     }
   );
 
