@@ -73,6 +73,8 @@ export interface ToolExecutionResult {
   agentReadRef?: AgentReadRef;
   /** Populated when run_command succeeds — to be appended to ledger */
   commandEvidenceRef?: CommandEvidenceRef;
+  /** Populated when browser_screenshot succeeds — injected as ImageContent in next model turn */
+  imageAttachment?: { mimeType: string; data: string };
   /** Milliseconds elapsed executing the tool */
   durationMs: number;
 }
@@ -1098,21 +1100,29 @@ async function handleBrowserTabAction(
         return { result: { callId: call.callId, toolName: call.name, ok: true, data: { action: 'stop', tabId: args.tab_id } } };
       }
       case 'screenshot': {
-        const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-        if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
-        const screenshotResult = await bm.agentScreenshot(ctrl, args.tab_id);
-        return { result: { callId: call.callId, toolName: call.name, ok: true, data: screenshotResult } };
+        const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+        if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+        const screenshotResult = await bm.agentScreenshot(ctrlResult.ctrl, args.tab_id);
+        // Strip data-URI prefix — inject as ImageContent in the next model turn
+        const DATA_URI_PREFIX = 'data:image/png;base64,';
+        const base64Data = screenshotResult.dataUrl.startsWith(DATA_URI_PREFIX)
+          ? screenshotResult.dataUrl.slice(DATA_URI_PREFIX.length)
+          : screenshotResult.dataUrl;
+        return {
+          result: { callId: call.callId, toolName: call.name, ok: true, data: { width: screenshotResult.width, height: screenshotResult.height, url: screenshotResult.url, timestamp: screenshotResult.timestamp } },
+          imageAttachment: { mimeType: 'image/png', data: base64Data },
+        };
       }
       case 'get_console': {
-        const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-        if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
-        const consoleEntries = bm.agentGetConsole(ctrl, args.tab_id);
+        const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+        if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+        const consoleEntries = bm.agentGetConsole(ctrlResult.ctrl, args.tab_id);
         return { result: { callId: call.callId, toolName: call.name, ok: true, data: { entries: consoleEntries, tabId: args.tab_id } } };
       }
       case 'get_network': {
-        const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-        if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
-        const networkSummary = bm.agentGetNetworkSummary(ctrl, args.tab_id);
+        const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+        if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+        const networkSummary = bm.agentGetNetworkSummary(ctrlResult.ctrl, args.tab_id);
         return { result: { callId: call.callId, toolName: call.name, ok: true, data: { requests: networkSummary, tabId: args.tab_id } } };
       }
     }
@@ -1128,8 +1138,9 @@ async function handleBrowserOpenUrl(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     const normalizedUrl = bm.normalizeNavigationInput(args.url);
     await bm.agentOpenUrl(ctrl, args.tab_id, normalizedUrl);
@@ -1146,8 +1157,9 @@ async function handleBrowserReadPage(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     const snapshot = await bm.agentReadPage(ctrl, args.tab_id);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: snapshot } };
@@ -1163,8 +1175,9 @@ async function handleBrowserFindText(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     const result = await bm.agentFindText(ctrl, args.tab_id, args.query);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { query: args.query, matchCount: result.count } } };
@@ -1180,8 +1193,9 @@ async function handleBrowserClick(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     await bm.agentClick(ctrl, args.tab_id, args.ref);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref } } };
@@ -1197,8 +1211,9 @@ async function handleBrowserType(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     await bm.agentType(ctrl, args.tab_id, args.text);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, charsTyped: args.text.length } } };
@@ -1214,8 +1229,9 @@ async function handleBrowserFill(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     await bm.agentFill(ctrl, args.tab_id, args.ref, args.value);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref } } };
@@ -1231,8 +1247,9 @@ async function handleBrowserSelect(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     await bm.agentSelect(ctrl, args.tab_id, args.ref, args.value);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref, value: args.value } } };
@@ -1248,8 +1265,9 @@ async function handleBrowserPressKey(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     await bm.agentPressKey(ctrl, args.tab_id, args.key);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, key: args.key } } };
@@ -1265,8 +1283,9 @@ async function handleBrowserScroll(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     await bm.agentScroll(ctrl, args.tab_id, args.delta_x ?? 0, args.delta_y ?? 0);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, delta_x: args.delta_x ?? 0, delta_y: args.delta_y ?? 0 } } };
@@ -1351,8 +1370,9 @@ async function handleBrowserWaitFor(
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const { BROWSER_LIMITS } = await import('../../shared/types.js');
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control. Call browser_use_session first.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
 
   const timeoutMs = Math.min(args.timeout_ms ?? 10_000, BROWSER_LIMITS.MAX_WAIT_FOR_MS);
   const deadline = Date.now() + timeoutMs;
@@ -1462,8 +1482,9 @@ async function handleBrowserRefAction(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     switch (action) {
       case 'hover':           await bm.agentHover(ctrl, args.tab_id, args.ref); break;
@@ -1485,8 +1506,9 @@ async function handleBrowserDrag(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     await bm.agentDrag(ctrl, args.tab_id, args.source_ref, args.target_ref);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, sourceRef: args.source_ref, targetRef: args.target_ref } } };
@@ -1502,8 +1524,9 @@ async function handleBrowserCheckbox(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     await bm.agentCheckbox(ctrl, args.tab_id, args.ref, args.checked);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, ref: args.ref, checked: args.checked } } };
@@ -1519,8 +1542,9 @@ async function handleBrowserUploadFile(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     // Security: file must be within the project root
     const path_ = await import('path');
@@ -1543,8 +1567,9 @@ async function handleBrowserGetMedia(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     const media = await bm.agentGetMedia(ctrl, args.tab_id);
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { tabId: args.tab_id, media, count: media.length } } };
@@ -1560,8 +1585,9 @@ async function handleBrowserControlMedia(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
+  const ctrl = ctrlResult.ctrl;
   try {
     const result = await bm.agentControlMedia(ctrl, args.tab_id, args.action as never, args.ref, args.value);
     return { result: { callId: call.callId, toolName: call.name, ok: result.ok, data: { tabId: args.tab_id, action: args.action, ...result } } };
@@ -1577,8 +1603,8 @@ async function handleBrowserHandleDialog(
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
   const bm = await import('../browser/browser-manager.js');
-  const ctrl = bm.getAgentControlByRequestId(ctx.requestId);
-  if (!ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'ACCESS_DENIED', errorMessage: 'No active browser agent control.' } };
+  const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
+  if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
   try {
     const resolved = bm.resolvePendingDialog(args.tab_id, args.dialog_id, args.action, args.value);
     if (!resolved) {

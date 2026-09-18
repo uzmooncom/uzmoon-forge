@@ -60,6 +60,7 @@ const mockBm = {
   isBrowserWindowOpen: vi.fn(),
   getBrowserStatus: vi.fn(),
   requestShowBrowser: vi.fn(),
+  resolveAgentBrowserTarget: vi.fn(),
 };
 
 vi.mock("../browser/browser-manager.js", () => mockBm);
@@ -163,6 +164,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockBm.getBrowserRuntimeState.mockReturnValue(mockState);
   mockBm.getAgentControlByRequestId.mockReturnValue(mockCtrl);
+  mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: mockCtrl, errorMessage: undefined });
   mockBm.normalizeNavigationInput.mockImplementation((url: string) => url);
 });
 
@@ -256,7 +258,7 @@ describe("browser_open_url", () => {
   });
 
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(
       makeCall("browser_open_url", { tab_id: "tab-1", url: "https://example.com" }),
       makeCtx(),
@@ -325,7 +327,7 @@ describe("browser_read_page", () => {
   });
 
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(makeCall("browser_read_page", { tab_id: "tab-1" }), makeCtx());
     expect(r.result.ok).toBe(false);
   });
@@ -367,7 +369,7 @@ describe("browser_click", () => {
   });
 
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(
       makeCall("browser_click", { tab_id: "tab-1", ref: "b1" }),
       makeCtx(),
@@ -425,7 +427,7 @@ describe("browser_select", () => {
   });
 
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(
       makeCall("browser_select", { tab_id: "tab-1", ref: "s1", value: "opt-1" }),
       makeCtx(),
@@ -463,20 +465,41 @@ describe("browser_scroll", () => {
 // ── browser_screenshot ────────────────────────────────────────────────────
 
 describe("browser_screenshot", () => {
+  const mockScreenshotData = {
+    dataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI6QAAAABJRU5ErkJggg==",
+    width: 1280,
+    height: 800,
+    url: "https://example.com",
+    timestamp: Date.now(),
+  };
+
   it("calls agentScreenshot with ctrl and tab_id", async () => {
-    mockBm.agentScreenshot.mockResolvedValue({ base64: "abc123", mimeType: "image/png" });
+    mockBm.agentScreenshot.mockResolvedValue(mockScreenshotData);
     await executeProjectTool(makeCall("browser_screenshot", { tab_id: "tab-1" }), makeCtx());
     expect(mockBm.agentScreenshot).toHaveBeenCalledWith(mockCtrl, "tab-1");
   });
 
-  it("returns ok: true on success", async () => {
-    mockBm.agentScreenshot.mockResolvedValue({ base64: "abc", mimeType: "image/png" });
+  it("returns ok: true and imageAttachment on success", async () => {
+    mockBm.agentScreenshot.mockResolvedValue(mockScreenshotData);
     const r = await executeProjectTool(makeCall("browser_screenshot", { tab_id: "tab-1" }), makeCtx());
     expect(r.result.ok).toBe(true);
+    // imageAttachment should be set with base64 data (no data-URI prefix)
+    expect(r.imageAttachment).toBeDefined();
+    expect(r.imageAttachment?.mimeType).toBe("image/png");
+    expect(r.imageAttachment?.data).not.toContain("data:image/png;base64,");
+  });
+
+  it("result data does not contain dataUrl", async () => {
+    mockBm.agentScreenshot.mockResolvedValue(mockScreenshotData);
+    const r = await executeProjectTool(makeCall("browser_screenshot", { tab_id: "tab-1" }), makeCtx());
+    expect(r.result.ok).toBe(true);
+    const data = (r.result as { ok: true; data: Record<string, unknown> }).data;
+    expect(data.dataUrl).toBeUndefined();
+    expect(data.width).toBe(1280);
   });
 
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(makeCall("browser_screenshot", { tab_id: "tab-1" }), makeCtx());
     expect(r.result.ok).toBe(false);
   });
@@ -523,7 +546,7 @@ describe("browser_hover", () => {
     expect(mockBm.agentHover).toHaveBeenCalledWith(mockCtrl, "tab-1", "b3");
   });
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(makeCall("browser_hover", { tab_id: "tab-1", ref: "b3" }), makeCtx());
     expect(r.result.ok).toBe(false);
   });
@@ -536,7 +559,7 @@ describe("browser_double_click", () => {
     expect(mockBm.agentDoubleClick).toHaveBeenCalledWith(mockCtrl, "tab-1", "b2");
   });
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(makeCall("browser_double_click", { tab_id: "tab-1", ref: "b2" }), makeCtx());
     expect(r.result.ok).toBe(false);
   });
@@ -549,7 +572,7 @@ describe("browser_drag", () => {
     expect(mockBm.agentDrag).toHaveBeenCalledWith(mockCtrl, "tab-1", "b1", "b2");
   });
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(makeCall("browser_drag", { tab_id: "tab-1", source_ref: "b1", target_ref: "b2" }), makeCtx());
     expect(r.result.ok).toBe(false);
   });
@@ -602,13 +625,13 @@ describe("browser_upload_file", () => {
     expect(r.result.errorCode).toBe("ACCESS_DENIED");
   });
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(
       makeCall("browser_upload_file", { tab_id: "tab-1", ref: "i4", file_path: "/project/file.txt" }),
       makeCtx(),
     );
     expect(r.result.ok).toBe(false);
-    expect(r.result.errorCode).toBe("ACCESS_DENIED");
+    expect(r.result.errorCode).toBe("BROWSER_ACCESS_DENIED");
   });
 });
 
@@ -621,7 +644,7 @@ describe("browser_get_media", () => {
     expect((r.result as { ok: true; data: { count: number } }).data.count).toBe(1);
   });
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(makeCall("browser_get_media", { tab_id: "tab-1" }), makeCtx());
     expect(r.result.ok).toBe(false);
   });
@@ -667,7 +690,7 @@ describe("browser_handle_dialog", () => {
     expect(r.result.errorCode).toBe("DIALOG_NOT_FOUND");
   });
   it("returns error when no agent control", async () => {
-    mockBm.getAgentControlByRequestId.mockReturnValue(null);
+    mockBm.resolveAgentBrowserTarget.mockResolvedValue({ ctrl: null, errorMessage: 'No active browser session.' });
     const r = await executeProjectTool(
       makeCall("browser_handle_dialog", { tab_id: "tab-1", dialog_id: "d1", action: "accept" }),
       makeCtx(),

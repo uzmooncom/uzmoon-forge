@@ -899,7 +899,7 @@ Browser session management:
 - browser_list_profiles: List browser profiles with their agent access policies.
 - browser_create_session: Create a new browser session for a profile. Returns { sessionId, tabId }.
 - browser_list_sessions: List active browser sessions and their open tabs.
-- browser_use_session: Establish agent control for a session and show the browser UI to the user. Call before interaction tools. Args: session_id (optional), tab_id (optional), purpose (optional).
+- browser_use_session: Establish agent control for a specific session and show the browser UI (optional — the system auto-resolves a browser session for every agent run). Args: session_id (optional), tab_id (optional), purpose (optional).
 - browser_new_tab: Open a new tab in an existing session.
 - browser_close_tab: Close a browser tab.
 - browser_switch_tab: Switch focus to another tab.
@@ -910,7 +910,7 @@ Browser navigation:
 - browser_forward: Navigate forward in tab history.
 - browser_reload: Reload the current page.
 - browser_stop: Stop the current page load.
-- browser_wait_for: Wait for a condition on the page. Conditions: page_load, text_present, text_absent, url_matches. Max wait: 30s.
+- browser_wait_for: Wait for a condition on the page. Conditions: page_load, text_present, text_absent, url_matches, url_equals, title_contains, element_present, element_absent, element_enabled, navigation_settled, network_quiet. Max wait: 30s.
 
 Browser interaction:
 - browser_read_page: Read visible text and interactive element refs. Always call after navigation.
@@ -921,13 +921,13 @@ Browser interaction:
 - browser_select: Select a dropdown option by ref ID.
 - browser_press_key: Press a keyboard key (Return, Escape, Tab, ArrowDown, etc.).
 - browser_scroll: Scroll the page by pixel delta.
-- browser_screenshot: Capture a screenshot (limited to 5 per run — use sparingly).
+- browser_screenshot: Capture a screenshot of the current page (limited to 5 per run). The screenshot image is injected into your context so you can see the page visually — use this when page structure is ambiguous.
 - browser_get_console: Read browser console errors/warnings for a tab.
 - browser_get_network_summary: Read recent network requests for a tab.
 
 Rules:
 - For "browser aç" / "open browser": call browser_open (no permissions needed).
-- For browsing/interaction tasks: call browser_use_session first, then interact.
+- For browsing/interaction tasks: browser context is auto-resolved — call browser_open_url or browser_read_page directly. Use browser_use_session only to target a specific profile/session.
 - Always call browser_read_page after navigation before interacting with elements.
 - Refs from browser_read_page are stale after any navigation — re-read after navigating.
 - Only http/https URLs are allowed. External protocol schemes are blocked.
@@ -989,8 +989,11 @@ Use "blocked" when a CAPTCHA, MFA, or login screen requires human action. Use "f
 You may include a forge_edit_proposal block in the SAME response as forge_final when proposing file changes.
 
 Browser tools:
-- browser_use_session is OPTIONAL — the system auto-resolves browser context from the current run.
-- Use browser_read_page to observe page state before interacting.
+- Browser context is auto-resolved on every agent run — you do NOT need browser_use_session before interaction tools. Just call browser_open_url, browser_read_page, browser_click, etc. directly.
+- Use browser_use_session only when you want to target a specific profile or session explicitly.
+- After browser_screenshot, the image is injected into your context — you will see the page visually in the next turn. Use this when text-only page reading is insufficient.
+- Navigation tools (browser_open_url, browser_back, browser_forward, browser_reload, browser_new_tab) always reset the stall detector — use them freely when changing pages.
+- Use browser_read_page to observe page structure before interacting with elements.
 - New V3 interaction tools: browser_hover, browser_double_click, browser_drag, browser_focus, browser_clear, browser_scroll_into_view, browser_checkbox, browser_upload_file, browser_get_media, browser_control_media, browser_handle_dialog.
 - Use browser_wait_for to wait for page changes after actions. Available conditions: page_load, text_present, text_absent, url_matches, url_equals, title_contains, element_present, element_absent, element_enabled, navigation_settled, network_quiet.
 - If you encounter a CAPTCHA, MFA prompt, or login screen that requires credentials you do not have, return forge_final with status: "blocked" and a clear summary.

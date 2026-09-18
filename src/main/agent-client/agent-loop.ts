@@ -412,32 +412,67 @@ function transition(run: AgentRun, to: AgentRunState, tracer?: ReturnType<typeof
  * Build the message(s) to append after tool execution.
  * Protocol-aware: OpenAI uses role=tool, Anthropic uses tool_result blocks,
  * fallback uses forge_tool_result fence format.
+ *
+ * When a screenshot imageAttachment is present, the last screenshot is injected
+ * as a real image content part in the user message so the model sees the visual.
+ * Earlier screenshots (if multiple in one batch) become text summaries to avoid
+ * flooding multimodal context.
  */
 function buildToolResultMessages(
   protocol: string,
   usedNativeTools: boolean,
-  toolResults: Array<{ call: ForgeToolCall; result: ForgeToolResult }>
+  toolResults: Array<{ call: ForgeToolCall; result: ForgeToolResult }>,
+  imageAttachments: Array<{ callIndex: number; mimeType: string; data: string }> = []
 ): SimpleMessage[] {
+  // Find the last screenshot's attachment (only one image per turn to limit token cost)
+  const lastImg = imageAttachments.length > 0 ? imageAttachments[imageAttachments.length - 1] : null;
+
+  // Helper: build text-only summary for earlier screenshots in the same batch
+  function screenshotSummary(callIdx: number): string {
+    const earlier = imageAttachments.filter((a) => a !== lastImg && a.callIndex === callIdx);
+    if (earlier.length > 0) return `[Screenshot captured — visual context omitted (not the latest screenshot)]`;
+    return "";
+  }
+
   if (!usedNativeTools) {
-    const fences = toolResults
-      .map(({ call, result }) => FORGE_TOOL_RESULT_FENCE(call.callId, result))
-      .join("\n");
+    const fenceParts = toolResults.map(({ call, result }, idx) => {
+      const fence = FORGE_TOOL_RESULT_FENCE(call.callId, result);
+      const summary = screenshotSummary(idx);
+      return summary ? fence + "\n" + summary : fence;
+    });
+    const fences = fenceParts.join("\n");
+    if (lastImg) {
+      // Append image as multipart
+      const content: import("../agent-client/client.js").MessageContent = [
+        { type: "text", text: fences },
+        { type: "image", mimeType: lastImg.mimeType, data: lastImg.data },
+      ];
+      return [{ role: "user", content }];
+    }
     return [{ role: "user", content: fences }];
   }
 
   if (protocol === "anthropic") {
-    const blocks = toolResults.map(({ call, result }) => ({
+    const blocks: Array<Record<string, unknown>> = toolResults.map(({ call, result }) => ({
       type: "tool_result",
       tool_use_id: call.callId,
       content: result.ok
         ? JSON.stringify(result.data ?? "")
         : `Error (${result.errorCode ?? "unknown"}): ${result.errorMessage ?? ""}`,
     }));
+    if (lastImg) {
+      // Anthropic multipart: add image block alongside tool_result blocks
+      const content: Array<Record<string, unknown>> = [
+        { type: "text", text: JSON.stringify(blocks) },
+        { type: "image", source: { type: "base64", media_type: lastImg.mimeType, data: lastImg.data } },
+      ];
+      return [{ role: "user", content: JSON.stringify(content) }];
+    }
     return [{ role: "user", content: JSON.stringify(blocks) }];
   }
 
   // OpenAI: one tool message per result
-  return toolResults.map(({ call, result }) => ({
+  const msgs: SimpleMessage[] = toolResults.map(({ call, result }) => ({
     role: "user" as const,
     content: `[tool_result id="${call.callId}" name="${call.name}"] ${
       result.ok
@@ -445,6 +480,15 @@ function buildToolResultMessages(
         : `Error: ${result.errorMessage ?? result.errorCode ?? "unknown"}`
     }`,
   }));
+  if (lastImg) {
+    // Append a standalone user message with the image
+    const imgContent: import("../agent-client/client.js").MessageContent = [
+      { type: "text", text: `[Screenshot from browser — visual reference for previous tool call]` },
+      { type: "image", mimeType: lastImg.mimeType, data: lastImg.data },
+    ];
+    msgs.push({ role: "user", content: imgContent });
+  }
+  return msgs;
 }
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
@@ -658,6 +702,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       transition(run, "executing_tools", tracer);
 
       const toolResults: Array<{ call: ForgeToolCall; result: ForgeToolResult }> = [];
+      const imageAttachments: Array<{ callIndex: number; mimeType: string; data: string }> = [];
 
       for (const call of decision.calls) {
         if (signal.aborted) {
@@ -675,6 +720,11 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
 
         const execResult = await executeProjectTool(call, ctx);
         const { result, agentReadRef, commandEvidenceRef, durationMs } = execResult;
+
+        // Collect screenshot image attachment for multimodal injection
+        if (execResult.imageAttachment && result.ok) {
+          imageAttachments.push({ callIndex: toolResults.length, ...execResult.imageAttachment });
+        }
 
         if (agentReadRef) {
           agentReadRefs.push(agentReadRef);
@@ -709,11 +759,12 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
         toolResults.push({ call, result });
       }
 
-      // Append tool result messages to history
+      // Append tool result messages to history (with optional screenshot image content)
       const resultMessages = buildToolResultMessages(
         cfg.protocol,
         usedNativeTools,
-        toolResults
+        toolResults,
+        imageAttachments
       );
       messages.push(...resultMessages);
 
@@ -726,6 +777,17 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       const actSig = decision.calls.map((c) => `${c.name}:${JSON.stringify(c.arguments ?? {})}`).join("|");
       const actHash = createHash("sha256").update(actSig).digest("hex").slice(0, 16);
       goalState.toolCallCount += decision.calls.length;
+
+      // Navigation actions prove meaningful progress — always reset stuckScore.
+      const NAVIGATION_TOOLS = new Set(["browser_open_url", "browser_back", "browser_forward", "browser_reload", "browser_new_tab"]);
+      const hadNavigation = decision.calls.some((c) => NAVIGATION_TOOLS.has(c.name));
+      if (hadNavigation) {
+        goalState.stuckScore = 0;
+        goalState.sameObservationCount = 0;
+        goalState.sameActionCount = 0;
+        run.stuckScore = 0;
+      }
+
       if (obsHash === goalState.lastObservationHash) {
         goalState.sameObservationCount++;
       } else {
@@ -736,7 +798,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
       } else {
         goalState.sameActionCount = 0;
       }
-      if (goalState.sameObservationCount > 0 && goalState.sameActionCount > 0) {
+      if (!hadNavigation && goalState.sameObservationCount > 0 && goalState.sameActionCount > 0) {
         goalState.stuckScore++;
         run.stuckScore = goalState.stuckScore;
         if (goalState.stuckScore >= STALL_THRESHOLD) {

@@ -120,6 +120,9 @@ let _dataDir: string | null = null;
 /** Conversation → { sessionId, tabId } binding persisted across agent turns */
 const _conversationBrowserBinding = new Map<string, { sessionId: string; tabId: string }>();
 
+/** requestId → screenshot file paths captured during that agent run (evidence refs) */
+const _screenshotEvidence = new Map<string, string[]>();
+
 /** Whether the standalone browser window is currently open */
 let _browserWindowOpen = false;
 
@@ -877,6 +880,7 @@ export function revokeAgentControl(sessionId: string): void {
   _agentControls.delete(sessionId);
   if (ctrl) {
     _agentBudgets.delete(ctrl.requestId);
+    _screenshotEvidence.delete(ctrl.requestId);
   }
   pushToRenderer(BROWSER_IPC.AGENT_CONTROL_CHANGED, null);
 }
@@ -1465,15 +1469,31 @@ export async function agentScreenshot(
   const dataUrl = `data:image/png;base64,${image.toPNG().toString("base64")}`;
 
   // Optionally save to file for evidence refs
+  let savedPath: string | undefined;
   if (_dataDir) {
     const screenshotDir = path.join(_dataDir, "browser-screenshots");
     const filename = `${tabId}-${Date.now()}.png`;
     const filepath = path.join(screenshotDir, filename);
-    try { fs.writeFileSync(filepath, image.toPNG()); } catch { /* non-fatal */ }
+    try {
+      fs.writeFileSync(filepath, image.toPNG());
+      savedPath = filepath;
+    } catch { /* non-fatal */ }
+  }
+
+  // Record evidence ref for this requestId
+  if (savedPath) {
+    const existing = _screenshotEvidence.get(ctrl.requestId) ?? [];
+    existing.push(savedPath);
+    _screenshotEvidence.set(ctrl.requestId, existing);
   }
 
   emitTrace("BROWSER_AGENT_ACTION", ctrl.requestId, { action: "screenshot", tabId, width: size.width, height: size.height });
   return { dataUrl, width: size.width, height: size.height, url: tab.url, timestamp: Date.now() };
+}
+
+/** Return screenshot file paths captured during the given agent request (evidence refs). */
+export function getScreenshotEvidence(requestId: string): string[] {
+  return _screenshotEvidence.get(requestId) ?? [];
 }
 
 /** Get bounded console log entries for a tab. */
