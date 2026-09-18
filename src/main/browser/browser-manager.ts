@@ -260,10 +260,53 @@ export function setBrowserNativeWindow(
   _browserWindow = win;
   _browserWindowOpen = win !== null;
 
-  // When the native window becomes available, hydrate any tabs that were created
-  // before the window existed (i.e. no WebContentsView yet).
-  if (win !== null && electronWebContentsView) {
+  if (win === null) {
+    // Window closed: destroy all WebContentsViews so they don't hold stale refs.
+    // Active agent controls referencing destroyed views will fail gracefully on
+    // next tool call — this is correct; the agent must request access again.
+    for (const [tabId, view] of _tabViews) {
+      try {
+        if (!view.webContents.isDestroyed()) {
+          view.webContents.stop();
+        }
+      } catch { /* non-fatal — view may already be destroyed */ }
+      _tabViews.delete(tabId);
+    }
+    // Clear agent controls so the next request goes through approval again
+    _agentControls.clear();
+    _conversationBrowserBinding.clear();
+  } else if (electronWebContentsView) {
+    // When the native window becomes available, hydrate any tabs that were created
+    // before the window existed (i.e. no WebContentsView yet).
     void _hydrateOrphanedTabs(win);
+  }
+}
+
+/**
+ * V17: Check whether the browser window is healthy (not destroyed, not stale).
+ * Single source of truth — avoids _browserWindow/_browserWindowOpen desync.
+ */
+export function isBrowserWindowHealthy(): boolean {
+  if (!_browserWindow) return false;
+  // If the object doesn't have isDestroyed (e.g. stubs/tests), treat as healthy
+  if (typeof (_browserWindow as { isDestroyed?: unknown }).isDestroyed !== "function") return true;
+  try {
+    if (_browserWindow.isDestroyed()) {
+      // Reconcile: window was destroyed externally without us being notified
+      _browserWindow = null;
+      _browserWindowOpen = false;
+      return false;
+    }
+    if (_browserWindow.webContents?.isDestroyed?.()) {
+      _browserWindow = null;
+      _browserWindowOpen = false;
+      return false;
+    }
+    return true;
+  } catch {
+    _browserWindow = null;
+    _browserWindowOpen = false;
+    return false;
   }
 }
 
@@ -2227,6 +2270,10 @@ export function getBrowserRuntimeState(): BrowserRuntimeState {
 // ── V2.1: Read-only status (no agent control required) ─────────────────────
 
 export function isBrowserWindowOpen(): boolean {
+  // V17: validate actual window health, not just the flag (handles desync on macOS)
+  if (_browserWindowOpen && !isBrowserWindowHealthy()) {
+    _browserWindowOpen = false;
+  }
   return _browserWindowOpen;
 }
 
@@ -2251,6 +2298,28 @@ export function getBrowserStatus(): BrowserStatusSnapshot {
     activeTitle: activeTab?.title ?? null,
     activeProfileName: activeProfile?.name ?? null,
     agentControlActive: agentControl !== null,
+  };
+}
+
+/**
+ * V17: Browser diagnostic summary for the Dev Panel.
+ */
+export function getBrowserDevSummary(): {
+  windowOpen: boolean;
+  windowHealthy: boolean;
+  tabCount: number;
+  activeAgentControls: number;
+  conversationBindings: number;
+  pendingApprovals: number;
+} {
+  const healthy = isBrowserWindowHealthy();
+  return {
+    windowOpen: _browserWindowOpen,
+    windowHealthy: healthy,
+    tabCount: _tabViews.size,
+    activeAgentControls: _agentControls.size,
+    conversationBindings: _conversationBrowserBinding.size,
+    pendingApprovals: _pendingApprovals.size,
   };
 }
 

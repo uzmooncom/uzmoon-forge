@@ -129,11 +129,9 @@ function QueuePanel({
             className="flex items-start gap-2 px-3 py-2 border-b border-white/5 bg-red-900/10"
           >
             <div className="flex-1 min-w-0">
-              <div className="text-[11px] text-red-400/70 mb-0.5">Failed</div>
+              <div className="text-[11px] text-red-400/70 mb-0.5">Failed — use Retry or Skip to continue</div>
               <div className="text-xs text-white/60 truncate">{item.content.slice(0, 80)}</div>
-              {item.lastError && (
-                <div className="text-[10px] text-red-400/60 mt-0.5 truncate">{item.lastError}</div>
-              )}
+              {/* lastError suppressed here — the error message is already shown in the chat above */}
             </div>
             <div className="flex gap-1 flex-shrink-0">
               <button
@@ -286,8 +284,8 @@ export default function ChatScreen({
   // ── Delete confirm ─────────────────────────────────────────────────────
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
-  // ── waiting_for_human — set when agent needs browser intervention ───────
-  const [waitingForHumanConvId, setWaitingForHumanConvId] = useState<string | null>(null);
+  // ── waiting_for_human — per-conversation map (V17 fix: was single string, caused cross-conv contamination)
+  const [waitingForHumanMap, setWaitingForHumanMap] = useState<Record<string, boolean>>({});
 
   // ── Draft conversation id ──────────────────────────────────────────────
   const draftConvId = useRef<string>(randomId());
@@ -489,7 +487,12 @@ export default function ChatScreen({
         lastHydratedRevisionRef.current = Number.MAX_SAFE_INTEGER;
       }
       // If this conversation was waiting for human, clear the banner on resume
-      setWaitingForHumanConvId((prev) => prev === convId ? null : prev);
+      setWaitingForHumanMap((prev) => {
+        if (!prev[convId]) return prev;
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
       setStreaming({ streamId, text: "", conversationId: convId }, convId);
       if (conversation) {
         setConversations((prev) => {
@@ -557,7 +560,7 @@ export default function ChatScreen({
     });
 
     const unsubWaiting = window.forgeApi.browser.onWaitingForHuman(({ conversationId }) => {
-      setWaitingForHumanConvId(conversationId);
+      setWaitingForHumanMap((prev) => ({ ...prev, [conversationId]: true }));
     });
 
     return () => {
@@ -1316,7 +1319,7 @@ export default function ChatScreen({
             {streaming && <StreamingBubble text={streaming.text} streamId={streaming.streamId} />}
 
             {/* waiting_for_human banner — agent paused for browser intervention */}
-            {!streaming && waitingForHumanConvId === activeConvId && (
+            {!streaming && activeConvId && waitingForHumanMap[activeConvId] && (
               <div className="group flex flex-col gap-0 py-3 px-1">
                 <div className="flex items-center gap-2 mb-2">
                   <div className="w-4 h-4 rounded flex items-center justify-center bg-amber-500/20 flex-shrink-0">
@@ -1331,7 +1334,11 @@ export default function ChatScreen({
                   onClick={async () => {
                     if (activeConvId) {
                       await window.forgeApi.browser.returnBrowserControl(activeConvId);
-                      setWaitingForHumanConvId(null);
+                      setWaitingForHumanMap((prev) => {
+                        const next = { ...prev };
+                        delete next[activeConvId];
+                        return next;
+                      });
                     }
                   }}
                   className="ml-6 px-3 py-1.5 text-xs font-medium rounded border border-amber-500/30 text-amber-400 hover:bg-amber-500/10 hover:border-amber-500/50 transition-all w-fit"

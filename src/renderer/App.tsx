@@ -6,6 +6,7 @@ import ChatScreen from "./screens/ChatScreen.js";
 import ProjectsScreen from "./screens/ProjectsScreen.js";
 import ProjectWorkspace from "./screens/ProjectWorkspace.js";
 import AgentProfilesModal from "./components/AgentProfilesModal.js";
+import { DevPanel } from "./components/DevPanel.js";
 // BrowserWorkspace removed — browser runs as a standalone native window
 
 // ── Nav icons ──────────────────────────────────────────────────────────────
@@ -194,6 +195,19 @@ export default function App(): React.ReactElement {
   const [screen, setScreen] = useState<Screen>("loading");
   const [appState, setAppState] = useState<AppState | null>(null);
   const [showProfilesModal, setShowProfilesModal] = useState(false);
+  const [showDevPanel, setShowDevPanel] = useState(false);
+
+  // V17: Cmd+Shift+D toggles the Dev Panel (development aid)
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "D") {
+        e.preventDefault();
+        setShowDevPanel((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -240,6 +254,9 @@ export default function App(): React.ReactElement {
       <MainShell onOpenSettings={() => setShowProfilesModal(true)} />
       {showProfilesModal && (
         <AgentProfilesModal onClose={() => setShowProfilesModal(false)} />
+      )}
+      {showDevPanel && (
+        <DevPanel onClose={() => setShowDevPanel(false)} />
       )}
     </>
   );

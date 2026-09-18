@@ -14,7 +14,7 @@ import { WebContents } from "electron";
 import { IPC, EDIT_IPC, BROWSER_IPC } from "../../shared/types.js";
 import { assertInvariant } from "../reliability/invariants.js";
 import { tryGetTraceRecorder } from "../reliability/index.js";
-import type { QueueItem, ChatMessage, Conversation, ContextRef, RequestContextLedger, ForgeToolCall, ForgeToolResult, ConvRuntimeState } from "../../shared/types.js";
+import type { QueueItem, ChatMessage, Conversation, ContextRef, RequestContextLedger, ForgeToolCall, ForgeToolResult, ConvRuntimeState, AgentRunState } from "../../shared/types.js";
 import * as db from "../database/db.js";
 import { classifyError } from "../agent-client/client.js";
 import type { SimpleMessage, ImageContent } from "../agent-client/client.js";
@@ -488,9 +488,13 @@ export function returnControl(conversationId: string): void {
 
 type LiveToolEntry = ConvRuntimeState["toolActivity"][number];
 
-interface ActiveRunEntry {
+export interface ActiveRunEntry {
   streamId: string;
   requestId: string;
+  /** V17: canonical run ID for late-event firewall */
+  agentRunId: string;
+  /** V17: explicit state machine state */
+  state: AgentRunState;
   conversationId: string;
   agentProfileId: string;
   agentNameSnapshot: string;
@@ -499,6 +503,12 @@ interface ActiveRunEntry {
   toolActivity: LiveToolEntry[];
   exploredCount: number;
   revision: number;
+  /** V17: true when agent is suspended waiting for human (CAPTCHA/MFA) */
+  waitingForHuman: boolean;
+  /** V17: human-required reason when waitingForHuman is true */
+  humanRequiredReason?: string;
+  /** V17: true when a browser approval dialog is pending */
+  approvalPending: boolean;
 }
 
 /** conversationId → live run entry */
@@ -507,10 +517,14 @@ const activeRunRegistry = new Map<string, ActiveRunEntry>();
 export function getRuntimeState(convId: string): ConvRuntimeState | null {
   const entry = activeRunRegistry.get(convId);
   if (!entry) return null;
-  return {
+  // Queue position: running item is always 0 (it's the one being processed)
+  const queuePosition = 0;
+  const state: ConvRuntimeState = {
     conversationId: entry.conversationId,
     streamId: entry.streamId,
     requestId: entry.requestId,
+    agentRunId: entry.agentRunId,
+    state: entry.state,
     agentProfileId: entry.agentProfileId,
     agentNameSnapshot: entry.agentNameSnapshot,
     modelSnapshot: entry.modelSnapshot,
@@ -518,7 +532,88 @@ export function getRuntimeState(convId: string): ConvRuntimeState | null {
     toolActivity: structuredClone(entry.toolActivity),
     exploredCount: entry.exploredCount,
     revision: entry.revision,
+    waitingForHuman: entry.waitingForHuman,
+    approvalPending: entry.approvalPending,
+    queuePosition,
   };
+  if (entry.humanRequiredReason !== undefined) {
+    state.humanRequiredReason = entry.humanRequiredReason;
+  }
+  return state;
+}
+
+/**
+ * V17: Return all active run entries (for Dev Panel).
+ * Returns shallow copies — callers must not mutate.
+ */
+export function getActiveRunEntries(): ActiveRunEntry[] {
+  return Array.from(activeRunRegistry.values()).map((e) => structuredClone(e));
+}
+
+/**
+ * V17: Return per-conversation queue summary (for Dev Panel).
+ */
+export function getQueueSummary(): Array<{
+  conversationId: string;
+  queuedCount: number;
+  processingCount: number;
+  failedCount: number;
+  paused: boolean;
+}> {
+  // Report summary for conversations that have active runs
+  // (full cross-conversation queue scan would require a new DB method)
+  return Array.from(activeRunRegistry.keys()).map((cid) => {
+    const items = db.getConvQueue(true, cid)?.items ?? [];
+    return {
+      conversationId: cid,
+      queuedCount: items.filter((i) => i.status === "queued").length,
+      processingCount: items.filter((i) => i.status === "processing").length,
+      failedCount: items.filter((i) => i.status === "failed").length,
+      paused: db.getConvQueue(true, cid)?.paused ?? false,
+    };
+  });
+}
+
+// ── Terminal CAS + Late-Event Firewall (V17) ─────────────────────────────
+
+/** Terminal states — once entered, no further mutations are valid */
+const TERMINAL_RUN_STATES = new Set<AgentRunState>([
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+/**
+ * trySetTerminal — CAS guard for run termination.
+ * First caller wins; subsequent calls are no-ops (returns false).
+ */
+function trySetTerminal(
+  convId: string,
+  requestId: string,
+  terminal: "completed" | "failed" | "cancelled",
+): boolean {
+  const entry = activeRunRegistry.get(convId);
+  if (!entry) return false; // already cleaned up
+  if (entry.requestId !== requestId) return false; // stale identity
+  if (TERMINAL_RUN_STATES.has(entry.state)) return false; // second caller loses
+  entry.state = terminal;
+  entry.waitingForHuman = false;
+  entry.approvalPending = false;
+  entry.revision++;
+  return true;
+}
+
+/**
+ * isEventValidForRun — late-event firewall.
+ * Returns false when a stream/tool event arrives after the run has terminated.
+ * Callers should silently drop the event when this returns false.
+ */
+function isEventValidForRun(convId: string, eventStreamId: string): boolean {
+  const entry = activeRunRegistry.get(convId);
+  if (!entry) return false;
+  if (entry.streamId !== eventStreamId) return false; // different run
+  if (TERMINAL_RUN_STATES.has(entry.state)) return false;
+  return true;
 }
 
 // ── Dispatch lock ──────────────────────────────────────────────────────────
@@ -784,6 +879,8 @@ export class QueueManager {
     const runEntry: ActiveRunEntry = {
       streamId,
       requestId: "", // filled in after requestId is created below
+      agentRunId: "",  // filled in after AgentRun is created below
+      state: "starting",
       conversationId,
       agentProfileId: profile.id,
       agentNameSnapshot: profile.name,
@@ -792,6 +889,8 @@ export class QueueManager {
       toolActivity: [],
       exploredCount: 0,
       revision: 1,
+      waitingForHuman: false,
+      approvalPending: false,
     };
     activeRunRegistry.set(conversationId, runEntry);
     let fullText = "";
@@ -1033,7 +1132,10 @@ Rules:
     // Create RequestContextLedger for this request
     const requestId = randomUUID();
     // Backfill requestId into the registry entry now that we have it
+    // agentRunId === requestId (requestId is the canonical run identity)
     runEntry.requestId = requestId;
+    runEntry.agentRunId = requestId;
+    runEntry.state = "starting";
 
     // Trace wiring — start trace for this request
     const _tracer = tryGetTraceRecorder();
@@ -1059,6 +1161,10 @@ Rules:
       updatedAt: Date.now(),
     };
 
+    // Mark the run as actively executing in the live registry
+    runEntry.state = "processing_turn";
+    runEntry.revision++;
+
     try {
       const loopResult = await runAgentLoop({
         cfg,
@@ -1078,6 +1184,14 @@ Rules:
           return new Promise<void>((resolve, reject) => {
             // Store resolver so returnControl() can resume the run
             returnControlResolvers.set(conversationId, { resolve, reject });
+            // Update live registry so renderer snapshot reflects waiting state
+            const liveEntry = activeRunRegistry.get(conversationId);
+            if (liveEntry) {
+              liveEntry.state = "waiting_for_human";
+              liveEntry.waitingForHuman = true;
+              if (reason) Object.assign(liveEntry, { humanRequiredReason: reason.kind });
+              liveEntry.revision++;
+            }
             // Emit event so the renderer can show a "Return Control" button
             this.send(BROWSER_IPC.WAITING_FOR_HUMAN, {
               streamId,
@@ -1096,14 +1210,20 @@ Rules:
           });
         },
         onChunk: (chunk) => {
+          // V17: late-event firewall — drop chunks from terminated runs
+          if (!isEventValidForRun(conversationId, streamId)) return;
           this.send(IPC.CHAT_STREAM_CHUNK, { streamId, chunk });
         },
         onIntermediateText: (text: string) => {
+          // V17: late-event firewall
+          if (!isEventValidForRun(conversationId, streamId)) return;
           // Transient activity label from an intermediate (non-terminal) provider turn.
           // Sent to the renderer for display-only — never persisted as a Chat message.
           this.send(IPC.CHAT_STREAM_ACTIVITY_TEXT, { streamId, text });
         },
         onToolStart: (call: ForgeToolCall) => {
+          // V17: late-event firewall
+          if (!isEventValidForRun(conversationId, streamId)) return;
           // Update live registry for renderer hydration
           const entry = activeRunRegistry.get(conversationId);
           if (entry) {
@@ -1118,6 +1238,8 @@ Rules:
           this.send(IPC.CHAT_STREAM_TOOL_START, { streamId, requestId, call });
         },
         onToolEnd: (call: ForgeToolCall, result: ForgeToolResult, durationMs: number) => {
+          // V17: late-event firewall
+          if (!isEventValidForRun(conversationId, streamId)) return;
           // Update live registry
           const entry = activeRunRegistry.get(conversationId);
           if (entry) {
@@ -1174,6 +1296,8 @@ Rules:
         );
       }
 
+      // V17: terminal CAS — mark as completed before cleanup; first caller wins
+      trySetTerminal(conversationId, requestId, "completed");
       activeControllers.delete(streamId);
       convToStream.delete(conversationId);
       activeRunRegistry.delete(conversationId);
@@ -1545,6 +1669,11 @@ Rules:
 
       this.pushQueueState(conversationId);
     } catch (err: unknown) {
+      // V17: terminal CAS — determine terminal state before cleanup
+      const isCancelledForCas =
+        (err instanceof AgentLoopError && err.code === "CANCELLED") ||
+        (err instanceof Error && err.message === "cancelled");
+      trySetTerminal(conversationId, requestId, isCancelledForCas ? "cancelled" : "failed");
       activeControllers.delete(streamId);
       convToStream.delete(conversationId);
       activeRunRegistry.delete(conversationId);

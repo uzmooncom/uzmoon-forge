@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -722,6 +722,37 @@ const forgeApi = {
       const listener = (_event: Electron.IpcRendererEvent, record: DevProcessRecord) => cb(record);
       ipcRenderer.on(DEV_PROCESS_IPC.STATE_CHANGED, listener);
       return () => ipcRenderer.removeListener(DEV_PROCESS_IPC.STATE_CHANGED, listener);
+    },
+  },
+
+  // ── Telemetry / Log API (V17) ─────────────────────────────────────────
+  telemetry: {
+    getEvents: (opts: {
+      minLevel?: string;
+      category?: string;
+      conversationId?: string;
+      requestId?: string;
+      agentRunId?: string;
+      search?: string;
+      limit?: number;
+    } = {}): Promise<unknown[]> =>
+      ipcRenderer.invoke(TELEMETRY_IPC.GET_EVENTS, opts),
+    clear: (): Promise<void> =>
+      ipcRenderer.invoke(TELEMETRY_IPC.CLEAR),
+  },
+
+  // ── Dev Panel API (V17) ──────────────────────────────────────────────
+  devPanel: {
+    getSnapshot: (): Promise<unknown> =>
+      ipcRenderer.invoke(DEV_PANEL_IPC.GET_SNAPSHOT),
+    getRunTimeline: (requestId: string): Promise<unknown> =>
+      ipcRenderer.invoke(DEV_PANEL_IPC.GET_RUN_TIMELINE, requestId),
+    exportBundle: (): Promise<unknown> =>
+      ipcRenderer.invoke(DEV_PANEL_IPC.EXPORT_BUNDLE),
+    onSnapshotUpdated: (cb: () => void): UnsubFn => {
+      const listener = () => cb();
+      ipcRenderer.on(DEV_PANEL_IPC.SNAPSHOT_UPDATED, listener);
+      return () => ipcRenderer.removeListener(DEV_PANEL_IPC.SNAPSHOT_UPDATED, listener);
     },
   },
 };

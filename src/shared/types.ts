@@ -206,11 +206,18 @@ export interface QueueItem {
  * Snapshot of an actively-running (or just-completed) AgentRun that the renderer
  * uses to reconstruct transient streaming UI when mounting mid-run.
  * Only populated while a run is in progress; null means idle.
+ *
+ * V17: extended with agentRunId, state, waitingForHuman, approvalPending
+ * so the renderer can derive ALL display booleans from this single snapshot.
  */
 export interface ConvRuntimeState {
   conversationId: string;
   streamId: string;
   requestId: string;
+  /** V17: canonical run identity for late-event firewall validation */
+  agentRunId: string;
+  /** V17: explicit state for UI derivation — no independent booleans needed */
+  state: AgentRunState;
   agentProfileId: string;
   agentNameSnapshot: string;
   modelSnapshot: string;
@@ -229,6 +236,14 @@ export interface ConvRuntimeState {
   exploredCount: number;
   /** Monotonic revision counter — renderer ignores hydration older than current local revision */
   revision: number;
+  /** V17: true when agent is waiting for human intervention (CAPTCHA/MFA/etc.) */
+  waitingForHuman: boolean;
+  /** V17: human-required reason if waitingForHuman is true */
+  humanRequiredReason?: string;
+  /** V17: true when a browser approval is pending for this run */
+  approvalPending: boolean;
+  /** V17: queue position (0 = currently running, >0 = waiting) */
+  queuePosition: number;
 }
 
 /** What the renderer receives about a conversation's queue */
@@ -1803,6 +1818,28 @@ export const DEV_PROCESS_IPC = {
   STOP:           "devProcess:stop",
   // Main → Renderer push
   STATE_CHANGED:  "devProcess:stateChanged",
+} as const;
+
+/** V17 IPC channels for structured telemetry / Dev Panel */
+export const TELEMETRY_IPC = {
+  /** Get recent log entries (optionally filtered) */
+  GET_EVENTS: "telemetry:getEvents",
+  /** Clear log ring buffer */
+  CLEAR: "telemetry:clear",
+  /** Set minimum log level */
+  SET_LEVEL: "telemetry:setLevel",
+} as const;
+
+/** V17 IPC channels for developer diagnostics panel */
+export const DEV_PANEL_IPC = {
+  /** Get full dev snapshot (runs, streams, queue, browser, incidents) */
+  GET_SNAPSHOT: "devPanel:getSnapshot",
+  /** Get semantic timeline for one agentRunId */
+  GET_RUN_TIMELINE: "devPanel:getRunTimeline",
+  /** Export sanitized diagnostic bundle */
+  EXPORT_BUNDLE: "devPanel:exportBundle",
+  /** Push from main: snapshot invalidated (live updates) */
+  SNAPSHOT_UPDATED: "devPanel:snapshotUpdated",
 } as const;
 
 /** V0.9 IPC channels for reliability */

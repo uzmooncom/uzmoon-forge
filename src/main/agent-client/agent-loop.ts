@@ -41,6 +41,7 @@ import type {
 } from "../../shared/types.js";
 import { makeRequest } from "./client.js";
 import type { SimpleMessage } from "./client.js";
+import { isFakeProviderEnabled, fakeRequest } from "./fake-provider.js";
 import { TOOL_LIMITS, buildOpenAIToolDefs, buildAnthropicToolDefs } from "./tool-types.js";
 import { executeProjectTool, buildResultSummary, newActivityId } from "../project-files/tool-executor.js";
 import type { ToolExecutionContext } from "../project-files/tool-executor.js";
@@ -67,6 +68,19 @@ export class AgentLoopError extends Error {
     this.name = "AgentLoopError";
     this.code = code;
   }
+}
+
+// ── Provider dispatch (V17 fake provider hook) ───────────────────────────────
+
+/**
+ * Dispatch a provider request — routes to the fake provider when
+ * FORGE_TEST_PROVIDER=fake is set (for Playwright e2e tests).
+ */
+async function callProvider(opts: Parameters<typeof makeRequest>[0]): Promise<string> {
+  if (isFakeProviderEnabled()) {
+    return fakeRequest(opts as unknown as Parameters<typeof fakeRequest>[0]);
+  }
+  return makeRequest(opts);
 }
 
 // ── Public options / result ───────────────────────────────────────────────────
@@ -709,7 +723,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     try { tracer?.emit(requestId, "PROVIDER_REQUEST_STARTED", { step: run.toolStepCount, budgetExhausted }); } catch { /* */ }
     let rawText: string;
     try {
-      rawText = await makeRequest({
+      rawText = await callProvider({
         cfg,
         apiKey,
         messages,
@@ -1096,7 +1110,7 @@ export async function attemptBudgetFinalization(
   let buffer = "";
   let rawText = "";
   try {
-    rawText = await makeRequest({
+    rawText = await callProvider({
       cfg,
       apiKey,
       messages,

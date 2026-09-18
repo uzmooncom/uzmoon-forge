@@ -1,8 +1,8 @@
-import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell } from "electron";
+import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell, app } from "electron";
 import { randomUUID, createHash } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -21,8 +21,10 @@ import * as projectFiles from "../project-files/service.js";
 import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
 import { testConnection } from "../agent-client/client.js";
-import { queueManager, cancelStream, returnControl, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots } from "../queue/QueueManager.js";
+import { queueManager, cancelStream, returnControl, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots, getActiveRunEntries, getQueueSummary } from "../queue/QueueManager.js";
 import { tryGetIncidentRecorder, assertInvariant } from "../reliability/index.js";
+import { forgeLogger } from "../telemetry/logger.js";
+import { buildDevSnapshot, getRunTimeline, buildDiagnosticBundle, initDevState } from "../telemetry/dev-state.js";
 import * as commandManager from "../commands/command-manager.js";
 import * as browserManager from "../browser/browser-manager.js";
 import * as browserWindowController from "../browser/browser-window-controller.js";
@@ -1675,5 +1677,48 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   ipcMain.handle(
     DEV_PROCESS_IPC.STOP,
     (_e: IpcMainInvokeEvent, processId: string) => devProcessManager.stopDevProcess(processId)
+  );
+
+  // ── Telemetry / Log IPC (V17) ─────────────────────────────────────────
+  ipcMain.handle(
+    TELEMETRY_IPC.GET_EVENTS,
+    (_e: IpcMainInvokeEvent, opts: {
+      minLevel?: string;
+      category?: string;
+      conversationId?: string;
+      requestId?: string;
+      agentRunId?: string;
+      search?: string;
+      limit?: number;
+    } = {}) => forgeLogger.query(opts as Parameters<typeof forgeLogger.query>[0])
+  );
+
+  ipcMain.handle(
+    TELEMETRY_IPC.CLEAR,
+    () => { forgeLogger.clear(); }
+  );
+
+  // ── Dev Panel IPC (V17) ──────────────────────────────────────────────
+  // Initialize dev-state accessors (wired here to avoid circular dep)
+  initDevState({
+    getActiveRuns: () => getActiveRunEntries(),
+    getQueueSummary: () => getQueueSummary(),
+    getBrowserSummary: () => browserManager.getBrowserDevSummary(),
+    appVersion: app.getVersion(),
+  });
+
+  ipcMain.handle(
+    DEV_PANEL_IPC.GET_SNAPSHOT,
+    () => buildDevSnapshot()
+  );
+
+  ipcMain.handle(
+    DEV_PANEL_IPC.GET_RUN_TIMELINE,
+    (_e: IpcMainInvokeEvent, requestId: string) => getRunTimeline(requestId)
+  );
+
+  ipcMain.handle(
+    DEV_PANEL_IPC.EXPORT_BUNDLE,
+    () => buildDiagnosticBundle()
   );
 }

@@ -138,6 +138,12 @@ export function sanitizeState(
   for (const [k, v] of Object.entries(state)) {
     const keyLower = k.toLowerCase();
 
+    // Redact sensitive top-level keys (same check as sanitizeValue does for nested keys)
+    if (SENSITIVE_KEYS.has(keyLower)) {
+      out[k] = "[REDACTED]";
+      continue;
+    }
+
     // Drop raw content unless explicitly allowed
     if (
       opts.omitContent &&
