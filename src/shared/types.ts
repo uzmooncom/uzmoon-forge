@@ -1454,6 +1454,37 @@ export interface BrowserEvidenceRef {
   type: "page_read" | "screenshot" | "console" | "network";
 }
 
+/** A saved browser bookmark */
+export interface BrowserBookmark {
+  id: string;
+  profileId: string;
+  url: string;
+  title: string;
+  favicon?: string;
+  folderId?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** A browsing history entry (never persisted for private profiles) */
+export interface BrowserHistoryEntry {
+  id: string;
+  profileId: string;
+  url: string;
+  title: string;
+  visitedAt: number;
+}
+
+/** Browser status snapshot — read-only, no agent control required */
+export interface BrowserStatusSnapshot {
+  isWindowOpen: boolean;
+  tabCount: number;
+  activeUrl: string | null;
+  activeTitle: string | null;
+  activeProfileName: string | null;
+  agentControlActive: boolean;
+}
+
 /** Download item visible to renderer */
 export interface BrowserDownloadItem {
   id: string;
@@ -1555,6 +1586,18 @@ export const BROWSER_IPC = {
   FOCUS_WINDOW:          "browser:focusWindow",
   // Browser renderer → Main: renderer is ready
   BROWSER_RENDERER_READY: "browser:rendererReady",
+  // Bookmark CRUD
+  BOOKMARK_LIST:         "browser:bookmarkList",
+  BOOKMARK_ADD:          "browser:bookmarkAdd",
+  BOOKMARK_REMOVE:       "browser:bookmarkRemove",
+  BOOKMARK_UPDATE:       "browser:bookmarkUpdate",
+  // History
+  HISTORY_LIST:          "browser:historyList",
+  HISTORY_CLEAR:         "browser:historyClear",
+  // Read-only status (no agent control required)
+  BROWSER_STATUS:        "browser:status",
+  // Approval dialog shown in browser renderer
+  APPROVAL_SHOW:         "browser:approvalShow",
 } as const;
 
 // ── Dev Process (Long-Running Project Processes) ──────────────────────────

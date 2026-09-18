@@ -98,6 +98,10 @@ export type KnownToolName =
   | "browser_create_session"
   | "browser_use_session"
   | "browser_wait_for"
+  // ── Browser Runtime V2.1 (read-only + open) ───────────────────────
+  | "is_browser_open"
+  | "get_browser_status"
+  | "browser_open"
   // ── Dev Process (Long-Running Project Processes) ──────────────────
   | "start_project_process"
   | "list_project_processes"
@@ -139,6 +143,10 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   "browser_create_session",
   "browser_use_session",
   "browser_wait_for",
+  // Browser Runtime V2.1
+  "is_browser_open",
+  "get_browser_status",
+  "browser_open",
   // Dev Process
   "start_project_process",
   "list_project_processes",
@@ -284,6 +292,10 @@ export function validateToolCall(call: ForgeToolCall): ValidationResult {
     case "browser_create_session":  return validateBrowserCreateSession(args);
     case "browser_use_session":     return validateBrowserUseSession(args);
     case "browser_wait_for":        return validateBrowserWaitFor(args);
+    // ── Browser Runtime V2.1 ──────────────────────────────────────────
+    case "is_browser_open":        return { ok: true, toolName: "is_browser_open", args: {} };
+    case "get_browser_status":     return { ok: true, toolName: "get_browser_status", args: {} };
+    case "browser_open":           return { ok: true, toolName: "browser_open", args: {} };
     // ── Dev Process ───────────────────────────────────────────────────
     case "start_project_process":        return validateStartProjectProcess(args);
     case "list_project_processes":       return { ok: true, toolName: "list_project_processes", args: {} };
@@ -1050,6 +1062,32 @@ const TOOL_DEFS: Array<{
       },
       required: ['tab_id', 'condition'],
     },
+  },
+  // ── Browser Runtime V2.1 ────────────────────────────────────────────────
+  {
+    name: 'is_browser_open',
+    description:
+      'Check whether Forge Browser is currently open. ' +
+      'Returns { isOpen: boolean }. Does NOT require agent browser control. ' +
+      'Use this to answer questions like "is the browser open?" without needing permissions.',
+    parameters: { type: 'object', properties: {} as Record<string, unknown>, required: [] as never[] },
+  },
+  {
+    name: 'get_browser_status',
+    description:
+      'Get a read-only snapshot of Forge Browser state: window open/closed, tab count, active URL/title, active profile name, agent control status. ' +
+      'Does NOT require agent browser control. Use to answer state questions without requesting permissions.',
+    parameters: { type: 'object', properties: {} as Record<string, unknown>, required: [] as never[] },
+  },
+  {
+    name: 'browser_open',
+    description:
+      'Open or focus the Forge Browser window. ' +
+      'If the browser is already open, brings it to front. ' +
+      'If closed, creates it with the last-used session restored. ' +
+      'Does NOT require agent browser control — this is a simple UI action like opening any application window. ' +
+      'Use this when the user says "browser aç" or "open browser" before doing any navigation.',
+    parameters: { type: 'object', properties: {} as Record<string, unknown>, required: [] as never[] },
   },
   // ── Dev Process (Long-Running Project Processes) ─────────────────────────
   {

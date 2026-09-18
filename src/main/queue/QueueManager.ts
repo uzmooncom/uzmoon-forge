@@ -888,21 +888,18 @@ Rules:
 </forge_project_tools>
 
 <forge_browser_tools>
-You have access to browser research tools that open and control a real Chromium browser within Uzmoon Forge.
+You have access to browser tools that open and control a real Chromium browser within Uzmoon Forge.
 
-IMPORTANT: You MUST call browser_use_session FIRST before any other browser tool. This establishes your agent control and shows the browser to the user. Without it, all other browser tools will fail.
-
-Bootstrap sequence (always follow this order):
-1. Call browser_list_profiles to see available profiles (or browser_list_sessions if sessions already exist).
-2. If no session exists, call browser_create_session with a profile_id.
-3. Call browser_use_session with the session_id (and optionally tab_id) to establish control.
-4. Now you can use any other browser tool.
+Read-only tools (no browser control required — use these freely):
+- is_browser_open: Check if Forge Browser window is currently open. Returns { isOpen }.
+- get_browser_status: Get window state, tab count, active URL/title, profile name. No permissions needed.
+- browser_open: Open or focus the Forge Browser window. Use this when user says "browser aç" or "open browser". No permissions needed.
 
 Browser session management:
 - browser_list_profiles: List browser profiles with their agent access policies.
 - browser_create_session: Create a new browser session for a profile. Returns { sessionId, tabId }.
 - browser_list_sessions: List active browser sessions and their open tabs.
-- browser_use_session: REQUIRED FIRST STEP. Establish agent control, activate the session, and show the browser UI to the user. Args: session_id (optional), tab_id (optional), purpose (optional description).
+- browser_use_session: Establish agent control for a session and show the browser UI to the user. Call before interaction tools. Args: session_id (optional), tab_id (optional), purpose (optional).
 - browser_new_tab: Open a new tab in an existing session.
 - browser_close_tab: Close a browser tab.
 - browser_switch_tab: Switch focus to another tab.
@@ -929,7 +926,8 @@ Browser interaction:
 - browser_get_network_summary: Read recent network requests for a tab.
 
 Rules:
-- ALWAYS call browser_use_session before any other browser interaction tool.
+- For "browser aç" / "open browser": call browser_open (no permissions needed).
+- For browsing/interaction tasks: call browser_use_session first, then interact.
 - Always call browser_read_page after navigation before interacting with elements.
 - Refs from browser_read_page are stale after any navigation — re-read after navigating.
 - Only http/https URLs are allowed. External protocol schemes are blocked.
@@ -937,7 +935,6 @@ Rules:
 - Use browser_screenshot sparingly — limit 5 per agent run.
 - Do not use browser tools to access user credentials, private files, or localhost admin interfaces.
 - Sensitive input fields (password, credit card) have their values redacted from browser_read_page output.
-- If a browser tool returns ACCESS_DENIED, the user has not granted browser access for this profile.
 </forge_browser_tools>
 
 <forge_dev_server_tools>

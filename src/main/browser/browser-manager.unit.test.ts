@@ -178,9 +178,9 @@ describe("createBrowserProfile", () => {
     expect(profile.updatedAt).toBeGreaterThanOrEqual(before);
   });
 
-  it("defaults agentAccessPolicy to 'off'", () => {
+  it("defaults agentAccessPolicy to 'ask'", () => {
     const profile = createBrowserProfile({ name: "T", persistenceMode: "persistent" });
-    expect(profile.agentAccessPolicy).toBe("off");
+    expect(profile.agentAccessPolicy).toBe("ask");
   });
 
   it("allows explicit agentAccessPolicy 'ask'", () => {

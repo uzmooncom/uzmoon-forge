@@ -23,6 +23,9 @@ import type {
   BrowserPendingApproval,
   BrowserDownloadItem,
   BrowserAgentBudget,
+  BrowserBookmark,
+  BrowserHistoryEntry,
+  BrowserStatusSnapshot,
 } from "../../shared/types.js";
 import { BROWSER_LIMITS, BROWSER_IPC } from "../../shared/types.js";
 import {
@@ -42,6 +45,13 @@ import {
   updateBrowserTab,
   deleteBrowserTab,
   deleteBrowserTabsBySession,
+  saveBookmark,
+  listBookmarks,
+  deleteBookmark,
+  updateBookmark,
+  appendHistory,
+  listHistory,
+  clearHistory,
 } from "../database/db.js";
 import { assertInvariant } from "../reliability/invariants.js";
 import { tryGetTraceRecorder } from "../reliability/index.js";
@@ -106,6 +116,12 @@ let _visibleTabId: string | null = null;
 
 /** Data directory for screenshots */
 let _dataDir: string | null = null;
+
+/** Conversation → { sessionId, tabId } binding persisted across agent turns */
+const _conversationBrowserBinding = new Map<string, { sessionId: string; tabId: string }>();
+
+/** Whether the standalone browser window is currently open */
+let _browserWindowOpen = false;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -215,6 +231,7 @@ export function setBrowserNativeWindow(
   win: import("electron").BrowserWindow | null,
 ): void {
   _browserWindow = win;
+  _browserWindowOpen = win !== null;
 }
 
 /**
@@ -313,6 +330,8 @@ export function _resetBrowserManagerForTest(): void {
   _dataDir = null;
   _visibleTabId = null;
   _revision = 0;
+  _conversationBrowserBinding.clear();
+  _browserWindowOpen = false;
 }
 
 // ── Profile Management ─────────────────────────────────────────────────────
@@ -331,7 +350,7 @@ export function createBrowserProfile(opts: {
     id,
     name: opts.name,
     persistenceMode: opts.persistenceMode,
-    agentAccessPolicy: opts.agentAccessPolicy ?? "off",
+    agentAccessPolicy: opts.agentAccessPolicy ?? "ask",
     partition,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -1513,4 +1532,162 @@ function _redactSensitiveUrlParams(url: string): string {
 
 export function getBrowserRuntimeState(): BrowserRuntimeState {
   return buildRuntimeState();
+}
+
+// ── V2.1: Read-only status (no agent control required) ─────────────────────
+
+export function isBrowserWindowOpen(): boolean {
+  return _browserWindowOpen;
+}
+
+export function getBrowserStatus(): BrowserStatusSnapshot {
+  const state = buildRuntimeState();
+  const activeSession = state.activeSessionId
+    ? state.sessions.find((s) => s.id === state.activeSessionId) ?? null
+    : null;
+  const activeTabId = activeSession?.activeTabId ?? null;
+  const activeTab = activeTabId
+    ? state.tabs.find((t) => t.id === activeTabId) ?? null
+    : null;
+  const activeProfile = activeSession
+    ? state.profiles.find((p) => p.id === activeSession.profileId) ?? null
+    : null;
+  const agentControl = state.activeSessionId
+    ? (_agentControls.get(state.activeSessionId) ?? null)
+    : null;
+  return {
+    isWindowOpen: _browserWindowOpen,
+    tabCount: state.tabs.length,
+    activeUrl: activeTab?.url ?? null,
+    activeTitle: activeTab?.title ?? null,
+    activeProfileName: activeProfile?.name ?? null,
+    agentControlActive: agentControl !== null,
+  };
+}
+
+// ── V2.1: Conversation → Tab binding ──────────────────────────────────────
+
+/**
+ * Resolve agent browser target for a given requestId/conversationId.
+ * Returns existing agent control if present, OR bootstraps a new one.
+ * Callers get a resolved { ctrl, errorMessage } — never need to call
+ * bootstrapAgentControl directly.
+ */
+export async function resolveAgentBrowserTarget(
+  requestId: string,
+  conversationId: string,
+  purpose?: string,
+): Promise<{ ctrl: BrowserAgentControl; errorMessage: null } | { ctrl: null; errorMessage: string }> {
+  // 1. Check if this request already has active control
+  const existingByRequest = getAgentControlByRequestId(requestId);
+  if (existingByRequest) {
+    return { ctrl: existingByRequest, errorMessage: null };
+  }
+
+  // 2. Check conversation binding (cross-turn persistence)
+  const binding = _conversationBrowserBinding.get(conversationId);
+  if (binding) {
+    const ctrl = _agentControls.get(binding.sessionId);
+    if (ctrl) {
+      return { ctrl, errorMessage: null };
+    }
+  }
+
+  // 3. Bootstrap a new agent control
+  const result = await bootstrapAgentControl({
+    requestId,
+    conversationId,
+    agentRunId: requestId,
+    purpose: purpose ?? "Browser task",
+  });
+
+  if (result.ok) {
+    // Bind conversation to this session+tab for future turns
+    _conversationBrowserBinding.set(conversationId, {
+      sessionId: result.sessionId,
+      tabId: result.tabId,
+    });
+    const ctrl = _agentControls.get(result.sessionId);
+    if (ctrl) return { ctrl, errorMessage: null };
+    return { ctrl: null, errorMessage: "Could not acquire browser access. Try opening the browser first." };
+  }
+
+  // Map bootstrap error reasons to user-friendly messages
+  if (result.reason === "policy_off") {
+    return { ctrl: null, errorMessage: "Browser agent access is disabled. Enable it in Browser Settings → Profile → Agent Access." };
+  }
+  if (result.reason === "policy_rejected") {
+    return { ctrl: null, errorMessage: "Browser access was declined. You can allow it next time a browser action is requested." };
+  }
+  if (result.reason === "no_profile") {
+    return { ctrl: null, errorMessage: "No browser profile found. Open the browser and create a profile first." };
+  }
+  return { ctrl: null, errorMessage: "Could not acquire browser access. Try opening the browser first." };
+}
+
+/** Clear conversation binding (call when conversation is archived/deleted) */
+export function clearConversationBrowserBinding(conversationId: string): void {
+  _conversationBrowserBinding.delete(conversationId);
+}
+
+// ── V2.1: Bookmark wrappers ────────────────────────────────────────────────
+
+export function addBookmark(opts: { profileId: string; url: string; title: string; favicon?: string }): BrowserBookmark {
+  const bookmark: BrowserBookmark = {
+    id: randomUUID(),
+    profileId: opts.profileId,
+    url: opts.url,
+    title: opts.title,
+    ...(opts.favicon !== undefined && { favicon: opts.favicon }),
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  saveBookmark(true, bookmark);
+  return bookmark;
+}
+
+export function removeBookmark(id: string): void {
+  deleteBookmark(true, id);
+}
+
+export function getBookmarks(profileId?: string): BrowserBookmark[] {
+  return listBookmarks(true, profileId);
+}
+
+export function editBookmark(id: string, patch: Partial<Pick<BrowserBookmark, 'title' | 'folderId'>>): BrowserBookmark | null {
+  return updateBookmark(true, id, patch);
+}
+
+export function isUrlBookmarked(profileId: string, url: string): BrowserBookmark | null {
+  const bookmarks = listBookmarks(true, profileId);
+  return bookmarks.find((b) => b.url === url) ?? null;
+}
+
+// ── V2.1: History wrappers ─────────────────────────────────────────────────
+
+/**
+ * Record a navigation in history. Private profiles are NEVER recorded.
+ */
+export function recordNavigation(profileId: string, url: string, title: string): void {
+  // Never persist history for private sessions
+  const profile = getBrowserProfile(true, profileId);
+  if (!profile || profile.persistenceMode === "private") return;
+  // Skip blank/internal pages
+  if (!url || url === "about:blank" || url.startsWith("forge://")) return;
+  const entry: BrowserHistoryEntry = {
+    id: randomUUID(),
+    profileId,
+    url,
+    title: title || url,
+    visitedAt: Date.now(),
+  };
+  appendHistory(true, entry);
+}
+
+export function getBrowserHistory(profileId?: string, limit = 200): BrowserHistoryEntry[] {
+  return listHistory(true, profileId, limit);
+}
+
+export function clearBrowserHistory(profileId?: string): void {
+  clearHistory(true, profileId);
 }

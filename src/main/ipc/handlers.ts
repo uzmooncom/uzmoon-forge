@@ -1607,6 +1607,48 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     (_e: IpcMainInvokeEvent) => { browserWindowController.focusBrowserWindow(); }
   );
 
+
+  // ── Browser V2.1: Read-only status ──────────────────────────────────────
+  ipcMain.handle(
+    BROWSER_IPC.BROWSER_STATUS,
+    (_e: IpcMainInvokeEvent) => browserManager.getBrowserStatus()
+  );
+
+  // ── Browser V2.1: Bookmarks ─────────────────────────────────────────────
+  ipcMain.handle(
+    BROWSER_IPC.BOOKMARK_LIST,
+    (_e: IpcMainInvokeEvent, profileId?: string) => browserManager.getBookmarks(profileId)
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.BOOKMARK_ADD,
+    (_e: IpcMainInvokeEvent, opts: { profileId: string; url: string; title: string; favicon?: string }) =>
+      browserManager.addBookmark(opts)
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.BOOKMARK_REMOVE,
+    (_e: IpcMainInvokeEvent, id: string) => { browserManager.removeBookmark(id); }
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.BOOKMARK_UPDATE,
+    (_e: IpcMainInvokeEvent, id: string, patch: { title?: string }) =>
+      browserManager.editBookmark(id, patch)
+  );
+
+  // ── Browser V2.1: History ───────────────────────────────────────────────
+  ipcMain.handle(
+    BROWSER_IPC.HISTORY_LIST,
+    (_e: IpcMainInvokeEvent, profileId?: string, limit?: number) =>
+      browserManager.getBrowserHistory(profileId, limit)
+  );
+
+  ipcMain.handle(
+    BROWSER_IPC.HISTORY_CLEAR,
+    (_e: IpcMainInvokeEvent, profileId?: string) => { browserManager.clearBrowserHistory(profileId); }
+  );
+
   // ── Dev Process IPC ─────────────────────────────────────────────────────
   ipcMain.handle(
     DEV_PROCESS_IPC.LIST,

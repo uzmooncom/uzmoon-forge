@@ -26,6 +26,8 @@ import type {
   BrowserProfile,
   BrowserSession,
   BrowserTab,
+  BrowserBookmark,
+  BrowserHistoryEntry,
 } from "../../shared/types.js";
 import { DEFAULT_APP_SETTINGS } from "../../shared/types.js";
 
@@ -79,6 +81,11 @@ interface Store {
   browserSessions: Record<string, BrowserSession>;
   /** BrowserTab metadata keyed by id */
   browserTabs: Record<string, BrowserTab>;
+  // ── V2.1: Browser Bookmarks + History ─────────────────────────────────
+  /** BrowserBookmarks keyed by id */
+  browserBookmarks: Record<string, BrowserBookmark>;
+  /** BrowserHistoryEntries keyed by id (private profiles never write here) */
+  browserHistory: Record<string, BrowserHistoryEntry>;
 }
 
 const DEFAULT_STORE: Store = {
@@ -101,6 +108,8 @@ const DEFAULT_STORE: Store = {
   browserProfiles: {},
   browserSessions: {},
   browserTabs: {},
+  browserBookmarks: {},
+  browserHistory: {},
 };
 
 // ── Singleton ──────────────────────────────────────────────────────────────
@@ -138,6 +147,8 @@ function load(): Store {
       browserProfiles: raw.browserProfiles ?? {},
       browserSessions: raw.browserSessions ?? {},
       browserTabs: raw.browserTabs ?? {},
+      browserBookmarks: raw.browserBookmarks ?? {},
+      browserHistory: raw.browserHistory ?? {},
     };
 
     // ── One-time migration: AgentConfig → AgentProfile ─────────────────
@@ -1203,5 +1214,76 @@ export function getBrowserStoreSummary(_db: true): {
     sessionCount: Object.keys(s.browserSessions).length,
     tabCount: Object.keys(s.browserTabs).length,
   };
+}
+
+// ── Browser Bookmarks (V2.1) ───────────────────────────────────────────────
+
+export function saveBookmark(_db: true, bookmark: BrowserBookmark): void {
+  store().browserBookmarks[bookmark.id] = structuredClone(bookmark);
+  persist();
+}
+
+export function getBookmark(_db: true, id: string): BrowserBookmark | null {
+  return structuredClone(store().browserBookmarks[id] ?? null);
+}
+
+export function listBookmarks(_db: true, profileId?: string): BrowserBookmark[] {
+  const all = Object.values(store().browserBookmarks);
+  const filtered = profileId ? all.filter((b) => b.profileId === profileId) : all;
+  return filtered.sort((a, b) => b.createdAt - a.createdAt).map((b) => structuredClone(b));
+}
+
+export function deleteBookmark(_db: true, id: string): void {
+  delete store().browserBookmarks[id];
+  persist();
+}
+
+export function updateBookmark(_db: true, id: string, patch: Partial<Pick<BrowserBookmark, 'title' | 'folderId'>>): BrowserBookmark | null {
+  const b = store().browserBookmarks[id];
+  if (!b) return null;
+  Object.assign(b, patch, { updatedAt: Date.now() });
+  persist();
+  return structuredClone(b);
+}
+
+// ── Browser History (V2.1) ─────────────────────────────────────────────────
+// Private profiles must NEVER write history. Callers must check before calling.
+
+export function appendHistory(_db: true, entry: BrowserHistoryEntry): void {
+  store().browserHistory[entry.id] = structuredClone(entry);
+  // Keep max 5000 entries — trim oldest
+  const keys = Object.keys(store().browserHistory);
+  if (keys.length > 5000) {
+    const sorted = keys.sort((a, b) =>
+      (store().browserHistory[a]?.visitedAt ?? 0) - (store().browserHistory[b]?.visitedAt ?? 0)
+    );
+    for (let i = 0; i < keys.length - 5000; i++) {
+      delete store().browserHistory[sorted[i]!];
+    }
+  }
+  persist();
+}
+
+export function listHistory(_db: true, profileId?: string, limit = 200): BrowserHistoryEntry[] {
+  const all = Object.values(store().browserHistory);
+  const filtered = profileId ? all.filter((h) => h.profileId === profileId) : all;
+  return filtered
+    .sort((a, b) => b.visitedAt - a.visitedAt)
+    .slice(0, limit)
+    .map((h) => structuredClone(h));
+}
+
+export function clearHistory(_db: true, profileId?: string): void {
+  const s = store();
+  if (profileId) {
+    for (const id of Object.keys(s.browserHistory)) {
+      if (s.browserHistory[id]?.profileId === profileId) {
+        delete s.browserHistory[id];
+      }
+    }
+  } else {
+    s.browserHistory = {};
+  }
+  persist();
 }
 

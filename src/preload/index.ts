@@ -41,6 +41,9 @@ import type {
   BrowserRuntimeState,
   BrowserAgentControl,
   BrowserPendingApproval,
+  BrowserBookmark,
+  BrowserHistoryEntry,
+  BrowserStatusSnapshot,
   DevProcessRecord,
 } from "../shared/types.js";
 
@@ -645,6 +648,30 @@ const forgeApi = {
     /** Focus the standalone Forge Browser window (no-op if not open) */
     focusBrowserWindow: (): Promise<void> =>
       ipcRenderer.invoke(BROWSER_IPC.FOCUS_WINDOW),
+
+    /** Get browser window status snapshot (no agent control required) */
+    getStatus: (): Promise<BrowserStatusSnapshot> =>
+      ipcRenderer.invoke(BROWSER_IPC.BROWSER_STATUS),
+
+    // Bookmarks
+    listBookmarks: (profileId?: string): Promise<BrowserBookmark[]> =>
+      ipcRenderer.invoke(BROWSER_IPC.BOOKMARK_LIST, profileId),
+
+    addBookmark: (opts: { profileId: string; url: string; title: string; favicon?: string }): Promise<BrowserBookmark> =>
+      ipcRenderer.invoke(BROWSER_IPC.BOOKMARK_ADD, opts),
+
+    removeBookmark: (id: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.BOOKMARK_REMOVE, id),
+
+    updateBookmark: (id: string, patch: { title?: string }): Promise<BrowserBookmark | null> =>
+      ipcRenderer.invoke(BROWSER_IPC.BOOKMARK_UPDATE, id, patch),
+
+    // History
+    listHistory: (profileId?: string, limit?: number): Promise<BrowserHistoryEntry[]> =>
+      ipcRenderer.invoke(BROWSER_IPC.HISTORY_LIST, profileId, limit),
+
+    clearHistory: (profileId?: string): Promise<void> =>
+      ipcRenderer.invoke(BROWSER_IPC.HISTORY_CLEAR, profileId),
   },
 
   // ── Reliability (V0.9) ────────────────────────────────────────────────────

@@ -201,6 +201,15 @@ export async function executeProjectTool(
     case "browser_wait_for":
       result = await handleBrowserWaitFor(call, validation.args as BrowserWaitForArgs, ctx);
       break;
+    case "is_browser_open":
+      result = await handleIsBrowserOpen(call, ctx);
+      break;
+    case "get_browser_status":
+      result = await handleGetBrowserStatus(call, ctx);
+      break;
+    case "browser_open":
+      result = await handleBrowserOpen(call, ctx);
+      break;
     case "start_project_process":
       result = await handleStartProjectProcess(call, validation.args as StartProjectProcessArgs, ctx);
       break;
@@ -1326,6 +1335,42 @@ async function handleBrowserWaitFor(
       if (!met) await new Promise((r) => setTimeout(r, POLL_MS));
     }
     return { result: { callId: call.callId, toolName: call.name, ok: true, data: { met, condition: args.condition, timedOut: !met } } };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };
+  }
+}
+
+// ── Browser Runtime V2.1 handlers (read-only, no agent control required) ───
+
+async function handleIsBrowserOpen(
+  call: ForgeToolCall,
+  _ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const isOpen = bm.isBrowserWindowOpen();
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: { isOpen } } };
+}
+
+async function handleGetBrowserStatus(
+  call: ForgeToolCall,
+  _ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const bm = await import('../browser/browser-manager.js');
+  const status = bm.getBrowserStatus();
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: status } };
+}
+
+async function handleBrowserOpen(
+  call: ForgeToolCall,
+  _ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  try {
+    const bm = await import('../browser/browser-manager.js');
+    // Open/focus the browser window — this is a read-only UI action, no agent control needed.
+    bm.requestShowBrowser();
+    const isOpen = bm.isBrowserWindowOpen();
+    return { result: { callId: call.callId, toolName: call.name, ok: true, data: { opened: true, alreadyOpen: isOpen } } };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'TOOL_ERROR', errorMessage: msg } };

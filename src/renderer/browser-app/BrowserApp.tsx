@@ -271,7 +271,7 @@ interface AgentControlBarProps {
   onReturnToAgent: () => void;
 }
 
-function AgentControlBar({ control, activeTab, onTakeControl, onReturnToAgent }: AgentControlBarProps) {
+function AgentControlBar({ control, activeTab, onTakeControl }: AgentControlBarProps) {
   const isControllingActiveTab = control.tabId === activeTab?.id;
   const siteLabel = activeTab?.url
     ? (() => { try { return new URL(activeTab.url).hostname; } catch { return activeTab.url; } })()

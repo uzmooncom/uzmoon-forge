@@ -33,6 +33,7 @@ try {
 let _browserWindow: BrowserWindowType | null = null;
 
 /** WebContents of main Forge window — for cross-window IPC events */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 let _mainSender: WebContents | null = null;
 
 /** Path to the built browser renderer entry */
@@ -49,10 +50,10 @@ const BROWSER_DEV_URL = "http://localhost:5174";
  * @param distDir    Path to the dist directory (where dist/renderer lives)
  */
 export function initBrowserWindowController(
-  mainSender: WebContents,
+  _mainSenderParam: WebContents,
   distDir: string,
 ): void {
-  _mainSender = mainSender;
+  _mainSender = _mainSenderParam;
   _browserRendererPath = path.join(distDir, "renderer", "browser-app", "browser-app.html");
 }
 
