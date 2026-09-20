@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC, PERMISSION_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC, PERMISSION_IPC, TASK_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -51,6 +51,10 @@ import type {
   PermissionApprovalResponse,
   CapabilityPolicyStore,
   PermissionCheckRecord,
+  ForgeTask,
+  ForgeTaskPlan,
+  ForgeTaskStep,
+  TaskRuntimeSnapshot,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -813,6 +817,85 @@ const forgeApi = {
       const listener = (_e: Electron.IpcRendererEvent, payload: { approvalId: string }) => cb(payload.approvalId);
       ipcRenderer.on(PERMISSION_IPC.APPROVAL_CANCELLED, listener);
       return () => ipcRenderer.off(PERMISSION_IPC.APPROVAL_CANCELLED, listener);
+    },
+  },
+
+  // ── Task / Plan Runtime V1 ────────────────────────────────────────────────
+  tasks: {
+    /** Get the active task snapshot for a conversation (null if none) */
+    getActive: (convId: string): Promise<TaskRuntimeSnapshot | null> =>
+      ipcRenderer.invoke(TASK_IPC.GET_ACTIVE, convId),
+
+    /** Get a specific task + plan by task ID */
+    getTask: (taskId: string): Promise<{ task: ForgeTask; plan: ForgeTaskPlan } | null> =>
+      ipcRenderer.invoke(TASK_IPC.GET_TASK, taskId),
+
+    /** List all tasks for a conversation */
+    listByConv: (convId: string): Promise<ForgeTask[]> =>
+      ipcRenderer.invoke(TASK_IPC.LIST_BY_CONV, convId),
+
+    /** Pause the active task in a conversation */
+    pause: (convId: string): Promise<void> =>
+      ipcRenderer.invoke(TASK_IPC.PAUSE, convId),
+
+    /** Resume a paused task */
+    resume: (taskId: string): Promise<void> =>
+      ipcRenderer.invoke(TASK_IPC.RESUME, taskId),
+
+    /** Cancel a task */
+    cancel: (taskId: string): Promise<void> =>
+      ipcRenderer.invoke(TASK_IPC.CANCEL, taskId),
+
+    /** Retry a failed/cancelled task from the beginning */
+    retry: (taskId: string): Promise<void> =>
+      ipcRenderer.invoke(TASK_IPC.RETRY, taskId),
+
+    /** Retry a specific failed step */
+    retryStep: (taskId: string, stepId: string): Promise<void> =>
+      ipcRenderer.invoke(TASK_IPC.RETRY_STEP, taskId, stepId),
+
+    /** Skip a specific step (mark as skipped, advance plan) */
+    skipStep: (taskId: string, stepId: string): Promise<boolean> =>
+      ipcRenderer.invoke(TASK_IPC.SKIP_STEP, taskId, stepId),
+
+    /** Subscribe to task created events */
+    onTaskCreated: (cb: (snapshot: TaskRuntimeSnapshot) => void): UnsubFn => {
+      const listener = (_e: Electron.IpcRendererEvent, snapshot: TaskRuntimeSnapshot) => cb(snapshot);
+      ipcRenderer.on(TASK_IPC.TASK_CREATED, listener);
+      return () => ipcRenderer.removeListener(TASK_IPC.TASK_CREATED, listener);
+    },
+
+    /** Subscribe to task updated events */
+    onTaskUpdated: (cb: (snapshot: TaskRuntimeSnapshot) => void): UnsubFn => {
+      const listener = (_e: Electron.IpcRendererEvent, snapshot: TaskRuntimeSnapshot) => cb(snapshot);
+      ipcRenderer.on(TASK_IPC.TASK_UPDATED, listener);
+      return () => ipcRenderer.removeListener(TASK_IPC.TASK_UPDATED, listener);
+    },
+
+    /** Subscribe to task terminal events */
+    onTaskTerminal: (cb: (snapshot: TaskRuntimeSnapshot) => void): UnsubFn => {
+      const listener = (_e: Electron.IpcRendererEvent, snapshot: TaskRuntimeSnapshot) => cb(snapshot);
+      ipcRenderer.on(TASK_IPC.TASK_TERMINAL, listener);
+      return () => ipcRenderer.removeListener(TASK_IPC.TASK_TERMINAL, listener);
+    },
+
+    /** Subscribe to task replanned events */
+    onTaskReplanned: (cb: (snapshot: TaskRuntimeSnapshot) => void): UnsubFn => {
+      const listener = (_e: Electron.IpcRendererEvent, snapshot: TaskRuntimeSnapshot) => cb(snapshot);
+      ipcRenderer.on(TASK_IPC.TASK_REPLANNED, listener);
+      return () => ipcRenderer.removeListener(TASK_IPC.TASK_REPLANNED, listener);
+    },
+
+    /** Subscribe to step updated events */
+    onStepUpdated: (
+      cb: (payload: { taskId: string; step: ForgeTaskStep; snapshot: TaskRuntimeSnapshot }) => void
+    ): UnsubFn => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        payload: { taskId: string; step: ForgeTaskStep; snapshot: TaskRuntimeSnapshot }
+      ) => cb(payload);
+      ipcRenderer.on(TASK_IPC.STEP_UPDATED, listener);
+      return () => ipcRenderer.removeListener(TASK_IPC.STEP_UPDATED, listener);
     },
   },
 };

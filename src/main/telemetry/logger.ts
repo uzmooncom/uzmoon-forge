@@ -29,7 +29,8 @@ export type LogCategory =
   | "reliability"
   | "performance"
   | "security"
-  | "permission";
+  | "permission"
+  | "task";
 
 export interface ForgeLogEntry {
   /** Monotonic entry ID within this session */

@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell, app
 import { randomUUID, createHash } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC, PERMISSION_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC, PERMISSION_IPC, TASK_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -21,7 +21,7 @@ import * as projectFiles from "../project-files/service.js";
 import type { SecretStore } from "../secret-store/secrets.js";
 import * as db from "../database/db.js";
 import { testConnection } from "../agent-client/client.js";
-import { queueManager, cancelStream, returnControl, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots, getActiveRunEntries, getQueueSummary, setCancelApprovalsCallback } from "../queue/QueueManager.js";
+import { queueManager, cancelStream, returnControl, getActiveStreamId, setSecretGetter, deleteOrphanedSnapshots, sweepOrphanedSnapshots, getActiveRunEntries, getQueueSummary, setCancelApprovalsCallback, runTaskStep } from "../queue/QueueManager.js";
 import { tryGetIncidentRecorder, assertInvariant } from "../reliability/index.js";
 import { forgeLogger } from "../telemetry/logger.js";
 import { buildDevSnapshot, getRunTimeline, buildDiagnosticBundle, initDevState } from "../telemetry/dev-state.js";
@@ -30,6 +30,8 @@ import * as browserManager from "../browser/browser-manager.js";
 import * as browserWindowController from "../browser/browser-window-controller.js";
 import { isFakeProviderEnabled, releaseCheckpoint, waitForCheckpointBlocked } from "../agent-client/fake-provider.js";
 import * as permissionEngine from "../permissions/index.js";
+import * as taskManager from "../tasks/task-manager.js";
+import { registerTaskInvariants } from "../tasks/task-invariants.js";
 import * as devProcessManager from "../commands/dev-process-manager.js";
 import { buildGitHubIssuePayload } from "../reliability/sanitizer.js";
 void sweepOrphanedSnapshots; // imported for startup use — called from main.ts
@@ -1869,4 +1871,119 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       (_e: IpcMainInvokeEvent, name: string) => waitForCheckpointBlocked(name)
     );
   }
+
+  // ── Task / Plan Runtime V1 ─────────────────────────────────────────────
+
+  // Register invariants
+  registerTaskInvariants();
+
+  // Wire task manager with DI
+  taskManager.initTaskManager({
+    sender: mainSender,
+    secretGetter: (profileId: string) => services.secrets.get(profileId),
+    getCfgForConv: (convId: string) => {
+      const conv = db.getConversation(true, convId);
+      if (!conv) return null;
+      const profileId = conv.defaultAgentProfileId ?? db.getAppState(true).defaultAgentProfileId;
+      if (!profileId) return null;
+      const profile = db.getAgentProfile(true, profileId);
+      if (!profile) return null;
+      const apiKey = services.secrets.get(profileId);
+      if (!apiKey) return null;
+      const cfg: import("../../shared/types.js").AgentConfig = {
+        id: profile.id,
+        name: profile.name,
+        endpoint: profile.endpoint,
+        protocol: profile.protocol,
+        model: profile.model,
+        ...(profile.apiKeyHeader !== undefined ? { apiKeyHeader: profile.apiKeyHeader } : {}),
+        ...(profile.timeoutMs !== undefined ? { timeoutMs: profile.timeoutMs } : {}),
+        ...(profile.capabilities !== undefined ? { capabilities: profile.capabilities } : {}),
+      };
+      return { cfg, apiKey };
+    },
+    dispatchStep: async (task, step, plan, signal) => {
+      return runTaskStep(task, step, plan, signal);
+    },
+  });
+
+  // Startup reconciliation — mark any interrupted tasks as paused
+  taskManager.reconcileInterruptedTasks();
+
+  // Task IPC channels
+  ipcMain.handle(
+    TASK_IPC.GET_ACTIVE,
+    (_e: IpcMainInvokeEvent, convId: string) => {
+      return taskManager.getActiveTask(convId);
+    }
+  );
+
+  ipcMain.handle(
+    TASK_IPC.GET_TASK,
+    (_e: IpcMainInvokeEvent, taskId: string) => {
+      const task = db.getTask(true, taskId);
+      if (!task) return null;
+      const plan = db.getTaskPlan(true, taskId);
+      return plan ? { task, plan } : null;
+    }
+  );
+
+  ipcMain.handle(
+    TASK_IPC.LIST_BY_CONV,
+    (_e: IpcMainInvokeEvent, convId: string) => {
+      return db.listTasksByConversation(true, convId);
+    }
+  );
+
+  ipcMain.handle(
+    TASK_IPC.PAUSE,
+    (_e: IpcMainInvokeEvent, convId: string) => {
+      return taskManager.pauseConvTask(convId);
+    }
+  );
+
+  ipcMain.handle(
+    TASK_IPC.RESUME,
+    (_e: IpcMainInvokeEvent, taskId: string) => {
+      return taskManager.resumeTask(taskId);
+    }
+  );
+
+  ipcMain.handle(
+    TASK_IPC.CANCEL,
+    (_e: IpcMainInvokeEvent, taskId: string) => {
+      return taskManager.cancelConvTask(taskId);
+    }
+  );
+
+  ipcMain.handle(
+    TASK_IPC.RETRY,
+    (_e: IpcMainInvokeEvent, taskId: string) => {
+      return taskManager.retryTask(taskId);
+    }
+  );
+
+  ipcMain.handle(
+    TASK_IPC.RETRY_STEP,
+    (_e: IpcMainInvokeEvent, taskId: string, stepId: string) => {
+      return taskManager.retryStep(taskId, stepId);
+    }
+  );
+
+  ipcMain.handle(
+    TASK_IPC.SKIP_STEP,
+    (_e: IpcMainInvokeEvent, taskId: string, stepId: string) => {
+      // Mark step as skipped
+      const plan = db.getTaskPlan(true, taskId);
+      if (!plan) return false;
+      const step = plan.steps.find((s) => s.id === stepId);
+      if (!step || (step.status !== "pending" && step.status !== "failed" && step.status !== "blocked")) return false;
+      const updatedSteps = plan.steps.map((s) =>
+        s.id === stepId ? { ...s, status: "skipped" as const, completedAt: Date.now() } : s
+      );
+      const updatedPlan: import("../../shared/types.js").ForgeTaskPlan = { ...plan, steps: updatedSteps, updatedAt: Date.now() };
+      db.saveTaskPlan(true, updatedPlan);
+      return true;
+    }
+  );
 }

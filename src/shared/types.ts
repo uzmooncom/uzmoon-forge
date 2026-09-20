@@ -991,7 +991,23 @@ export type ForgeFailureCode =
   | "AGENT_GOAL_STALLED"
   | "AGENT_FINAL_INTENT_ONLY"
   | "AGENT_FINAL_MISSING_STATUS"
-  | "AGENT_WAITING_FOR_HUMAN";
+  | "AGENT_WAITING_FOR_HUMAN"
+  // ── Task Runtime failure codes ────────────────────────────────────────
+  | "TASK_PLAN_INVALID"
+  | "TASK_PLAN_CYCLE"
+  | "TASK_PLAN_MISSING_STEP"
+  | "TASK_STEP_WRONG_TASK"
+  | "TASK_AGENTRUN_WRONG_STEP"
+  | "TASK_ADVANCED_WITH_FAILED_DEPENDENCY"
+  | "TASK_COMPLETED_WITH_UNVERIFIED_GOAL"
+  | "TASK_TERMINAL_WITH_ACTIVE_AGENTRUN"
+  | "TASK_CANCELLED_BUT_STEP_CONTINUED"
+  | "TASK_STALLED"
+  | "TASK_DUPLICATE_ACTIVE_STEP"
+  | "TASK_BUDGET_EXCEEDED"
+  | "TASK_VERIFICATION_FAILED"
+  | "TASK_STEP_MAX_ATTEMPTS"
+  | "TASK_LOOP_UNEXPECTED_EXIT";
 
 /** Severity levels for invariants and incidents */
 export type ForgeSeverity = "critical" | "high" | "medium" | "low";
@@ -1012,7 +1028,8 @@ export type IncidentCategory =
   | "IPC_ROUTING"
   | "SECURITY_INVARIANT"
   | "COMMAND_EXECUTION"
-  | "BROWSER_RUNTIME";
+  | "BROWSER_RUNTIME"
+  | "TASK_RUNTIME";
 
 /** A canonical incident record — stored locally, never sent without opt-in */
 export interface ForgeIncident {
@@ -2066,3 +2083,199 @@ export interface PermissionApprovalResponse {
   approvalId: string;
   action: PermissionApprovalAction;
 }
+
+// ── Task / Plan Runtime V1 ─────────────────────────────────────────────────
+
+export type TaskStatus =
+  | "draft"
+  | "planning"
+  | "ready"
+  | "running"
+  | "waiting_for_approval"
+  | "waiting_for_human"
+  | "paused"
+  | "verifying"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type TaskStepStatus =
+  | "pending"
+  | "ready"
+  | "running"
+  | "waiting_for_approval"
+  | "waiting_for_human"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "skipped";
+
+export type TaskStepType =
+  | "inspect"
+  | "run"
+  | "browse"
+  | "edit"
+  | "test"
+  | "git"
+  | "verify"
+  | "research"
+  | "generic";
+
+export type TaskStepResultStatus =
+  | "completed"
+  | "blocked"
+  | "failed"
+  | "replan_required";
+
+export interface TaskBlocker {
+  kind: "permission_denied" | "human_required" | "missing_info" | "unsupported" | "external_failure";
+  message: string;
+  capabilityId?: string;
+  stepId?: string;
+}
+
+export interface TaskStepResult {
+  status: TaskStepResultStatus;
+  summary: string;
+  evidenceRefs: string[];
+  observations?: string;
+  recommendedPlanChanges?: string;
+}
+
+export interface ForgeTaskStep {
+  id: string;
+  taskId: string;
+  title: string;
+  description?: string;
+  type: TaskStepType;
+  status: TaskStepStatus;
+  /** Step IDs that must be completed before this step is ready */
+  dependencies: string[];
+  /** Capability hints for context injection */
+  capabilityHints: string[];
+  expectedOutcome?: string;
+  /** Evidence artifact refs produced by this step */
+  evidenceRefs: string[];
+  attemptCount: number;
+  startedAt?: number;
+  completedAt?: number;
+  error?: string;
+  /** Most recent step result */
+  lastResult?: TaskStepResult;
+}
+
+export interface ForgeTaskPlan {
+  taskId: string;
+  version: number;
+  steps: ForgeTaskStep[];
+  createdAt: number;
+  updatedAt: number;
+  reasonForRevision?: string;
+}
+
+export interface ForgeTask {
+  id: string;
+  conversationId: string;
+  projectId?: string;
+  goal: string;
+  status: TaskStatus;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+  updatedAt: number;
+  planVersion: number;
+  currentStepId?: string;
+  summary?: string;
+  failure?: { code: string; message: string };
+  blocker?: TaskBlocker;
+  verificationStatus?: "pending" | "passed" | "failed" | "skipped";
+  metadata: Record<string, unknown>;
+}
+
+/** Classification of a user message for task routing */
+export type TaskClassification = "conversation" | "simple_action" | "task";
+
+/** Typed planner output — validated before persisting */
+export interface StructuredPlannerOutput {
+  goalSummary: string;
+  steps: Array<{
+    id: string;
+    title: string;
+    type: TaskStepType;
+    description?: string;
+    dependencies: string[];
+    expectedOutcome?: string;
+    capabilityHints: string[];
+  }>;
+}
+
+/** Snapshot pushed to renderer — revisioned to drop stale events */
+export interface TaskRuntimeSnapshot {
+  task: ForgeTask;
+  plan: ForgeTaskPlan;
+  revision: number;
+}
+
+export const TASK_IPC = {
+  // Renderer → Main
+  /** Get the current task for a conversation, if any */
+  GET_ACTIVE:          "task:getActive",
+  /** Get a task by id */
+  GET_TASK:            "task:get",
+  /** List all tasks for a conversation */
+  LIST_BY_CONV:        "task:listByConv",
+  /** Pause the active task */
+  PAUSE:               "task:pause",
+  /** Resume a paused task */
+  RESUME:              "task:resume",
+  /** Cancel the active task */
+  CANCEL:              "task:cancel",
+  /** Retry a failed task */
+  RETRY:               "task:retry",
+  /** Retry a specific failed step */
+  RETRY_STEP:          "task:retryStep",
+  /** Skip a non-critical step */
+  SKIP_STEP:           "task:skipStep",
+
+  // Main → Renderer (push events)
+  /** Task created */
+  TASK_CREATED:        "task:created",
+  /** Task snapshot updated (status, plan, step) */
+  TASK_UPDATED:        "task:updated",
+  /** Task reached a terminal state */
+  TASK_TERMINAL:       "task:terminal",
+  /** Plan was revised */
+  TASK_REPLANNED:      "task:replanned",
+  /** Step status changed */
+  STEP_UPDATED:        "task:stepUpdated",
+  /** Startup: task was interrupted, reconciled to paused */
+  TASK_RECONCILED:     "task:reconciled",
+} as const;
+
+/** ForgeLogger event names for task runtime — used for structured telemetry */
+export type TaskLogEvent =
+  | "TASK_CREATED"
+  | "TASK_PLANNING_STARTED"
+  | "TASK_PLAN_CREATED"
+  | "TASK_STARTED"
+  | "TASK_STEP_READY"
+  | "TASK_STEP_STARTED"
+  | "TASK_STEP_COMPLETED"
+  | "TASK_STEP_FAILED"
+  | "TASK_STEP_BLOCKED"
+  | "TASK_REPLAN_STARTED"
+  | "TASK_REPLANNED"
+  | "TASK_PAUSED"
+  | "TASK_RESUMED"
+  | "TASK_VERIFICATION_STARTED"
+  | "TASK_VERIFICATION_COMPLETED"
+  | "TASK_VERIFICATION_FAILED"
+  | "TASK_COMPLETED"
+  | "TASK_FAILED"
+  | "TASK_CANCELLED"
+  | "TASK_STALLED"
+  | "TASK_RECONCILED"
+  | "TASK_STEP_ATTEMPT"
+  | "TASK_BUDGET_EXCEEDED";
+

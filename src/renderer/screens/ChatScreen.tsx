@@ -14,6 +14,8 @@ import type {
   ConvQueueState,
   AgentProfile,
   ConvRuntimeState,
+  TaskRuntimeSnapshot,
+  ForgeTaskStep,
 } from "../../shared/types.js";
 
 // Chat sub-components
@@ -189,6 +191,157 @@ function QueuePanel({
   );
 }
 
+// ── TaskStatusPanel ───────────────────────────────────────────────────────
+
+interface TaskStatusPanelProps {
+  snapshot: TaskRuntimeSnapshot | null;
+  convId: string;
+  onPause: () => void;
+  onResume: (taskId: string) => void;
+  onCancel: (taskId: string) => void;
+}
+
+function stepStatusIcon(status: ForgeTaskStep["status"]): string {
+  switch (status) {
+    case "completed": return "●";
+    case "running":   return "◎";
+    case "failed":    return "✕";
+    case "blocked":   return "⊘";
+    case "skipped":   return "→";
+    default:          return "○";
+  }
+}
+
+function stepStatusColor(status: ForgeTaskStep["status"]): string {
+  switch (status) {
+    case "completed": return "text-emerald-400";
+    case "running":   return "text-blue-400";
+    case "failed":    return "text-red-400";
+    case "blocked":   return "text-amber-400";
+    case "skipped":   return "text-white/30";
+    default:          return "text-white/30";
+  }
+}
+
+function taskStatusLabel(status: string): string {
+  switch (status) {
+    case "planning":  return "Planning";
+    case "running":   return "Running";
+    case "verifying": return "Verifying";
+    case "paused":    return "Paused";
+    case "completed": return "Completed";
+    case "failed":    return "Failed";
+    case "cancelled": return "Cancelled";
+    default:          return status;
+  }
+}
+
+function taskStatusDot(status: string): string {
+  switch (status) {
+    case "planning":
+    case "running":
+    case "verifying": return "bg-blue-400 animate-pulse";
+    case "paused":    return "bg-amber-400";
+    case "completed": return "bg-emerald-400";
+    case "failed":    return "bg-red-400";
+    case "cancelled": return "bg-white/20";
+    default:          return "bg-white/30";
+  }
+}
+
+function TaskStatusPanel({ snapshot, convId: _convId, onPause, onResume, onCancel }: TaskStatusPanelProps) {
+  if (!snapshot) return null;
+
+  const { task, plan } = snapshot;
+  const isActive = ["planning", "running", "verifying"].includes(task.status);
+  const isPaused = task.status === "paused";
+  const isTerminal = ["completed", "failed", "cancelled"].includes(task.status);
+
+  const completedCount = plan.steps.filter(s => s.status === "completed" || s.status === "skipped").length;
+  const totalCount = plan.steps.length;
+  const progressPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
+  return (
+    <div className="mb-1 rounded-xl border border-white/8 bg-white/3 overflow-hidden">
+      {/* Header row */}
+      <div className="flex items-center gap-2 px-3 py-2">
+        <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${taskStatusDot(task.status)}`} />
+        <span className="text-xs font-medium text-white/80 flex-1 min-w-0 truncate">
+          {task.goal}
+        </span>
+        <span className="text-xs text-white/40 flex-shrink-0">{taskStatusLabel(task.status)}</span>
+        {/* Controls */}
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {isActive && (
+            <button
+              onClick={onPause}
+              className="text-xs px-2 py-0.5 rounded bg-white/8 hover:bg-white/12 text-white/60 hover:text-white/90 transition-colors"
+            >
+              Pause
+            </button>
+          )}
+          {isPaused && (
+            <button
+              onClick={() => onResume(task.id)}
+              className="text-xs px-2 py-0.5 rounded bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 hover:text-blue-200 transition-colors"
+            >
+              Resume
+            </button>
+          )}
+          {!isTerminal && (
+            <button
+              onClick={() => onCancel(task.id)}
+              className="text-xs px-2 py-0.5 rounded bg-white/5 hover:bg-red-500/20 text-white/40 hover:text-red-300 transition-colors"
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Progress bar */}
+      {totalCount > 0 && (
+        <div className="px-3 pb-2">
+          <div className="flex items-center gap-2 mb-1.5">
+            <div className="flex-1 h-0.5 bg-white/8 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-500 ${
+                  task.status === "completed" ? "bg-emerald-400" :
+                  task.status === "failed" ? "bg-red-400" : "bg-blue-400"
+                }`}
+                style={{ width: `${progressPct}%` }}
+              />
+            </div>
+            <span className="text-xs text-white/30 flex-shrink-0">{completedCount}/{totalCount}</span>
+          </div>
+
+          {/* Step list */}
+          <div className="flex flex-col gap-0.5">
+            {plan.steps.map((step) => (
+              <div key={step.id} className="flex items-center gap-1.5">
+                <span className={`text-xs font-mono flex-shrink-0 ${stepStatusColor(step.status)}`}>
+                  {stepStatusIcon(step.status)}
+                </span>
+                <span className={`text-xs truncate ${
+                  step.status === "running" ? "text-white/80" :
+                  step.status === "completed" || step.status === "skipped" ? "text-white/40" :
+                  step.status === "failed" ? "text-red-300" :
+                  "text-white/50"
+                }`}>
+                  {step.title}
+                </span>
+                {step.status === "running" && (
+                  <span className="flex-shrink-0 w-1 h-1 rounded-full bg-blue-400 animate-pulse" />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── ChatScreen ─────────────────────────────────────────────────────────────
 
 interface ChatScreenProps {
@@ -304,6 +457,9 @@ export default function ChatScreen({
   const agentName = activeProfile?.name ?? "AI Agent";
   const modelName = activeProfile?.model ?? "";
 
+  // ── Task runtime ────────────────────────────────────────────────────────
+  const [taskSnapshotMap, setTaskSnapshotMap] = useState<Record<string, TaskRuntimeSnapshot>>({}); // keyed by convId
+
   // ── Sidebar resize ─────────────────────────────────────────────────────
   const resizingRef = useRef(false);
   const resizeStartX = useRef(0);
@@ -354,6 +510,42 @@ export default function ChatScreen({
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConvId]);
+
+  // Load active task snapshot when conversation switches (gated on feature flag)
+  useEffect(() => {
+    if (!activeConvId) return;
+    const enabled = (window as unknown as { __forgeTasksEnabled?: boolean }).__forgeTasksEnabled ?? false;
+    if (!enabled) return;
+    window.forgeApi.tasks.getActive(activeConvId).then((snap) => {
+      setTaskSnapshotMap((prev) => {
+        if (!snap) {
+          const next = { ...prev };
+          delete next[activeConvId];
+          return next;
+        }
+        return { ...prev, [activeConvId]: snap };
+      });
+    });
+  }, [activeConvId]);
+
+  // Subscribe to task events (all convs) — gated on feature flag
+  useEffect(() => {
+    const enabled = (window as unknown as { __forgeTasksEnabled?: boolean }).__forgeTasksEnabled ?? false;
+    if (!enabled) return;
+    const updateSnapshot = (snap: TaskRuntimeSnapshot) => {
+      setTaskSnapshotMap((prev) => ({ ...prev, [snap.task.conversationId]: snap }));
+    };
+    const clearSnapshot = (snap: TaskRuntimeSnapshot) => {
+      // Keep terminal snapshots for display until user navigates away
+      setTaskSnapshotMap((prev) => ({ ...prev, [snap.task.conversationId]: snap }));
+    };
+    const unsub1 = window.forgeApi.tasks.onTaskCreated(updateSnapshot);
+    const unsub2 = window.forgeApi.tasks.onTaskUpdated(updateSnapshot);
+    const unsub3 = window.forgeApi.tasks.onTaskTerminal(clearSnapshot);
+    const unsub4 = window.forgeApi.tasks.onTaskReplanned(updateSnapshot);
+    const unsub5 = window.forgeApi.tasks.onStepUpdated(({ snapshot }) => updateSnapshot(snapshot));
+    return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); };
+  }, []);
 
   // Load conversations — scoped by projectId (null = global, string = project)
   const loadConversations = useCallback(async () => {
@@ -838,6 +1030,20 @@ export default function ChatScreen({
     setInput(item.content);
     setEditingQueueItemId(item.id);
     setTimeout(() => textareaRef.current?.focus(), 30);
+  }, []);
+
+  // ── Task action handlers ───────────────────────────────────────────────
+  const handleTaskPause = useCallback(() => {
+    if (!activeConvId) return;
+    void window.forgeApi.tasks.pause(activeConvId);
+  }, [activeConvId]);
+
+  const handleTaskResume = useCallback((taskId: string) => {
+    void window.forgeApi.tasks.resume(taskId);
+  }, []);
+
+  const handleTaskCancel = useCallback((taskId: string) => {
+    void window.forgeApi.tasks.cancel(taskId);
   }, []);
 
   const handleEditQueueItemSubmit = useCallback(async () => {
@@ -1381,6 +1587,21 @@ export default function ChatScreen({
             />
           </div>
         </div>
+
+        {/* ── Task Status Panel ────────────────────────────────────── */}
+        {activeConvId && taskSnapshotMap[activeConvId] && (
+          <div className="flex-shrink-0 px-4 pt-1">
+            <div className="max-w-[800px] mx-auto">
+              <TaskStatusPanel
+                snapshot={taskSnapshotMap[activeConvId] ?? null}
+                convId={activeConvId}
+                onPause={handleTaskPause}
+                onResume={handleTaskResume}
+                onCancel={handleTaskCancel}
+              />
+            </div>
+          </div>
+        )}
 
         {/* ── Composer ─────────────────────────────────────────────── */}
         <div className="flex-shrink-0 px-4 pb-4 pt-1">

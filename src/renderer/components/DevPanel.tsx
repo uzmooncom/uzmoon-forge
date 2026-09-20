@@ -409,6 +409,194 @@ function LogsPanel() {
   );
 }
 
+// ── Types for Tasks panel ─────────────────────────────────────────────────
+
+interface DevTaskStep {
+  id: string;
+  title: string;
+  type: string;
+  status: string;
+  attemptCount: number;
+  dependencies: string[];
+  error?: string;
+}
+
+interface DevTaskPlan {
+  version: number;
+  steps: DevTaskStep[];
+  reasonForRevision?: string;
+}
+
+interface DevTask {
+  id: string;
+  goal: string;
+  status: string;
+  conversationId: string;
+  planVersion: number;
+  currentStepId?: string;
+  createdAt: number;
+  updatedAt: number;
+  failure?: { code: string; message: string };
+}
+
+function stepStatusBadge(status: string): string {
+  switch (status) {
+    case "completed": return "text-emerald-400";
+    case "running":   return "text-blue-400";
+    case "failed":    return "text-red-400";
+    case "blocked":   return "text-amber-400";
+    case "skipped":   return "text-white/30";
+    default:          return "text-white/40";
+  }
+}
+
+function TasksPanel() {
+  const [tasks, setTasks] = useState<DevTask[]>([]);
+  const [plans, setPlans] = useState<Record<string, DevTaskPlan>>({});
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      // Get active conversations and load tasks for each
+      const convs = await window.forgeApi.listConversations(false, null);
+      const allTasks: DevTask[] = [];
+      const allPlans: Record<string, DevTaskPlan> = {};
+      await Promise.all(
+        convs.slice(0, 20).map(async (conv) => {
+          const convTasks = await window.forgeApi.tasks.listByConv(conv.id);
+          for (const t of convTasks) {
+            allTasks.push(t as DevTask);
+            const detail = await window.forgeApi.tasks.getTask(t.id);
+            if (detail) allPlans[t.id] = detail.plan as unknown as DevTaskPlan;
+          }
+        })
+      );
+      allTasks.sort((a, b) => b.updatedAt - a.updatedAt);
+      setTasks(allTasks);
+      setPlans(allPlans);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const toggleExpand = (id: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const statusColor = (s: string) => {
+    switch (s) {
+      case "running": case "planning": case "verifying": return "text-blue-400";
+      case "paused":    return "text-amber-400";
+      case "completed": return "text-emerald-400";
+      case "failed":    return "text-red-400";
+      case "cancelled": return "text-white/30";
+      default:          return "text-white/50";
+    }
+  };
+
+  if (loading) {
+    return <div className="p-4 text-xs text-white/40">Loading tasks…</div>;
+  }
+
+  if (tasks.length === 0) {
+    return <div className="p-4 text-xs text-white/40">No tasks found. Tasks are created when FORGE_TASKS_ENABLED=1.</div>;
+  }
+
+  return (
+    <div className="flex flex-col gap-2 p-3">
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs text-white/50">{tasks.length} task{tasks.length !== 1 ? "s" : ""}</span>
+        <button
+          onClick={() => void load()}
+          className="text-xs px-2 py-0.5 rounded bg-white/8 hover:bg-white/12 text-white/50 hover:text-white/80 transition-colors"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {tasks.map((task) => {
+        const plan = plans[task.id];
+        const isOpen = expanded.has(task.id);
+        const completedSteps = plan?.steps.filter(s => s.status === "completed" || s.status === "skipped").length ?? 0;
+        const totalSteps = plan?.steps.length ?? 0;
+
+        return (
+          <div key={task.id} className="border border-white/8 rounded-lg overflow-hidden">
+            {/* Task header */}
+            <button
+              onClick={() => toggleExpand(task.id)}
+              className="w-full flex items-start gap-2 px-3 py-2 hover:bg-white/3 transition-colors text-left"
+            >
+              <span className="text-xs mt-0.5 text-white/30">{isOpen ? "▾" : "▸"}</span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={`text-xs font-medium flex-shrink-0 ${statusColor(task.status)}`}>
+                    {task.status}
+                  </span>
+                  <span className="text-xs text-white/70 truncate">{task.goal}</span>
+                </div>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <span className="text-xs text-white/30">{task.id.slice(0, 8)}</span>
+                  {totalSteps > 0 && (
+                    <span className="text-xs text-white/30">{completedSteps}/{totalSteps} steps</span>
+                  )}
+                  {plan?.version && plan.version > 1 && (
+                    <span className="text-xs text-amber-400/60">v{plan.version}</span>
+                  )}
+                </div>
+              </div>
+            </button>
+
+            {/* Expanded plan view */}
+            {isOpen && plan && (
+              <div className="border-t border-white/5 px-3 py-2 bg-white/2">
+                <div className="text-xs text-white/30 mb-1.5">
+                  Plan v{plan.version}{plan.reasonForRevision ? ` — ${plan.reasonForRevision}` : ""}
+                </div>
+                <div className="flex flex-col gap-1">
+                  {plan.steps.map((step, idx) => (
+                    <div key={step.id} className="flex items-start gap-2">
+                      <span className="text-xs text-white/20 w-4 flex-shrink-0 mt-px">{idx + 1}.</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-xs font-mono flex-shrink-0 ${stepStatusBadge(step.status)}`}>
+                            {step.status}
+                          </span>
+                          <span className="text-xs text-white/70 truncate">{step.title}</span>
+                          {step.attemptCount > 1 && (
+                            <span className="text-xs text-amber-400/60 flex-shrink-0">×{step.attemptCount}</span>
+                          )}
+                        </div>
+                        {step.error && (
+                          <div className="text-xs text-red-300/70 mt-0.5 truncate">{step.error}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {task.failure && (
+                  <div className="mt-2 text-xs text-red-300/70">
+                    Failure: {task.failure.code} — {task.failure.message}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ExportPanel() {
   const [exporting, setExporting] = useState(false);
   const [exported, setExported] = useState(false);
@@ -451,7 +639,7 @@ function ExportPanel() {
 
 // ── Main DevPanel ──────────────────────────────────────────────────────────
 
-type Tab = "overview" | "runs" | "queue" | "browser" | "incidents" | "permissions" | "logs" | "export";
+type Tab = "overview" | "runs" | "queue" | "browser" | "incidents" | "permissions" | "logs" | "tasks" | "export";
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -461,6 +649,7 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: "incidents", label: "Incidents" },
   { id: "permissions", label: "Perm Checks" },
   { id: "logs", label: "Logs" },
+  { id: "tasks", label: "Tasks" },
   { id: "export", label: "Export" },
 ];
 
@@ -569,6 +758,7 @@ export function DevPanel({ onClose }: DevPanelProps) {
               {tab === "incidents" && <IncidentsPanel snapshot={snapshot} />}
               {tab === "logs" && <LogsPanel />}
               {tab === "permissions" && <PermissionChecksPanel />}
+              {tab === "tasks" && <TasksPanel />}
               {tab === "export" && <ExportPanel />}
             </>
           )}

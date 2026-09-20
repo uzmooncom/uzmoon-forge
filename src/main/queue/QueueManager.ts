@@ -2062,6 +2062,130 @@ function autoTitle(content: string): string {
 
 export const queueManager = new QueueManager();
 
+/**
+ * Run a single task step via a focused agent loop invocation.
+ * Used by the Task Runtime V1 dispatcher — bypasses the user-message queue
+ * and runs a standalone agent turn with step-specific context.
+ *
+ * V1: no streaming to UI, no queue item, no chat messages.
+ * Step results are extracted from finalText by the TaskRunner.
+ */
+export async function runTaskStep(
+  task: import("../../shared/types.js").ForgeTask,
+  step: import("../../shared/types.js").ForgeTaskStep,
+  plan: import("../../shared/types.js").ForgeTaskPlan,
+  signal: AbortSignal
+): Promise<{ loopResult: import("../agent-client/agent-loop.js").AgentLoopResult; cancelled: boolean }> {
+  const { conversationId } = task;
+
+  // Resolve profile + config at dispatch time
+  const conv = db.getConversation(true, conversationId);
+  const profileId = conv?.defaultAgentProfileId ?? db.getAppState(true).defaultAgentProfileId;
+  if (!profileId) {
+    throw new Error(`runTaskStep: no agent profile for conv ${conversationId}`);
+  }
+  const profile = db.getAgentProfile(true, profileId);
+  if (!profile) {
+    throw new Error(`runTaskStep: profile ${profileId} not found`);
+  }
+  const apiKey = _secretGetter(profileId);
+  if (!apiKey) {
+    throw new Error(`runTaskStep: no API key for profile ${profileId}`);
+  }
+
+  const cfg = {
+    id: profile.id,
+    name: profile.name,
+    endpoint: profile.endpoint,
+    protocol: profile.protocol,
+    model: profile.model,
+    ...(profile.apiKeyHeader !== undefined && { apiKeyHeader: profile.apiKeyHeader }),
+    ...(profile.timeoutMs !== undefined && { timeoutMs: profile.timeoutMs }),
+  };
+
+  // Build step prompt as user message
+  const completedSteps = plan.steps.filter(
+    (s) => s.status === "completed" || s.status === "skipped"
+  );
+  const completedSummary = completedSteps.length > 0
+    ? `\nCompleted steps:\n${completedSteps.map((s) => `- ${s.title}: ${s.lastResult?.summary ?? "done"}`).join("\n")}`
+    : "";
+  const depContext = step.dependencies.length > 0
+    ? `\nThis step depends on: ${step.dependencies.map((d) => {
+        const dep = plan.steps.find((s) => s.id === d);
+        return dep ? `${dep.title} (${dep.status})` : d;
+      }).join(", ")}`
+    : "";
+
+  const stepPrompt = [
+    `<forge_task_context>`,
+    `Task Goal: ${task.goal}`,
+    `Current Step: ${step.title}`,
+    step.description ? `Step Description: ${step.description}` : "",
+    step.expectedOutcome ? `Expected Outcome: ${step.expectedOutcome}` : "",
+    depContext,
+    completedSummary,
+    `</forge_task_context>`,
+    ``,
+    `Execute this step: ${step.title}`,
+    ``,
+    `When done, output a \`\`\`forge_step_result fence with:`,
+    `\`\`\`forge_step_result`,
+    `{`,
+    `  "status": "completed" | "failed" | "blocked" | "replan_required",`,
+    `  "summary": "brief description of what was done or why it failed",`,
+    `  "evidenceRefs": [],`,
+    `  "observations": "optional: anything useful for next steps",`,
+    `  "recommendedPlanChanges": "optional: only when status is replan_required"`,
+    `}`,
+    `\`\`\``,
+  ].filter(Boolean).join("\n");
+
+  const messages: import("../agent-client/client.js").SimpleMessage[] = [
+    { role: "user", content: stepPrompt },
+  ];
+
+  const requestId = randomUUID();
+  const isProjectMode = !!(conv?.projectId);
+
+  try {
+    const loopResult = await runAgentLoop({
+      cfg,
+      apiKey,
+      messages,
+      system: undefined,
+      projectId: conv?.projectId ?? "",
+      projectRoot: (() => {
+        const proj = conv?.projectId ? db.getProject(true, conv.projectId) : null;
+        return proj?.workingDirectory ?? "";
+      })(),
+      requestId,
+      conversationId,
+      isProjectMode,
+      signal,
+      onChunk: () => { /* task steps don't stream to UI in V1 */ },
+      onToolStart: () => {},
+      onToolEnd: () => {},
+    });
+    return { loopResult, cancelled: false };
+  } catch (err: unknown) {
+    if (signal.aborted) {
+      return {
+        loopResult: {
+          finalText: "",
+          proposalFenceRaw: undefined,
+          stepCount: 0,
+          agentReadRefs: [],
+          toolActivity: [],
+          agentRun: {} as import("../../shared/types.js").AgentRun,
+        },
+        cancelled: true,
+      };
+    }
+    throw err;
+  }
+}
+
 /** FOR TESTS ONLY — resets all module-level state for isolation between test cases */
 /** Set of active processNext promises — used for deterministic test teardown */
 const _activeProcessingPromises = new Set<Promise<void>>();

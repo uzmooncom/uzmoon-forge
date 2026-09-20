@@ -190,6 +190,45 @@ export async function fakeRequest(opts: FakeRequestOpts): Promise<string> {
     return makeForgeFinalBlocked("This step requires human completion (simulated).");
   }
 
+  // ── Task step magic strings ────────────────────────────────────────────
+
+  if (userText.includes("__step_complete__")) {
+    const stepResult = JSON.stringify({
+      status: "completed",
+      summary: "Step completed successfully (simulated).",
+      evidenceRefs: [],
+    });
+    return `\`\`\`forge_step_result\n${stepResult}\n\`\`\``;
+  }
+
+  if (userText.includes("__step_blocked__")) {
+    const stepResult = JSON.stringify({
+      status: "blocked",
+      summary: "Step blocked — human action required (simulated).",
+      evidenceRefs: [],
+    });
+    return `\`\`\`forge_step_result\n${stepResult}\n\`\`\``;
+  }
+
+  if (userText.includes("__step_replan__")) {
+    const stepResult = JSON.stringify({
+      status: "replan_required",
+      summary: "Step outcome requires plan revision (simulated).",
+      evidenceRefs: [],
+      recommendedPlanChanges: "Add a prerequisite step for environment setup.",
+    });
+    return `\`\`\`forge_step_result\n${stepResult}\n\`\`\``;
+  }
+
+  if (userText.includes("__step_failed__")) {
+    const stepResult = JSON.stringify({
+      status: "failed",
+      summary: "Step failed with an unrecoverable error (simulated).",
+      evidenceRefs: [],
+    });
+    return `\`\`\`forge_step_result\n${stepResult}\n\`\`\``;
+  }
+
   // Default: echo
   const echo = `Fake provider response to: "${userText.slice(0, 80)}"`;
   return makeForgeFinal(echo);

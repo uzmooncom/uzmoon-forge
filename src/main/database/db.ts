@@ -28,6 +28,9 @@ import type {
   BrowserTab,
   BrowserBookmark,
   BrowserHistoryEntry,
+  ForgeTask,
+  ForgeTaskPlan,
+  TaskStatus,
 } from "../../shared/types.js";
 import { DEFAULT_APP_SETTINGS } from "../../shared/types.js";
 
@@ -86,6 +89,13 @@ interface Store {
   browserBookmarks: Record<string, BrowserBookmark>;
   /** BrowserHistoryEntries keyed by id (private profiles never write here) */
   browserHistory: Record<string, BrowserHistoryEntry>;
+  // ── Task / Plan Runtime V1 ─────────────────────────────────────────────
+  /** ForgeTask records keyed by task id */
+  tasks: Record<string, ForgeTask>;
+  /** Latest TaskPlan for each task, keyed by task id */
+  taskPlans: Record<string, ForgeTaskPlan>;
+  /** Full plan version history keyed by task id */
+  taskPlanHistory: Record<string, ForgeTaskPlan[]>;
 }
 
 const DEFAULT_STORE: Store = {
@@ -110,6 +120,9 @@ const DEFAULT_STORE: Store = {
   browserTabs: {},
   browserBookmarks: {},
   browserHistory: {},
+  tasks: {},
+  taskPlans: {},
+  taskPlanHistory: {},
 };
 
 // ── Singleton ──────────────────────────────────────────────────────────────
@@ -149,6 +162,9 @@ function load(): Store {
       browserTabs: raw.browserTabs ?? {},
       browserBookmarks: raw.browserBookmarks ?? {},
       browserHistory: raw.browserHistory ?? {},
+      tasks: raw.tasks ?? {},
+      taskPlans: raw.taskPlans ?? {},
+      taskPlanHistory: raw.taskPlanHistory ?? {},
     };
 
     // ── One-time migration: AgentConfig → AgentProfile ─────────────────
@@ -1285,5 +1301,68 @@ export function clearHistory(_db: true, profileId?: string): void {
     s.browserHistory = {};
   }
   persist();
+}
+
+// ── Task / Plan Runtime V1 ─────────────────────────────────────────────────
+
+export function saveTask(_db: true, task: ForgeTask): void {
+  store().tasks[task.id] = structuredClone(task);
+  persist();
+}
+
+export function getTask(_db: true, taskId: string): ForgeTask | null {
+  return structuredClone(store().tasks[taskId] ?? null);
+}
+
+export function updateTask(_db: true, taskId: string, patch: Partial<ForgeTask>): ForgeTask | null {
+  const existing = store().tasks[taskId];
+  if (!existing) return null;
+  const updated: ForgeTask = { ...existing, ...patch, id: taskId, updatedAt: Date.now() };
+  store().tasks[taskId] = updated;
+  persist();
+  return structuredClone(updated);
+}
+
+export function listTasksByConversation(_db: true, convId: string): ForgeTask[] {
+  return Object.values(store().tasks)
+    .filter((t) => t.conversationId === convId)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map((t) => structuredClone(t));
+}
+
+export function saveTaskPlan(_db: true, plan: ForgeTaskPlan): void {
+  const s = store();
+  s.taskPlans[plan.taskId] = structuredClone(plan);
+  // Append to history
+  if (!s.taskPlanHistory[plan.taskId]) {
+    s.taskPlanHistory[plan.taskId] = [];
+  }
+  s.taskPlanHistory[plan.taskId]!.push(structuredClone(plan));
+  persist();
+}
+
+export function getTaskPlan(_db: true, taskId: string): ForgeTaskPlan | null {
+  return structuredClone(store().taskPlans[taskId] ?? null);
+}
+
+export function getTaskPlanHistory(_db: true, taskId: string): ForgeTaskPlan[] {
+  return (store().taskPlanHistory[taskId] ?? []).map((p) => structuredClone(p));
+}
+
+/**
+ * Returns all tasks that were mid-execution at last shutdown (for startup reconciliation).
+ * These should be reconciled to paused state — never blindly resumed.
+ */
+export function listInterruptedTasks(_db: true): ForgeTask[] {
+  const activeStatuses: TaskStatus[] = [
+    "running",
+    "waiting_for_approval",
+    "waiting_for_human",
+    "verifying",
+    "planning",
+  ];
+  return Object.values(store().tasks)
+    .filter((t) => activeStatuses.includes(t.status))
+    .map((t) => structuredClone(t));
 }
 

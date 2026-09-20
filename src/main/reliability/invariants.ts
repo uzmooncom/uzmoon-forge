@@ -60,6 +60,15 @@ export function getAllInvariants(): InvariantDef[] {
   return Array.from(REGISTRY.values());
 }
 
+/**
+ * Register a new invariant at runtime (used by subsystem init, e.g. task-invariants.ts).
+ * Silently ignores duplicate registrations (idempotent — safe to call on app restart).
+ */
+export function registerInvariant(def: InvariantDef): void {
+  if (REGISTRY.has(def.id)) return; // idempotent
+  REGISTRY.set(def.id, def);
+}
+
 // ── AGENT RUNTIME invariants ──────────────────────────────────────────────────
 
 export const INV_ONE_RUN_ONE_VISIBLE_FAILURE = define({
