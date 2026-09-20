@@ -46,6 +46,7 @@ import { TOOL_LIMITS, buildOpenAIToolDefs, buildAnthropicToolDefs } from "./tool
 import { executeProjectTool, buildResultSummary, newActivityId } from "../project-files/tool-executor.js";
 import type { ToolExecutionContext } from "../project-files/tool-executor.js";
 import { tryGetTraceRecorder, assertInvariant } from "../reliability/index.js";
+import { extractStepResult } from "../tasks/task-types.js";
 
 // ── Public error type ─────────────────────────────────────────────────────────
 
@@ -130,6 +131,15 @@ export interface AgentLoopOptions {
    * The QueueManager always provides a real implementation.
    */
   onWaitingForHuman?: (reason: HumanRequiredReason) => Promise<void>;
+  // ── Task step identity (optional — only set for task-step runs) ──────
+  /** Task ID when executing a task step — written to AgentRun record */
+  taskId?: string;
+  /** Step ID when executing a task step — written to AgentRun record */
+  stepId?: string;
+  /** Plan version at dispatch time */
+  planVersion?: number;
+  /** Step attempt number (1-based) */
+  stepAttempt?: number;
 }
 
 export interface AgentLoopResult {
@@ -147,6 +157,13 @@ export interface AgentLoopResult {
   commandEvidenceRefs?: CommandEvidenceRef[];
   /** Final AgentRun state record */
   agentRun: AgentRun;
+  /**
+   * Structured task step result extracted from forge_step_result fence in finalText.
+   * Only present when this run was executing a task step and the agent produced
+   * a valid forge_step_result fence. Undefined for normal chat runs.
+   * Single canonical parse point — consumers must not re-parse finalText.
+   */
+  taskStepResult?: import("../../shared/types.js").TaskStepResult;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -597,6 +614,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     onToolEnd,
     signal,
     onWaitingForHuman,
+    taskId,
+    stepId,
   } = opts;
 
   // ── Initialize AgentRun ────────────────────────────────────────────────────
@@ -613,6 +632,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     readByteCount: 0,
     stuckScore: 0,
     terminated: false,
+    // Task step identity — only set for task-step runs
+    ...(taskId !== undefined && { taskId }),
+    ...(stepId !== undefined && { stepId }),
   };
 
   // Start trace for this request
@@ -1070,6 +1092,13 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
   //  through the forge_final protocol. The section below handles the edge case
   //  where the model returns a tool call when budget is already exhausted.)
 
+  // ── Extract forge_step_result for task-step runs ──────────────────────────
+  // Only attempt extraction when this was a task-step run (taskId present).
+  // This is the single canonical parse point — consumers must not re-parse finalText.
+  const taskStepResult = taskId !== undefined
+    ? extractStepResult(finalText) ?? undefined
+    : undefined;
+
   return {
     finalText,
     proposalFenceRaw,
@@ -1078,6 +1107,7 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     commandEvidenceRefs,
     toolActivity,
     agentRun: run,
+    ...(taskStepResult !== undefined && { taskStepResult }),
   };
 }
 

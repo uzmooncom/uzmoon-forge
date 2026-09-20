@@ -31,6 +31,7 @@ import * as browserWindowController from "../browser/browser-window-controller.j
 import { isFakeProviderEnabled, releaseCheckpoint, waitForCheckpointBlocked } from "../agent-client/fake-provider.js";
 import * as permissionEngine from "../permissions/index.js";
 import * as taskManager from "../tasks/task-manager.js";
+import { generatePlan, replan as replanPlan } from "../tasks/task-planner.js";
 import { registerTaskInvariants } from "../tasks/task-invariants.js";
 import * as devProcessManager from "../commands/dev-process-manager.js";
 import { buildGitHubIssuePayload } from "../reliability/sanitizer.js";
@@ -1904,6 +1905,27 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     },
     dispatchStep: async (task, step, plan, signal) => {
       return runTaskStep(task, step, plan, signal);
+    },
+    dispatchPlan: async (mode, task, currentPlan, cfg, apiKey, signal, reason, errorFeedback) => {
+      if (mode === "replan" && currentPlan !== null) {
+        const completedSteps = currentPlan.steps.filter(
+          (s) => s.status === "completed" || s.status === "skipped"
+        );
+        // replan(taskId, goal, completedSteps, currentVersion, reason, evidence, cfg, apiKey, signal)
+        return replanPlan(
+          task.id,
+          task.goal,
+          completedSteps,
+          currentPlan.version,
+          reason ?? "Replan requested",
+          errorFeedback ?? "",
+          cfg,
+          apiKey,
+          signal
+        );
+      }
+      // generatePlan(taskId, goal, cfg, apiKey, signal) — no errorFeedback param
+      return generatePlan(task.id, task.goal, cfg, apiKey, signal);
     },
   });
 

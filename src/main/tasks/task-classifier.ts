@@ -92,6 +92,18 @@ export function classifyMessage(
   content: string,
   isProjectMode: boolean
 ): TaskClassification {
+  try {
+    return _classifyMessageImpl(content, isProjectMode);
+  } catch {
+    // Conservative fallback — never accidentally trigger task mode on classifier error
+    return "conversation";
+  }
+}
+
+function _classifyMessageImpl(
+  content: string,
+  isProjectMode: boolean
+): TaskClassification {
   const trimmed = content.trim();
   const lower = trimmed.toLowerCase();
   const wordCount = trimmed.split(/\s+/).filter(Boolean).length;

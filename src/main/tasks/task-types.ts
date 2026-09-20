@@ -121,7 +121,8 @@ export function getReadySteps(steps: ForgeTaskStep[]): ForgeTaskStep[] {
   );
   return steps.filter(
     (s) =>
-      s.status === "pending" &&
+      // pending = not yet started; interrupted = was running when task paused (retryable)
+      (s.status === "pending" || s.status === "interrupted") &&
       s.dependencies.every((dep) => completedIds.has(dep))
   );
 }
@@ -304,7 +305,8 @@ export function inferStepResult(finalText: string, agentRunFailed: boolean): Tas
 export function makeTask(
   convId: string,
   goal: string,
-  projectId?: string
+  projectId?: string,
+  triggerMessageId?: string
 ): ForgeTask {
   const now = Date.now();
   return {
@@ -316,6 +318,9 @@ export function makeTask(
     createdAt: now,
     updatedAt: now,
     planVersion: 0,
+    requiresVerification: false,
+    verificationPolicy: "none",
+    ...(triggerMessageId !== undefined ? { triggerMessageId } : {}),
     metadata: {},
   };
 }

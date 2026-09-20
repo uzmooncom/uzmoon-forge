@@ -28,7 +28,7 @@ import {
   makeTask,
   isTaskTerminal,
 } from "./task-types.js";
-import { generatePlan, buildFallbackPlan } from "./task-planner.js";
+import { generatePlan, replan as replanPlan, buildFallbackPlan } from "./task-planner.js";
 import {
   startTaskRunner,
   pauseTask,
@@ -62,6 +62,7 @@ export function initTaskManager(opts: {
   dispatchStep: (
     task: ForgeTask, step: ForgeTaskStep, plan: ForgeTaskPlan, signal: AbortSignal
   ) => Promise<{ loopResult: AgentLoopResult; cancelled: boolean }>;
+  dispatchPlan?: TaskRunnerCallbacks["dispatchPlan"];
 }): void {
   _sender = opts.sender;
   _secretGetter = opts.secretGetter;
@@ -105,6 +106,18 @@ function _makeCallbacks(): TaskRunnerCallbacks {
         throw new Error("TaskManager: dispatchStep not wired — call initTaskManager first");
       }
       return _dispatchStep(task, step, plan, signal);
+    },
+    dispatchPlan: async (mode, task, currentPlan, cfg, apiKey, signal, reason, errorFeedback) => {
+      if (mode === "replan" && currentPlan !== null) {
+        const completedSteps = currentPlan.steps.filter(
+          (s) => s.status === "completed" || s.status === "skipped"
+        );
+        return replanPlan(
+          task.id, task.goal, completedSteps, currentPlan.version,
+          reason ?? "Replan requested", errorFeedback ?? "", cfg, apiKey, signal
+        );
+      }
+      return generatePlan(task.id, task.goal, cfg, apiKey, signal);
     },
     onIncident: (invariantId: string, meta: Record<string, unknown>) => {
       const recorder = tryGetIncidentRecorder();
@@ -352,6 +365,33 @@ export function getActiveTask(convId: string): { task: ForgeTask; plan: ForgeTas
 export function reconcileInterruptedTasks(): void {
   const interrupted = db.listInterruptedTasks(true);
   for (const task of interrupted) {
+    // Mark any running/waiting steps as interrupted (safe to retry on resume)
+    const plan = db.getTaskPlan(true, task.id);
+    if (plan) {
+      const staleRunningStepStatuses: import("../../shared/types.js").TaskStepStatus[] = [
+        "running",
+        "waiting_for_approval",
+        "waiting_for_human",
+      ];
+      const needsStepPatch = plan.steps.some((s) => staleRunningStepStatuses.includes(s.status));
+      if (needsStepPatch) {
+        const patchedSteps = plan.steps.map((s) =>
+          staleRunningStepStatuses.includes(s.status)
+            ? { ...s, status: "interrupted" as import("../../shared/types.js").TaskStepStatus }
+            : s
+        );
+        const patchedPlan: import("../../shared/types.js").ForgeTaskPlan = {
+          ...plan,
+          steps: patchedSteps,
+          updatedAt: Date.now(),
+        };
+        db.saveTaskPlan(true, patchedPlan);
+        forgeLogger.info("task", "TASK_STEPS_RECONCILED", {
+          metadata: { taskId: task.id, interruptedStepCount: patchedSteps.filter((s) => s.status === "interrupted").length },
+        });
+      }
+    }
+
     const patched = db.updateTask(true, task.id, {
       status: "paused",
       metadata: { ...task.metadata, executionInterrupted: true, interruptedAt: Date.now() },

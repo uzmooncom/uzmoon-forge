@@ -203,23 +203,27 @@ interface TaskStatusPanelProps {
 
 function stepStatusIcon(status: ForgeTaskStep["status"]): string {
   switch (status) {
-    case "completed": return "●";
-    case "running":   return "◎";
-    case "failed":    return "✕";
-    case "blocked":   return "⊘";
-    case "skipped":   return "→";
-    default:          return "○";
+    case "completed":    return "●";
+    case "running":      return "◎";
+    case "failed":       return "✕";
+    case "blocked":      return "⊘";
+    case "skipped":      return "→";
+    case "interrupted":  return "⏸";
+    case "cancelled":    return "–";
+    default:             return "○";
   }
 }
 
 function stepStatusColor(status: ForgeTaskStep["status"]): string {
   switch (status) {
-    case "completed": return "text-emerald-400";
-    case "running":   return "text-blue-400";
-    case "failed":    return "text-red-400";
-    case "blocked":   return "text-amber-400";
-    case "skipped":   return "text-white/30";
-    default:          return "text-white/30";
+    case "completed":    return "text-emerald-400";
+    case "running":      return "text-blue-400";
+    case "failed":       return "text-red-400";
+    case "blocked":      return "text-amber-400";
+    case "skipped":      return "text-white/30";
+    case "interrupted":  return "text-amber-300";
+    case "cancelled":    return "text-white/20";
+    default:             return "text-white/30";
   }
 }
 
@@ -250,6 +254,13 @@ function taskStatusDot(status: string): string {
 }
 
 function TaskStatusPanel({ snapshot, convId: _convId, onPause, onResume, onCancel }: TaskStatusPanelProps) {
+  // Hooks must come before any early returns
+  const isTerminalInit = snapshot
+    ? ["completed", "failed", "cancelled"].includes(snapshot.task.status)
+    : false;
+  // Terminal tasks start collapsed — click header to expand
+  const [collapsed, setCollapsed] = React.useState(isTerminalInit);
+
   if (!snapshot) return null;
 
   const { task, plan } = snapshot;
@@ -260,6 +271,25 @@ function TaskStatusPanel({ snapshot, convId: _convId, onPause, onResume, onCance
   const completedCount = plan.steps.filter(s => s.status === "completed" || s.status === "skipped").length;
   const totalCount = plan.steps.length;
   const progressPct = totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0;
+
+  if (collapsed) {
+    return (
+      <div
+        className="mb-1 rounded-xl border border-white/8 bg-white/3 overflow-hidden cursor-pointer hover:bg-white/5 transition-colors"
+        onClick={() => setCollapsed(false)}
+      >
+        <div className="flex items-center gap-2 px-3 py-2">
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${taskStatusDot(task.status)}`} />
+          <span className="text-xs text-white/50 flex-1 truncate">{task.goal.slice(0, 80)}</span>
+          <span className={`text-xs font-medium ${
+            task.status === "completed" ? "text-emerald-400" :
+            task.status === "failed" ? "text-red-400" : "text-white/30"
+          }`}>{taskStatusLabel(task.status)}</span>
+          <span className="text-xs text-white/30 ml-1">▸</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mb-1 rounded-xl border border-white/8 bg-white/3 overflow-hidden">
@@ -272,6 +302,15 @@ function TaskStatusPanel({ snapshot, convId: _convId, onPause, onResume, onCance
         <span className="text-xs text-white/40 flex-shrink-0">{taskStatusLabel(task.status)}</span>
         {/* Controls */}
         <div className="flex items-center gap-1 flex-shrink-0">
+          {isTerminal && (
+            <button
+              onClick={() => setCollapsed(true)}
+              className="text-xs px-1.5 py-0.5 rounded text-white/25 hover:text-white/50 transition-colors"
+              title="Collapse"
+            >
+              ▾
+            </button>
+          )}
           {isActive && (
             <button
               onClick={onPause}
@@ -458,7 +497,8 @@ export default function ChatScreen({
   const modelName = activeProfile?.model ?? "";
 
   // ── Task runtime ────────────────────────────────────────────────────────
-  const [taskSnapshotMap, setTaskSnapshotMap] = useState<Record<string, TaskRuntimeSnapshot>>({}); // keyed by convId
+  // taskHistoryMap: convId → sorted array of snapshots (all tasks, newest last)
+  const [taskHistoryMap, setTaskHistoryMap] = useState<Record<string, TaskRuntimeSnapshot[]>>({});
 
   // ── Sidebar resize ─────────────────────────────────────────────────────
   const resizingRef = useRef(false);
@@ -511,39 +551,61 @@ export default function ChatScreen({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConvId]);
 
-  // Load active task snapshot when conversation switches (gated on feature flag)
+  // Load all tasks for the active conversation on switch (gated on feature flag)
   useEffect(() => {
     if (!activeConvId) return;
     const enabled = (window as unknown as { __forgeTasksEnabled?: boolean }).__forgeTasksEnabled ?? false;
     if (!enabled) return;
-    window.forgeApi.tasks.getActive(activeConvId).then((snap) => {
-      setTaskSnapshotMap((prev) => {
-        if (!snap) {
-          const next = { ...prev };
-          delete next[activeConvId];
-          return next;
-        }
-        return { ...prev, [activeConvId]: snap };
+    // Load ALL tasks for this conv (including completed) for history display
+    window.forgeApi.tasks.listByConv(activeConvId).then((tasks) => {
+      if (!tasks || tasks.length === 0) return;
+      // For each task, get the full snapshot (task + plan)
+      Promise.all(
+        tasks.map((t: { id: string }) =>
+          window.forgeApi.tasks.getTask(t.id).then(
+            // IPC returns {task, plan} — wrap to TaskRuntimeSnapshot shape
+            (raw: { task: import("../../shared/types.js").ForgeTask; plan: import("../../shared/types.js").ForgeTaskPlan } | null): TaskRuntimeSnapshot | null =>
+              raw ? { task: raw.task, plan: raw.plan, revision: 0 } : null
+          )
+        )
+      ).then((snaps: (TaskRuntimeSnapshot | null)[]) => {
+        const valid = snaps.filter((s): s is TaskRuntimeSnapshot => s !== null);
+        if (valid.length === 0) return;
+        valid.sort((a, b) => a.task.createdAt - b.task.createdAt);
+        setTaskHistoryMap((prev) => ({ ...prev, [activeConvId]: valid }));
       });
     });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConvId]);
 
   // Subscribe to task events (all convs) — gated on feature flag
   useEffect(() => {
     const enabled = (window as unknown as { __forgeTasksEnabled?: boolean }).__forgeTasksEnabled ?? false;
     if (!enabled) return;
-    const updateSnapshot = (snap: TaskRuntimeSnapshot) => {
-      setTaskSnapshotMap((prev) => ({ ...prev, [snap.task.conversationId]: snap }));
+
+    const upsertSnapshot = (snap: TaskRuntimeSnapshot) => {
+      const convId = snap.task.conversationId;
+      setTaskHistoryMap((prev) => {
+        const existing = prev[convId] ?? [];
+        const idx = existing.findIndex((s) => s.task.id === snap.task.id);
+        let updated: TaskRuntimeSnapshot[];
+        if (idx >= 0) {
+          updated = [...existing];
+          updated[idx] = snap;
+        } else {
+          updated = [...existing, snap];
+        }
+        // Keep sorted by createdAt ascending
+        updated.sort((a, b) => a.task.createdAt - b.task.createdAt);
+        return { ...prev, [convId]: updated };
+      });
     };
-    const clearSnapshot = (snap: TaskRuntimeSnapshot) => {
-      // Keep terminal snapshots for display until user navigates away
-      setTaskSnapshotMap((prev) => ({ ...prev, [snap.task.conversationId]: snap }));
-    };
-    const unsub1 = window.forgeApi.tasks.onTaskCreated(updateSnapshot);
-    const unsub2 = window.forgeApi.tasks.onTaskUpdated(updateSnapshot);
-    const unsub3 = window.forgeApi.tasks.onTaskTerminal(clearSnapshot);
-    const unsub4 = window.forgeApi.tasks.onTaskReplanned(updateSnapshot);
-    const unsub5 = window.forgeApi.tasks.onStepUpdated(({ snapshot }) => updateSnapshot(snapshot));
+
+    const unsub1 = window.forgeApi.tasks.onTaskCreated(upsertSnapshot);
+    const unsub2 = window.forgeApi.tasks.onTaskUpdated(upsertSnapshot);
+    const unsub3 = window.forgeApi.tasks.onTaskTerminal(upsertSnapshot); // keep in history
+    const unsub4 = window.forgeApi.tasks.onTaskReplanned(upsertSnapshot);
+    const unsub5 = window.forgeApi.tasks.onStepUpdated(({ snapshot }) => upsertSnapshot(snapshot));
     return () => { unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); };
   }, []);
 
@@ -1588,17 +1650,20 @@ export default function ChatScreen({
           </div>
         </div>
 
-        {/* ── Task Status Panel ────────────────────────────────────── */}
-        {activeConvId && taskSnapshotMap[activeConvId] && (
+        {/* ── Task History Panel ────────────────────────────────────── */}
+        {activeConvId && taskHistoryMap[activeConvId] && taskHistoryMap[activeConvId]!.length > 0 && (
           <div className="flex-shrink-0 px-4 pt-1">
-            <div className="max-w-[800px] mx-auto">
-              <TaskStatusPanel
-                snapshot={taskSnapshotMap[activeConvId] ?? null}
-                convId={activeConvId}
-                onPause={handleTaskPause}
-                onResume={handleTaskResume}
-                onCancel={handleTaskCancel}
-              />
+            <div className="max-w-[800px] mx-auto space-y-1">
+              {taskHistoryMap[activeConvId]!.map((snap) => (
+                <TaskStatusPanel
+                  key={snap.task.id}
+                  snapshot={snap}
+                  convId={activeConvId}
+                  onPause={handleTaskPause}
+                  onResume={handleTaskResume}
+                  onCancel={handleTaskCancel}
+                />
+              ))}
             </div>
           </div>
         )}

@@ -113,4 +113,82 @@ export function registerTaskInvariants(): void {
     severity: "critical",
     maxHealingLevel: 1,
   });
+
+  // ── Evidence integrity ───────────────────────────────────────────────
+
+  registerInvariant({
+    id: "TASK_RUNNING_STEP_HAS_ACTIVE_AGENTRUN",
+    description:
+      "A step with status=running must have a corresponding active AgentRun in the registry",
+    category: "TASK_RUNTIME",
+    severity: "high",
+    maxHealingLevel: 1,
+  });
+
+  registerInvariant({
+    id: "TASK_PAUSED_HAS_NO_ACTIVE_AGENTRUN",
+    description:
+      "A task with status=paused must not have any active AgentRun in the registry",
+    category: "TASK_RUNTIME",
+    severity: "high",
+    maxHealingLevel: 1,
+  });
+
+  registerInvariant({
+    id: "TASK_STEP_EVIDENCE_REFS_VALID",
+    description:
+      "All evidenceRefs in a step's lastResult must pass evidence registry validation",
+    category: "TASK_RUNTIME",
+    severity: "high",
+    maxHealingLevel: 1,
+  });
+
+  registerInvariant({
+    id: "TASK_VERIFICATION_USES_VALID_EVIDENCE",
+    description:
+      "A task with verificationStatus=passed must have at least one valid evidence ref",
+    category: "TASK_RUNTIME",
+    severity: "critical",
+    maxHealingLevel: 1,
+  });
+
+  registerInvariant({
+    id: "TASK_CALLBACK_RELEASED_AFTER_TERMINAL",
+    description:
+      "No pending task callbacks (AbortControllers, step controllers) remain after terminal status",
+    category: "TASK_RUNTIME",
+    severity: "high",
+    maxHealingLevel: 1,
+  });
+
+  registerInvariant({
+    id: "TASK_RUNTIME_METADATA_MATCHES_AGENTRUN",
+    description:
+      "The active AgentRun's taskId/stepId must match the TaskRunner's current step state",
+    category: "TASK_RUNTIME",
+    severity: "high",
+    maxHealingLevel: 1,
+  });
+
+  // ── Restart correctness ──────────────────────────────────────────────
+
+  registerInvariant({
+    id: "TASK_RESTART_HAS_NO_STALE_RUNNING_STEP",
+    description:
+      "After startup reconciliation, no step with status=running must exist",
+    category: "TASK_RUNTIME",
+    severity: "critical",
+    maxHealingLevel: 1,
+  });
+
+  // ── Message deduplication ────────────────────────────────────────────
+
+  registerInvariant({
+    id: "ONE_PERSISTED_USER_MESSAGE_PER_TASK_REQUEST",
+    description:
+      "Exactly one user ChatMessage must be persisted per task trigger — task creation must not insert a second",
+    category: "TASK_RUNTIME",
+    severity: "critical",
+    maxHealingLevel: 1,
+  });
 }

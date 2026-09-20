@@ -200,6 +200,15 @@ export interface QueueItem {
   targetAgentProfileId: string;
   /** Project file context refs captured at enqueue time — immutable */
   contextRefs?: ContextRef[];
+  // ── Task metadata (optional — only set for task-step queue entries) ──
+  /** Task this queue entry belongs to (task steps only) */
+  taskId?: string;
+  /** Step ID within the task plan (task steps only) */
+  stepId?: string;
+  /** Plan version at dispatch time */
+  planVersion?: number;
+  /** Step attempt number (1-based) */
+  stepAttempt?: number;
 }
 
 /**
@@ -918,6 +927,11 @@ export interface AgentRun {
    * This is the canonical authority — renderer guards are defensive UI only.
    */
   terminated: boolean;
+  // ── Task step identity (optional — only set for task-step runs) ──────
+  /** Task ID when this run executes a task step */
+  taskId?: string;
+  /** Step ID when this run executes a task step */
+  stepId?: string;
 }
 
 /** IPC channels for V0.4 agent tool ledger */
@@ -1007,7 +1021,15 @@ export type ForgeFailureCode =
   | "TASK_BUDGET_EXCEEDED"
   | "TASK_VERIFICATION_FAILED"
   | "TASK_STEP_MAX_ATTEMPTS"
-  | "TASK_LOOP_UNEXPECTED_EXIT";
+  | "TASK_LOOP_UNEXPECTED_EXIT"
+  | "TASK_RUNNING_STEP_NO_AGENTRUN"
+  | "TASK_PAUSED_HAS_ACTIVE_AGENTRUN"
+  | "TASK_EVIDENCE_REF_INVALID"
+  | "TASK_VERIFICATION_NO_EVIDENCE"
+  | "TASK_CALLBACK_LEAKED"
+  | "TASK_RUNTIME_METADATA_MISMATCH"
+  | "TASK_STALE_RUNNING_STEP_AFTER_RESTART"
+  | "TASK_DUPLICATE_USER_MESSAGE";
 
 /** Severity levels for invariants and incidents */
 export type ForgeSeverity = "critical" | "high" | "medium" | "low";
@@ -2109,7 +2131,9 @@ export type TaskStepStatus =
   | "completed"
   | "failed"
   | "cancelled"
-  | "skipped";
+  | "skipped"
+  /** Step was aborted mid-run (task paused/cancelled) — safe to retry */
+  | "interrupted";
 
 export type TaskStepType =
   | "inspect"
@@ -2190,6 +2214,14 @@ export interface ForgeTask {
   failure?: { code: string; message: string };
   blocker?: TaskBlocker;
   verificationStatus?: "pending" | "passed" | "failed" | "skipped";
+  /** The ChatMessage ID of the user message that triggered this task */
+  triggerMessageId?: string;
+  /** Whether this task requires verified evidence before completion */
+  requiresVerification: boolean;
+  /** Evidence policy for verification */
+  verificationPolicy: "none" | "evidence_required" | "build_test" | "browser";
+  /** If set, this task is queued to start after the referenced task completes */
+  queuedAfter?: string;
   metadata: Record<string, unknown>;
 }
 

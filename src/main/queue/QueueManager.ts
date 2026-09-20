@@ -34,6 +34,11 @@ import {
   parseStructuredEditProposal,
   normalizeToFullContent,
 } from "../project-files/edit-ir.js";
+import {
+  collectAndRegisterEvidence,
+  validateEvidenceRefs,
+} from "../tasks/evidence-registry.js";
+
 import fs from "fs";
 import path from "path";
 
@@ -450,6 +455,29 @@ export function setSecretGetter(fn: SecretGetter): void {
 
 /** streamId → AbortController + conversationId */
 const activeControllers = new Map<string, { controller: AbortController; convId: string }>();
+
+/** stepId → AbortController for task-step runs — used for pause/cancel abort */
+const _taskStepControllers = new Map<string, AbortController>();
+
+/**
+ * Abort the currently-running agent loop for a task step.
+ * Called by pause/cancel paths in the TaskRunner.
+ */
+export function abortTaskStep(stepId: string): void {
+  const ctrl = _taskStepControllers.get(stepId);
+  if (ctrl) {
+    ctrl.abort();
+    _taskStepControllers.delete(stepId);
+  }
+}
+
+/**
+ * Release the task step controller after a step completes (success, fail, cancel).
+ * Idempotent — safe to call multiple times.
+ */
+function _cleanupTaskStep(stepId: string): void {
+  _taskStepControllers.delete(stepId);
+}
 /** conversationId → streamId */
 const convToStream = new Map<string, string>();
 
@@ -561,6 +589,15 @@ export interface ActiveRunEntry {
   humanRequiredReason?: string;
   /** V17: true when a browser approval dialog is pending */
   approvalPending: boolean;
+  // ── Task step identity (optional — only set for task-step runs) ──────
+  /** Task ID when this run executes a task step */
+  taskId?: string;
+  /** Step ID when this run executes a task step */
+  stepId?: string;
+  /** Plan version at dispatch time */
+  planVersion?: number;
+  /** Step attempt number (1-based) */
+  stepAttempt?: number;
 }
 
 /** conversationId → live run entry */
@@ -2068,7 +2105,8 @@ export const queueManager = new QueueManager();
  * and runs a standalone agent turn with step-specific context.
  *
  * V1: no streaming to UI, no queue item, no chat messages.
- * Step results are extracted from finalText by the TaskRunner.
+ * Step results are extracted from AgentLoopResult.taskStepResult (single canonical parse point).
+ * Evidence from real runtime execution is registered and validated.
  */
 export async function runTaskStep(
   task: import("../../shared/types.js").ForgeTask,
@@ -2076,7 +2114,8 @@ export async function runTaskStep(
   plan: import("../../shared/types.js").ForgeTaskPlan,
   signal: AbortSignal
 ): Promise<{ loopResult: import("../agent-client/agent-loop.js").AgentLoopResult; cancelled: boolean }> {
-  const { conversationId } = task;
+  const { conversationId, id: taskId } = task;
+  const { id: stepId, attemptCount } = step;
 
   // Resolve profile + config at dispatch time
   const conv = db.getConversation(true, conversationId);
@@ -2120,7 +2159,8 @@ export async function runTaskStep(
   const stepPrompt = [
     `<forge_task_context>`,
     `Task Goal: ${task.goal}`,
-    `Current Step: ${step.title}`,
+    `Plan Version: ${plan.version}`,
+    `Current Step: ${step.title} (attempt ${attemptCount + 1})`,
     step.description ? `Step Description: ${step.description}` : "",
     step.expectedOutcome ? `Expected Outcome: ${step.expectedOutcome}` : "",
     depContext,
@@ -2148,6 +2188,28 @@ export async function runTaskStep(
   const requestId = randomUUID();
   const isProjectMode = !!(conv?.projectId);
 
+  // Register an AbortController for this step so pause/cancel can abort it
+  const stepController = new AbortController();
+  _taskStepControllers.set(stepId, stepController);
+
+  // Chain external signal → step controller
+  if (signal.aborted) {
+    _cleanupTaskStep(stepId);
+    return {
+      loopResult: {
+        finalText: "",
+        proposalFenceRaw: undefined,
+        stepCount: 0,
+        agentReadRefs: [],
+        toolActivity: [],
+        agentRun: {} as import("../../shared/types.js").AgentRun,
+      },
+      cancelled: true,
+    };
+  }
+  const onExternalAbort = () => stepController.abort();
+  signal.addEventListener("abort", onExternalAbort);
+
   try {
     const loopResult = await runAgentLoop({
       cfg,
@@ -2162,14 +2224,52 @@ export async function runTaskStep(
       requestId,
       conversationId,
       isProjectMode,
-      signal,
+      signal: stepController.signal,
       onChunk: () => { /* task steps don't stream to UI in V1 */ },
       onToolStart: () => {},
       onToolEnd: () => {},
+      // Task step identity — written to AgentRun record
+      taskId,
+      stepId,
+      planVersion: plan.version,
+      stepAttempt: attemptCount + 1,
     });
+
+    // ── Collect and register real evidence from runtime execution ────────
+    const agentRunId = loopResult.agentRun.requestId;
+    const registeredEvidenceIds = collectAndRegisterEvidence(
+      loopResult.agentRun,
+      taskId,
+      stepId,
+      loopResult.commandEvidenceRefs ?? [],
+      [], // browser evidence refs — V1 wires this when browser tools are used in tasks
+      loopResult.agentReadRefs,
+    );
+
+    // ── Validate evidence refs cited by the model in taskStepResult ──────
+    if (loopResult.taskStepResult?.evidenceRefs && loopResult.taskStepResult.evidenceRefs.length > 0) {
+      const { validRefs, invalidRefs } = validateEvidenceRefs(
+        loopResult.taskStepResult.evidenceRefs,
+        taskId,
+        agentRunId,
+      );
+      if (invalidRefs.length > 0) {
+        // Strip invalid refs — model cannot fabricate evidence
+        // The step result still proceeds but with only validated refs
+        loopResult.taskStepResult.evidenceRefs = [
+          ...validRefs,
+          // Include any refs that ARE in the real evidence from this run
+          ...registeredEvidenceIds.filter((id) => loopResult.taskStepResult!.evidenceRefs.includes(id)),
+        ].filter((id, idx, arr) => arr.indexOf(id) === idx);
+      }
+    } else if (loopResult.taskStepResult && registeredEvidenceIds.length > 0) {
+      // Auto-attach real evidence ids if model produced none
+      loopResult.taskStepResult.evidenceRefs = registeredEvidenceIds;
+    }
+
     return { loopResult, cancelled: false };
   } catch (err: unknown) {
-    if (signal.aborted) {
+    if (stepController.signal.aborted) {
       return {
         loopResult: {
           finalText: "",
@@ -2183,6 +2283,10 @@ export async function runTaskStep(
       };
     }
     throw err;
+  } finally {
+    // Always clean up the step controller — prevent memory leaks
+    signal.removeEventListener("abort", onExternalAbort);
+    _cleanupTaskStep(stepId);
   }
 }
 

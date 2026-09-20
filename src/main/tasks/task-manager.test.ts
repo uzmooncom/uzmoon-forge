@@ -75,6 +75,8 @@ function makeRunningTask(id: string, convId = "conv-1"): ForgeTask {
     createdAt: 1000,
     updatedAt: 1000,
     planVersion: 1,
+    requiresVerification: false,
+    verificationPolicy: "none",
     metadata: {},
   };
 }

@@ -46,6 +46,11 @@ function makeNoopCallbacks(): TaskRunnerCallbacks {
     agentReadRefs: [],
     toolActivity: [],
     agentRun: {} as never,
+    taskStepResult: { status: "completed", summary: "Done", evidenceRefs: [] },
+  };
+  const fakePlannerResult = {
+    plan: { id: "plan-1", taskId: "t1", version: 1, goalSummary: "goal", steps: [], createdAt: 0, updatedAt: 0 },
+    warnings: [],
   };
   return {
     onTaskUpdate: vi.fn(),
@@ -53,6 +58,7 @@ function makeNoopCallbacks(): TaskRunnerCallbacks {
     dispatchStep: vi.fn().mockResolvedValue({ loopResult: fakeLoopResult, cancelled: false }),
     pushSnapshot: vi.fn(),
     onIncident: vi.fn(),
+    dispatchPlan: vi.fn().mockResolvedValue(fakePlannerResult),
   };
 }
 

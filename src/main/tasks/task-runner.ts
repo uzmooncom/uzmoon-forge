@@ -34,10 +34,9 @@ import {
   isTaskTerminal,
   isStepTerminal,
   getReadySteps,
-  extractStepResult,
   inferStepResult,
 } from "./task-types.js";
-import { replan as replanTask } from "./task-planner.js";
+import type { PlannerResult } from "./task-planner.js";
 import { assertInvariant } from "../reliability/invariants.js";
 import { forgeLogger } from "../telemetry/logger.js";
 import type { AgentLoopResult } from "../agent-client/agent-loop.js";
@@ -60,6 +59,7 @@ export interface TaskRunnerCallbacks {
    * Dispatch a step for execution.
    * Returns a promise that resolves when the agent run for this step completes.
    * The result includes the AgentLoopResult from which step outcome is extracted.
+   * taskStepResult is pre-populated in the loopResult by runTaskStep.
    */
   dispatchStep: (
     task: ForgeTask,
@@ -67,6 +67,21 @@ export interface TaskRunnerCallbacks {
     plan: ForgeTaskPlan,
     signal: AbortSignal
   ) => Promise<{ loopResult: AgentLoopResult; cancelled: boolean }>;
+  /**
+   * Dispatch plan generation (initial or replan).
+   * Routes through QueueManager — TaskRunner must not call planner directly.
+   * 'generate' for initial plan; 'replan' for revision with completed-step history.
+   */
+  dispatchPlan: (
+    mode: "generate" | "replan",
+    task: ForgeTask,
+    currentPlan: ForgeTaskPlan | null,
+    cfg: AgentConfig,
+    apiKey: string,
+    signal: AbortSignal,
+    reason?: string,
+    errorFeedback?: string
+  ) => Promise<PlannerResult>;
   /** Push a task snapshot to the renderer */
   pushSnapshot: (task: ForgeTask, plan: ForgeTaskPlan) => void;
   /** Report a task incident */
@@ -242,6 +257,12 @@ async function _runLoop(
   for (;;) {
     // Check pause
     if (state.pauseRequested) {
+      // Mark the active step as interrupted (safe to retry on resume)
+      if (state.activeStepId !== null) {
+        const interruptedPlan = _transitionStep(state.plan, state.activeStepId, "interrupted");
+        state.plan = interruptedPlan;
+        callbacks.onPlanUpdate(interruptedPlan);
+      }
       const paused = _transitionTask(state, "paused");
       callbacks.onTaskUpdate(paused);
       callbacks.pushSnapshot(paused, state.plan);
@@ -385,15 +406,17 @@ async function _runLoop(
       state.activeStepId = null;
     }
 
-    // Handle cancellation (Stop button)
+    // Handle cancellation (Stop button) — mark step interrupted, not cancelled
+    // (cancelled is reserved for explicit user cancellation of the whole task)
     if (cancelled) {
-      const cancelledPlan = _transitionStep(state.plan, nextStep.id, "cancelled");
-      state.plan = cancelledPlan;
-      // Cancel all pending steps
-      const fullyCancel = cancelledPlan.steps.map((s) =>
+      // Step was mid-run when aborted — mark it interrupted so it can be retried
+      const interruptedPlan = _transitionStep(state.plan, nextStep.id, "interrupted");
+      state.plan = interruptedPlan;
+      // Cancel all pending/ready steps (they won't run in a cancelled task)
+      const fullyCancel = interruptedPlan.steps.map((s) =>
         s.status === "pending" || s.status === "ready" ? { ...s, status: "cancelled" as TaskStepStatus } : s
       );
-      state.plan = { ...cancelledPlan, steps: fullyCancel, updatedAt: Date.now() };
+      state.plan = { ...interruptedPlan, steps: fullyCancel, updatedAt: Date.now() };
       const cancelledTask = _transitionTask(state, "cancelled");
       callbacks.onTaskUpdate(cancelledTask);
       callbacks.onPlanUpdate(state.plan);
@@ -402,11 +425,13 @@ async function _runLoop(
       return;
     }
 
-    // Extract step result
+    // Extract step result — use the canonical taskStepResult from AgentLoopResult.
+    // This is set by runTaskStep (via parseStepResult in agent-loop) — the single
+    // canonical parse point. Fall back to inference only if absent.
     let stepResult: TaskStepResult;
     if (loopResult) {
       stepResult =
-        extractStepResult(loopResult.finalText) ??
+        loopResult.taskStepResult ??
         inferStepResult(loopResult.finalText, false);
     } else {
       stepResult = inferStepResult(stepError ?? "execution failed", true);
@@ -457,19 +482,15 @@ async function _runLoop(
         });
 
         try {
-          const completedSteps = state.plan.steps.filter(
-            (s) => s.status === "completed" || s.status === "skipped"
-          );
-          const replanResult = await replanTask(
-            task.id,
-            task.goal,
-            completedSteps,
-            state.plan.version,
-            stepResult.recommendedPlanChanges ?? "Step required replanning",
-            stepResult.observations ?? stepResult.summary,
+          const replanResult = await callbacks.dispatchPlan(
+            "replan",
+            task,
+            state.plan,
             cfg,
             apiKey,
-            new AbortController().signal
+            new AbortController().signal,
+            stepResult.recommendedPlanChanges ?? "Step required replanning",
+            stepResult.observations ?? stepResult.summary
           );
           state.plan = replanResult.plan;
           const updTask = _transitionTask(state, "running", { planVersion: replanResult.plan.version });
@@ -614,16 +635,18 @@ async function _runVerification(
   }
 
   if (cancelled) {
-    const cancelledPlan = _transitionStep(state.plan, verifyStepId, "cancelled");
-    state.plan = cancelledPlan;
+    // Mark verify step interrupted (was mid-run when aborted)
+    const interruptedPlan = _transitionStep(state.plan, verifyStepId, "interrupted");
+    state.plan = interruptedPlan;
     const cancelledTask = _transitionTask(state, "cancelled");
     callbacks.onTaskUpdate(cancelledTask);
-    callbacks.pushSnapshot(cancelledTask, cancelledPlan);
+    callbacks.pushSnapshot(cancelledTask, interruptedPlan);
     return;
   }
 
+  // Use canonical taskStepResult from AgentLoopResult (set by runTaskStep)
   const result = loopResult
-    ? extractStepResult(loopResult.finalText) ?? inferStepResult(loopResult.finalText, false)
+    ? loopResult.taskStepResult ?? inferStepResult(loopResult.finalText, false)
     : inferStepResult("Verification failed", true);
 
   if (result.status === "completed") {
