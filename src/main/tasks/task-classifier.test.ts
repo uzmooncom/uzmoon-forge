@@ -34,9 +34,9 @@ describe("isTaskRuntimeEnabled", () => {
     expect(isTaskRuntimeEnabled()).toBe(true);
   });
 
-  it("returns false when FORGE_TASKS_ENABLED is unset", () => {
+  it("returns true when FORGE_TASKS_ENABLED is unset (enabled by default)", () => {
     delete process.env["FORGE_TASKS_ENABLED"];
-    expect(isTaskRuntimeEnabled()).toBe(false);
+    expect(isTaskRuntimeEnabled()).toBe(true);
   });
 
   it("returns false when FORGE_TASKS_ENABLED=0", () => {
@@ -49,9 +49,9 @@ describe("isTaskRuntimeEnabled", () => {
     expect(isTaskRuntimeEnabled()).toBe(false);
   });
 
-  it("default (no env var set) is false — task runtime is opt-in", () => {
+  it("default (no env var set) is true — task runtime is on by default", () => {
     delete process.env["FORGE_TASKS_ENABLED"];
-    expect(isTaskRuntimeEnabled()).toBe(false);
+    expect(isTaskRuntimeEnabled()).toBe(true);
   });
 });
 

@@ -6,6 +6,7 @@ import ChatScreen from "./screens/ChatScreen.js";
 import ProjectsScreen from "./screens/ProjectsScreen.js";
 import ProjectWorkspace from "./screens/ProjectWorkspace.js";
 import AgentProfilesModal from "./components/AgentProfilesModal.js";
+import SettingsModal from "./components/SettingsModal.js";
 import { DevPanel } from "./components/DevPanel.js";
 // BrowserWorkspace removed — browser runs as a standalone native window
 
@@ -195,6 +196,8 @@ export default function App(): React.ReactElement {
   const [screen, setScreen] = useState<Screen>("loading");
   const [appState, setAppState] = useState<AppState | null>(null);
   const [showProfilesModal, setShowProfilesModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [settingsConfig, setSettingsConfig] = useState<import("@shared/types.js").AgentConfig | null>(null);
   const [showDevPanel, setShowDevPanel] = useState(false);
 
   // V17: Cmd+Shift+D toggles the Dev Panel (development aid)
@@ -251,9 +254,29 @@ export default function App(): React.ReactElement {
 
   return (
     <>
-      <MainShell onOpenSettings={() => setShowProfilesModal(true)} />
+      <MainShell onOpenSettings={() => {
+        if (appState?.agentConfigId) {
+          void window.forgeApi.getConfig(appState.agentConfigId).then((cfg) => {
+            if (cfg) { setSettingsConfig(cfg); setShowSettingsModal(true); }
+            else { setShowProfilesModal(true); }
+          });
+        } else {
+          setShowProfilesModal(true);
+        }
+      }} />
       {showProfilesModal && (
         <AgentProfilesModal onClose={() => setShowProfilesModal(false)} />
+      )}
+      {showSettingsModal && settingsConfig && (
+        <SettingsModal
+          config={settingsConfig}
+          onClose={() => setShowSettingsModal(false)}
+          onReconfigure={() => { setShowSettingsModal(false); setShowProfilesModal(true); }}
+          onSave={async (updated) => {
+            await window.forgeApi.saveConfig(updated);
+            setSettingsConfig(updated);
+          }}
+        />
       )}
       {showDevPanel && (
         <DevPanel onClose={() => setShowDevPanel(false)} />

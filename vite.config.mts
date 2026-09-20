@@ -3,10 +3,21 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import { fileURLToPath } from "url";
+import { execSync } from "child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+const gitHash = (() => {
+  try { return execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim(); }
+  catch { return "unknown"; }
+})();
+const buildTime = new Date().toISOString();
+
 export default defineConfig({
+  define: {
+    __FORGE_BUILD_HASH__: JSON.stringify(gitHash),
+    __FORGE_BUILD_TIME__: JSON.stringify(buildTime),
+  },
   plugins: [react(), tailwindcss()],
   base: "./",
   root: "src/renderer",

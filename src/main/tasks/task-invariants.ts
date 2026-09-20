@@ -191,4 +191,15 @@ export function registerTaskInvariants(): void {
     severity: "critical",
     maxHealingLevel: 1,
   });
+
+  // ── Execution ownership ──────────────────────────────────────────────
+
+  registerInvariant({
+    id: "ONE_EXECUTION_OWNER_PER_USER_REQUEST",
+    description:
+      "Each user request must have exactly one execution owner. When executionOwner=task, the QueueManager must skip the normal AgentRun. A task-owned request must NOT also produce a conversational AgentRun.",
+    category: "TASK_RUNTIME",
+    severity: "critical",
+    maxHealingLevel: 1,
+  });
 }

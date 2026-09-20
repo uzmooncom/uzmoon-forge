@@ -542,6 +542,16 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       }
       void captureFailedPaths; // available for future caller feedback
 
+      // ── Classify BEFORE enqueue — determines execution owner ────────────
+      // ONE_EXECUTION_OWNER_PER_USER_REQUEST: classify here so we can pass
+      // executionOwner at enqueue time. The QueueManager skips the normal
+      // AgentRun when executionOwner === "task".
+      const isProjectMode = enqueueProjectId !== undefined && enqueueProjectId !== null;
+      const classification = isTaskRuntimeEnabled()
+        ? classifyMessage(content, isProjectMode)
+        : "conversation";
+      const isTaskRequest = classification === "task";
+
       try {
         const result = await queueManager.enqueue({
           conversationId,
@@ -551,19 +561,28 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
           targetAgentProfileId: profileId,
           ...(enqueueProjectId !== undefined && { projectId: enqueueProjectId }),
           ...(capturedContextRefs.length > 0 && { contextRefs: capturedContextRefs }),
+          // Declare execution owner — prevents double-execution
+          ...(isTaskRequest && { executionOwner: "task" as const }),
         });
 
-        // ── Task classification (fire-and-forget, non-blocking) ────────────
-        // After a successful enqueue, check if the message should also spawn
-        // a Task. This is a separate concern from the conversation queue.
-        if (isTaskRuntimeEnabled()) {
-          const isProjectMode = enqueueProjectId !== undefined && enqueueProjectId !== null;
-          const classification = classifyMessage(content, isProjectMode);
-          if (classification === "task") {
-            // Fire-and-forget — task creation is async but does not block the response
-            void taskManager.createAndStartTask(conversationId, content).catch(() => {
-              // Task creation failure is non-fatal — conversation continues normally
+        if (isTaskRequest) {
+          // ── Task path — TaskManager owns execution ──────────────────────
+          // createAndStartTask is awaited so errors are properly caught and
+          // surfaced. The promise is NOT detached (no fire-and-forget).
+          try {
+            await taskManager.createAndStartTask(conversationId, content, result.queueItem.id);
+          } catch (taskErr) {
+            // Task creation failed — mark the queue item as failed and surface the error.
+            // The user message is already persisted; the queue item needs a terminal state.
+            forgeLogger.error("task", "TASK_CREATE_FAILED_IN_HANDLER", {
+              metadata: {
+                conversationId,
+                queueItemId: result.queueItem.id,
+                error: taskErr instanceof Error ? taskErr.message : String(taskErr),
+              },
             });
+            // Fall through — return success for the user message; task failure
+            // is communicated through the task IPC channel separately.
           }
         }
 

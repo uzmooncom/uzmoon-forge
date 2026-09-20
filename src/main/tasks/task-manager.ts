@@ -38,6 +38,7 @@ import {
 } from "./task-runner.js";
 import type { TaskRunnerCallbacks } from "./task-runner.js";
 import { forgeLogger } from "../telemetry/logger.js";
+import { completeQueueItemAsTask } from "../queue/QueueManager.js";
 import { tryGetIncidentRecorder } from "../reliability/index.js";
 
 // ── Module state ──────────────────────────────────────────────────────────
@@ -155,7 +156,8 @@ function _makeCallbacks(): TaskRunnerCallbacks {
  */
 export async function createAndStartTask(
   convId: string,
-  goal: string
+  goal: string,
+  queueItemId?: string
 ): Promise<ForgeTask> {
   const conv = db.getConversation(true, convId);
   const projectId = conv?.projectId;
@@ -227,7 +229,7 @@ export async function createAndStartTask(
   _push(TASK_IPC.TASK_UPDATED, { task: ready });
 
   // Start execution (non-blocking — runner drives itself)
-  void _startExecution(ready, plan, cfgData.cfg, cfgData.apiKey);
+  void _startExecution(ready, plan, cfgData.cfg, cfgData.apiKey, queueItemId);
 
   return ready;
 }
@@ -236,11 +238,38 @@ async function _startExecution(
   task: ForgeTask,
   plan: ForgeTaskPlan,
   cfg: AgentConfig,
-  apiKey: string
+  apiKey: string,
+  queueItemId?: string,
 ): Promise<void> {
   const callbacks = _makeCallbacks();
   try {
     await startTaskRunner(task, plan, cfg, apiKey, callbacks);
+    // ── Inject final result into chat (ONE_EXECUTION_OWNER_PER_USER_REQUEST) ──
+    // When the root request was task-owned, inject the task summary as the
+    // final assistant response exactly once.
+    if (queueItemId) {
+      const finalTask = db.getTask(true, task.id);
+      const profile = (() => {
+        const conv = db.getConversation(true, task.conversationId);
+        const profileId = conv?.defaultAgentProfileId ?? db.getAppState(true).defaultAgentProfileId;
+        return profileId ? db.getAgentProfile(true, profileId) : null;
+      })();
+      if (profile) {
+        const finalContent = finalTask?.status === "completed"
+          ? `Task completed: ${finalTask.goal}`
+          : finalTask?.status === "failed"
+            ? `Task failed: ${finalTask.failure?.message ?? "Unknown error"}`
+            : `Task ${finalTask?.status ?? "finished"}: ${task.goal}`;
+        completeQueueItemAsTask(
+          task.conversationId,
+          queueItemId,
+          finalContent,
+          profile.id,
+          profile.name,
+          profile.model,
+        );
+      }
+    }
   } catch (err) {
     forgeLogger.error("task", "TASK_RUNNER_UNCAUGHT", {
       metadata: {
@@ -248,6 +277,24 @@ async function _startExecution(
         error: err instanceof Error ? err.message : String(err),
       },
     });
+    // Even on uncaught error, close the queue item so the user sees a result
+    if (queueItemId) {
+      const profile = (() => {
+        const conv = db.getConversation(true, task.conversationId);
+        const profileId = conv?.defaultAgentProfileId ?? db.getAppState(true).defaultAgentProfileId;
+        return profileId ? db.getAgentProfile(true, profileId) : null;
+      })();
+      if (profile) {
+        completeQueueItemAsTask(
+          task.conversationId,
+          queueItemId,
+          `Task failed: ${err instanceof Error ? err.message : "Unexpected error"}`,
+          profile.id,
+          profile.name,
+          profile.model,
+        );
+      }
+    }
   }
 }
 

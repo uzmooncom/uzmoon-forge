@@ -200,6 +200,11 @@ export interface QueueItem {
   targetAgentProfileId: string;
   /** Project file context refs captured at enqueue time — immutable */
   contextRefs?: ContextRef[];
+  /**
+   * Execution owner — when set to "task", the QueueManager skips normal AgentRun
+   * and delegates execution to the TaskManager. Exactly one owner per user request.
+   */
+  executionOwner?: "task";
   // ── Task metadata (optional — only set for task-step queue entries) ──
   /** Task this queue entry belongs to (task steps only) */
   taskId?: string;
@@ -2150,7 +2155,9 @@ export type TaskStepResultStatus =
   | "completed"
   | "blocked"
   | "failed"
-  | "replan_required";
+  | "replan_required"
+  /** Inference was ambiguous — use protocol recovery/retry instead of guessing */
+  | "protocol_recovery";
 
 export interface TaskBlocker {
   kind: "permission_denied" | "human_required" | "missing_info" | "unsupported" | "external_failure";

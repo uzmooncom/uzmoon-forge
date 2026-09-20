@@ -11,6 +11,7 @@
  */
 import { randomUUID, createHash } from "crypto";
 import { WebContents } from "electron";
+import { forgeLogger } from "../telemetry/logger.js";
 import { IPC, EDIT_IPC, BROWSER_IPC } from "../../shared/types.js";
 import { assertInvariant } from "../reliability/invariants.js";
 import { tryGetTraceRecorder } from "../reliability/index.js";
@@ -716,6 +717,48 @@ export class QueueManager {
 
   setSender(wc: WebContents): void {
     this.sender = wc;
+    // Wire task-completion delegate (idempotent — safe to call multiple times)
+    _registerTaskCompletionDelegate(this._completeQueueItemAsTaskImpl.bind(this));
+  }
+
+  /** Internal implementation for completeQueueItemAsTask delegate */
+  private _completeQueueItemAsTaskImpl(
+    conversationId: string,
+    queueItemId: string,
+    finalContent: string,
+    agentProfileId: string,
+    agentNameSnapshot: string,
+    modelSnapshot: string,
+  ): void {
+    const now = Date.now();
+    const assistantMsg: ChatMessage = {
+      id: randomUUID(),
+      conversationId,
+      role: "assistant",
+      content: finalContent,
+      createdAt: now,
+      agentProfileId,
+      agentNameSnapshot,
+      modelSnapshot,
+      requestId: queueItemId,
+    };
+    db.insertMessage(true, assistantMsg);
+    db.updateConversation(true, conversationId, { updatedAt: now });
+    db.updateQueueItem(true, conversationId, queueItemId, {
+      status: "completed",
+      completedAt: now,
+    });
+    db.pruneQueueHistory(true, conversationId);
+
+    const streamId = randomUUID();
+    this.send(IPC.CHAT_STREAM_END, {
+      streamId,
+      message: assistantMsg,
+      conversation: db.getConversation(true, conversationId),
+      queueItemId,
+    });
+    this.pushQueueState(conversationId);
+    void this.processNext(conversationId);
   }
 
   private send<T>(channel: string, data: T): void {
@@ -743,12 +786,17 @@ export class QueueManager {
     projectId?: string;
     /** Captured context refs (snapshots) — immutable after enqueue */
     contextRefs?: ContextRef[];
+    /**
+     * When "task", the QueueManager skips normal AgentRun and delegates to TaskManager.
+     * Enforces ONE_EXECUTION_OWNER_PER_USER_REQUEST.
+     */
+    executionOwner?: "task";
   }): Promise<{
     queueItem: QueueItem;
     userMessage: ChatMessage;
     conversation: Conversation;
   }> {
-    const { conversationId, content, attachmentIds, replyToMessageId, targetAgentProfileId, projectId, contextRefs } = opts;
+    const { conversationId, content, attachmentIds, replyToMessageId, targetAgentProfileId, projectId, contextRefs, executionOwner } = opts;
 
     // Ensure conversation exists
     let conv = db.getConversation(true, conversationId);
@@ -806,6 +854,7 @@ export class QueueManager {
       targetAgentProfileId,
       ...(replyToMessageId && { replyToMessageId }),
       ...(contextRefs && contextRefs.length > 0 && { contextRefs }),
+      ...(executionOwner !== undefined && { executionOwner }),
     };
     db.enqueueItem(true, queueItem);
 
@@ -954,6 +1003,21 @@ export class QueueManager {
         return;
       }
       throw err;
+    }
+
+    // ── Task-owner short-circuit ──────────────────────────────────────────
+    // ONE_EXECUTION_OWNER_PER_USER_REQUEST: when the user message is owned by
+    // the TaskManager, skip the normal conversational AgentRun entirely.
+    // The TaskManager will inject the final result via completeQueueItemAsTask().
+    if (item.executionOwner === "task") {
+      db.updateQueueItem(true, conversationId, item.id, {
+        status: "processing",
+        startedAt: Date.now(),
+      });
+      this.pushQueueState(conversationId);
+      // processItem returns here; the caller (processNext) does NOT dequeue.
+      // completeQueueItemAsTask() will mark it completed and emit CHAT_STREAM_END.
+      return;
     }
 
     const streamId = randomUUID();
@@ -2288,6 +2352,44 @@ export async function runTaskStep(
     signal.removeEventListener("abort", onExternalAbort);
     _cleanupTaskStep(stepId);
   }
+}
+
+// ── Task completion delegate ─────────────────────────────────────────────────
+// Module-level delegates wired by QueueManager.registerTaskCompletionDelegate().
+// Used by TaskManager to finalize task-owned queue items without exposing
+// private QueueManager methods.
+type TaskCompletionFn = (conversationId: string, queueItemId: string, finalContent: string, agentProfileId: string, agentNameSnapshot: string, modelSnapshot: string) => void;
+let _taskCompletionDelegate: TaskCompletionFn | null = null;
+
+/** Called by QueueManager to register its task-completion callback */
+export function _registerTaskCompletionDelegate(fn: TaskCompletionFn): void {
+  _taskCompletionDelegate = fn;
+}
+
+/**
+ * Called by TaskManager when a task-owned request has a final outcome.
+ *
+ * Injects the final assistant message into the conversation, marks the queue
+ * item as completed, and emits CHAT_STREAM_END so the renderer updates.
+ *
+ * Enforces ONE_EXECUTION_OWNER_PER_USER_REQUEST: only items with
+ * executionOwner === "task" may be completed via this path.
+ */
+export function completeQueueItemAsTask(
+  conversationId: string,
+  queueItemId: string,
+  finalContent: string,
+  agentProfileId: string,
+  agentNameSnapshot: string,
+  modelSnapshot: string,
+): void {
+  if (!_taskCompletionDelegate) {
+    forgeLogger.error("task", "COMPLETE_QUEUE_ITEM_NO_DELEGATE", {
+      metadata: { conversationId, queueItemId },
+    });
+    return;
+  }
+  _taskCompletionDelegate(conversationId, queueItemId, finalContent, agentProfileId, agentNameSnapshot, modelSnapshot);
 }
 
 /** FOR TESTS ONLY — resets all module-level state for isolation between test cases */

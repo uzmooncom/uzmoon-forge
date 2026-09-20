@@ -182,10 +182,10 @@ function countMatches(text: string, patterns: RegExp[]): number {
 
 /**
  * Whether task runtime is enabled for a given conversation.
- * V1: enabled when FORGE_TASKS_ENABLED env var is "1" or "true".
- * This allows safe staged rollout — existing conversations unaffected by default.
+ * Enabled by default. Set FORGE_TASKS_ENABLED=0 or FORGE_TASKS_ENABLED=false
+ * to explicitly disable for testing/rollback.
  */
 export function isTaskRuntimeEnabled(): boolean {
   const v = process.env["FORGE_TASKS_ENABLED"];
-  return v === "1" || v === "true";
+  return v !== "0" && v !== "false";
 }

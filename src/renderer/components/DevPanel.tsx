@@ -508,7 +508,7 @@ function TasksPanel() {
   }
 
   if (tasks.length === 0) {
-    return <div className="p-4 text-xs text-white/40">No tasks found. Tasks are created when FORGE_TASKS_ENABLED=1.</div>;
+    return <div className="p-4 text-xs text-white/40">No tasks found. Task Runtime is enabled by default — send a project request to create one.</div>;
   }
 
   return (

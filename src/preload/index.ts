@@ -908,11 +908,11 @@ contextBridge.exposeInMainWorld("forgeApi", forgeApi);
 
 // ── Feature flag injection ────────────────────────────────────────────────
 // Inject window.__forgeTasksEnabled synchronously so the renderer can read
-// it before React mounts. The value is determined by FORGE_TASKS_ENABLED env
-// var which is available in the preload process.
+// it before React mounts. Enabled by default; set FORGE_TASKS_ENABLED=0 to
+// explicitly disable.
 contextBridge.exposeInMainWorld(
   "__forgeTasksEnabled",
-  process.env["FORGE_TASKS_ENABLED"] === "1" || process.env["FORGE_TASKS_ENABLED"] === "true"
+  process.env["FORGE_TASKS_ENABLED"] !== "0" && process.env["FORGE_TASKS_ENABLED"] !== "false"
 );
 
 export type ForgeApi = typeof forgeApi;

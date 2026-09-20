@@ -315,6 +315,10 @@ function AppearanceSection(): React.ReactElement {
 // ── About Section ───────────────────────────────────────────────────────────
 
 function AboutSection(): React.ReactElement {
+  const hash = typeof __FORGE_BUILD_HASH__ !== "undefined" ? __FORGE_BUILD_HASH__ : "dev";
+  const built = typeof __FORGE_BUILD_TIME__ !== "undefined"
+    ? new Date(__FORGE_BUILD_TIME__).toLocaleString()
+    : "unknown";
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
@@ -339,6 +343,16 @@ function AboutSection(): React.ReactElement {
         A minimal, focused interface for connecting and chatting with custom
         AI-compatible agent endpoints.
       </p>
+      <div className="rounded-lg border border-[#1a1a1e] bg-[#0a0a0c] px-3 py-2.5 space-y-1">
+        <div className="flex justify-between">
+          <span className="text-[10px] text-[#3a3a42]">Build</span>
+          <span className="font-mono text-[10px] text-[#6366f1]">{hash}</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-[10px] text-[#3a3a42]">Built</span>
+          <span className="text-[10px] text-[#7a7a85]">{built}</span>
+        </div>
+      </div>
     </div>
   );
 }

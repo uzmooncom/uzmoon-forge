@@ -412,9 +412,10 @@ describe("inferStepResult", () => {
     expect(result.status).toBe("failed");
   });
 
-  it("returns completed for plain text when agentRunFailed is false", () => {
+  it("returns protocol_recovery for plain text without explicit completion keyword", () => {
+    // 'I completed the work.' lacks a POSITIVE_COMPLETION_KEYWORD match → strict protocol_recovery
     const result = inferStepResult("I completed the work.", false);
-    expect(result.status).toBe("completed");
+    expect(result.status).toBe("protocol_recovery");
   });
 
   it("includes the finalText as summary", () => {

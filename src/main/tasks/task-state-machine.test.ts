@@ -343,42 +343,43 @@ describe("inferStepResult — adversarial negation guard", () => {
     expect(r.status).toBe("blocked");
   });
 
-  // Adversarial — negation guard must prevent false positives
-  it("adversarial: 'Nothing is blocked anymore' → completed (not blocked)", () => {
+  // Adversarial — negation guard prevents blocked/failed detection, but without
+  // an explicit positive completion keyword the result is protocol_recovery
+  // (strict: ambiguous prose requires a structured forge_step_result fence).
+  it("adversarial: 'Nothing is blocked anymore' → protocol_recovery (no explicit positive signal)", () => {
     const r = inferStepResult("Nothing is blocked anymore, everything is working.", false);
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("protocol_recovery");
   });
 
-  it("adversarial: 'no longer blocked' → completed", () => {
+  it("adversarial: 'no longer blocked' → protocol_recovery (no explicit positive signal)", () => {
     const r = inferStepResult("The issue is no longer blocked after the fix was applied.", false);
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("protocol_recovery");
   });
 
-  it("adversarial: 'not blocked' → completed", () => {
+  it("adversarial: 'not blocked' → protocol_recovery (no explicit positive signal)", () => {
     const r = inferStepResult("We are not blocked — the PR has been merged.", false);
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("protocol_recovery");
   });
 
-  it("adversarial: 'We do not need to replan' → completed (not replan_required)", () => {
-    // inferStepResult does not produce replan_required from text, but the adversarial
-    // pattern of negated language should still produce completed
+  it("adversarial: 'We do not need to replan' → protocol_recovery (no explicit positive signal)", () => {
+    // Absence of a failure signal does not prove completion; structured result required.
     const r = inferStepResult("We do not need to replan. The current steps are sufficient.", false);
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("protocol_recovery");
   });
 
-  it("adversarial: 'The previous attempt failed but the fix works' → completed", () => {
+  it("adversarial: 'The previous attempt failed but the fix works' → protocol_recovery", () => {
     const r = inferStepResult(
       "The previous attempt failed, but the fix now works correctly. All tests pass.",
       false
     );
-    // Past-tense failure in subordinate clause — current outcome is completed
-    expect(r.status).toBe("completed");
+    // No explicit POSITIVE_COMPLETION_KEYWORD — ambiguous prose → protocol recovery.
+    expect(r.status).toBe("protocol_recovery");
   });
 
-  it("adversarial: 'cannot be blocked' → completed (negated modal)", () => {
+  it("adversarial: 'cannot be blocked' → protocol_recovery (no explicit positive signal)", () => {
     const r = inferStepResult("The workflow cannot be blocked by this configuration.", false);
-    // 'cannot be blocked' has 'cannot be' before 'blocked' — negation applies
-    expect(r.status).toBe("completed");
+    // Negation prevents blocked, but no completion keyword present → protocol_recovery.
+    expect(r.status).toBe("protocol_recovery");
   });
 
   it("agentRunFailed=true always → failed (overrides text content)", () => {
@@ -386,8 +387,8 @@ describe("inferStepResult — adversarial negation guard", () => {
     expect(r.status).toBe("failed");
   });
 
-  it("empty text + agentRunFailed=false → completed", () => {
+  it("empty text + agentRunFailed=false → protocol_recovery (structured result required)", () => {
     const r = inferStepResult("", false);
-    expect(r.status).toBe("completed");
+    expect(r.status).toBe("protocol_recovery");
   });
 });

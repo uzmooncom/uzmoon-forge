@@ -329,6 +329,44 @@ function _matchesBlockedKeyword(lower: string): boolean {
   }
   return false;
 }
+/**
+ * Positive completion signals — must appear in active voice.
+ * These are only checked when NO blocked/failed signal is present.
+ * Negation guard applies to all of them.
+ */
+const POSITIVE_COMPLETION_KEYWORDS = [
+  "step completed",
+  "successfully completed",
+  "task completed",
+  "done successfully",
+  "finished successfully",
+  "all done",
+  "completed successfully",
+  "step is done",
+  "work is done",
+  "i have completed",
+  "i have finished",
+  "i've completed",
+  "i've finished",
+];
+
+/**
+ * Signals that suggest the step is still in-progress or has deferred work —
+ * these MUST NOT be inferred as "completed".
+ */
+const IN_PROGRESS_KEYWORDS = [
+  "still working",
+  "working on it",
+  "i'll verify",
+  "i will verify",
+  "i'll check",
+  "will check",
+  "next step",
+  "i'll do",
+  "will do",
+  "in progress",
+];
+
 export function inferStepResult(finalText: string, agentRunFailed: boolean): TaskStepResult {
 
   if (agentRunFailed) {
@@ -339,11 +377,18 @@ export function inferStepResult(finalText: string, agentRunFailed: boolean): Tas
     };
   }
 
-  // Check for blocking signals with negation guard.
-  // Adversarial guard: "Nothing is blocked anymore", "not blocked", "no longer blocked"
-  // must NOT trigger 'blocked'. Keyword must appear in active blocking position.
+  // Empty text — cannot infer anything
+  if (!finalText.trim()) {
+    return {
+      status: "protocol_recovery",
+      summary: "Empty response — structured forge_step_result required",
+      evidenceRefs: [],
+    };
+  }
+
   const lower = finalText.toLowerCase();
 
+  // ── Check blocking signals with negation guard ────────────────────────
   const isBlocked =
     _matchesWithoutNegation(lower, [
       "cannot proceed",
@@ -360,9 +405,34 @@ export function inferStepResult(finalText: string, agentRunFailed: boolean): Tas
     };
   }
 
+  // ── In-progress signals — explicitly NOT completed ────────────────────
+  // "I am still working on it", "I'll verify it next" must NOT become completed.
+  if (_matchesWithoutNegation(lower, IN_PROGRESS_KEYWORDS)) {
+    return {
+      status: "protocol_recovery",
+      summary: "Response suggests deferred work — structured forge_step_result required",
+      evidenceRefs: [],
+    };
+  }
+
+  // ── Only infer completed for explicit positive signals ────────────────
+  // Absence of a blocker does NOT prove success. The agent must provide a
+  // structured forge_step_result fence. Inference is only a bounded recovery
+  // path for explicit positive prose — not a default fallback.
+  if (_matchesWithoutNegation(lower, POSITIVE_COMPLETION_KEYWORDS)) {
+    return {
+      status: "completed",
+      summary: finalText.slice(0, 300),
+      evidenceRefs: [],
+    };
+  }
+
+  // ── Default: ambiguous prose → protocol recovery ──────────────────────
+  // "Nothing is blocked anymore" does NOT mean completed.
+  // Prefer protocol recovery over guessing.
   return {
-    status: "completed",
-    summary: finalText.slice(0, 300) || "Step completed",
+    status: "protocol_recovery",
+    summary: "Ambiguous response — structured forge_step_result required for authoritative result",
     evidenceRefs: [],
   };
 }
