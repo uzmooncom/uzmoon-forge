@@ -676,6 +676,69 @@ define({
   maxHealingLevel: 2,
 });
 
+
+// ── Safe Git V1 invariants ────────────────────────────────────────────────────
+
+define({
+  id: 'GIT_OPERATION_OUTSIDE_PROJECT',
+  description:
+    'Git staging or diff operations must only reference paths that resolve inside the project root. ' +
+    'Any path escaping the project boundary via traversal or absolute reference must be blocked.',
+  category: 'SECURITY_INVARIANT',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'GIT_COMMIT_WITH_NO_STAGED_CHANGES',
+  description:
+    'A git commit operation must be blocked when there are no staged changes or when unresolved merge conflicts exist. ' +
+    'Committing with conflicts or an empty index must never succeed.',
+  category: 'SAFE_EDITING',
+  severity: 'high',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'GIT_SHELL_INJECTION_BLOCKED',
+  description:
+    'Git tool arguments from the model must never contain shell metacharacters, path traversal, ' +
+    'or flag injection patterns. All arguments must be validated before being passed to the git binary.',
+  category: 'SECURITY_INVARIANT',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'GIT_DIFF_OUTPUT_BOUNDED',
+  description:
+    'Git diff and show output must be bounded to GIT_MAX_DIFF_BYTES before being returned to the model. ' +
+    'Unbounded diff output must never be placed in the model context.',
+  category: 'RESOURCE_LIFECYCLE',
+  severity: 'high',
+  maxHealingLevel: 2,
+});
+
+define({
+  id: 'GIT_OPERATION_REQUIRES_PROJECT',
+  description:
+    'Git tools must only be available in project conversations with a valid project root. ' +
+    'Git operations must never execute without a confirmed, resolved project root on disk.',
+  category: 'SECURITY_INVARIANT',
+  severity: 'high',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'GIT_COMMAND_BLOCKED_IN_TERMINAL',
+  description:
+    'The run_command tool must never execute git, gh, hub, or jj executables. ' +
+    'Git operations must only occur through the structured git tool layer, not via arbitrary terminal commands.',
+  category: 'SECURITY_INVARIANT',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
 // ── InvariantMonitor ──────────────────────────────────────────────────────────
 
 /** Called when a violation is detected — plug in to the incident pipeline */

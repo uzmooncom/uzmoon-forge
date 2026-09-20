@@ -48,7 +48,14 @@ import {
   type StartProjectProcessArgs,
   type ReadProjectProcessOutputArgs,
   type StopProjectProcessArgs,
+  type GitDiffArgs,
+  type GitLogArgs,
+  type GitShowArgs,
+  type GitStageArgs,
+  type GitUnstageArgs,
+  type GitCommitArgs,
 } from "../agent-client/tool-types.js";
+import * as gitService from "../git/git-service.js";
 import { COMMAND_LIMITS } from "../commands/command-limits.js";
 import type { CommandEvidenceRef } from "../../shared/types.js";
 import * as service from "./service.js";
@@ -273,6 +280,31 @@ export async function executeProjectTool(
       break;
     case "stop_project_process":
       result = await handleStopProjectProcess(call, validation.args as StopProjectProcessArgs, ctx);
+      break;
+    // ── Safe Git V1 ────────────────────────────────────────────────────
+    case "git_status":
+      result = await handleGitStatus(ctx);
+      break;
+    case "git_diff":
+      result = await handleGitDiff(call, validation.args as GitDiffArgs, ctx);
+      break;
+    case "git_log":
+      result = await handleGitLog(call, validation.args as GitLogArgs, ctx);
+      break;
+    case "git_show":
+      result = await handleGitShow(call, validation.args as GitShowArgs, ctx);
+      break;
+    case "git_branch_info":
+      result = await handleGitBranchInfo(ctx);
+      break;
+    case "git_stage":
+      result = await handleGitStage(call, validation.args as GitStageArgs, ctx);
+      break;
+    case "git_unstage":
+      result = await handleGitUnstage(call, validation.args as GitUnstageArgs, ctx);
+      break;
+    case "git_commit":
+      result = await handleGitCommit(call, validation.args as GitCommitArgs, ctx);
       break;
   }
 
@@ -1757,4 +1789,98 @@ async function handleStopProjectProcess(
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'NOT_FOUND', errorMessage: `No active process with id: ${args.process_id}` } };
   }
   return { result: { callId: call.callId, toolName: call.name, ok: true, data: { processId: args.process_id, stopped: true } } };
+}
+
+// ── Safe Git V1 handlers ────────────────────────────────────────────────────
+
+async function handleGitStatus(
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const gitResult = await gitService.gitStatus(ctx.projectRoot, ctx.signal);
+  if (!gitResult.ok) {
+    return { result: { callId: '', toolName: 'git_status', ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
+  }
+  return { result: { callId: '', toolName: 'git_status', ok: true, data: gitResult.data } };
+}
+
+async function handleGitDiff(
+  call: ForgeToolCall,
+  args: GitDiffArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const gitResult = await gitService.gitDiff(ctx.projectRoot, { ...(args.staged !== undefined ? { staged: args.staged } : {}), ...(args.paths !== undefined ? { paths: args.paths } : {}) }, ctx.signal);
+  if (!gitResult.ok) {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
+  }
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: gitResult.data } };
+}
+
+async function handleGitLog(
+  call: ForgeToolCall,
+  args: GitLogArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const gitResult = await gitService.gitLog(ctx.projectRoot, { ...(args.limit !== undefined ? { limit: args.limit } : {}), ...(args.path !== undefined ? { path: args.path } : {}) }, ctx.signal);
+  if (!gitResult.ok) {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
+  }
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: gitResult.data } };
+}
+
+async function handleGitShow(
+  call: ForgeToolCall,
+  args: GitShowArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const gitResult = await gitService.gitShow(ctx.projectRoot, args.revision, ctx.signal);
+  if (!gitResult.ok) {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
+  }
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: gitResult.data } };
+}
+
+async function handleGitBranchInfo(
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const gitResult = await gitService.gitBranchInfo(ctx.projectRoot, ctx.signal);
+  if (!gitResult.ok) {
+    return { result: { callId: '', toolName: 'git_branch_info', ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
+  }
+  return { result: { callId: '', toolName: 'git_branch_info', ok: true, data: gitResult.data } };
+}
+
+async function handleGitStage(
+  call: ForgeToolCall,
+  args: GitStageArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const gitResult = await gitService.gitStage(ctx.projectRoot, args.paths, ctx.signal);
+  if (!gitResult.ok) {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
+  }
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: gitResult.data } };
+}
+
+async function handleGitUnstage(
+  call: ForgeToolCall,
+  args: GitUnstageArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const gitResult = await gitService.gitUnstage(ctx.projectRoot, args.paths, ctx.signal);
+  if (!gitResult.ok) {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
+  }
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: gitResult.data } };
+}
+
+async function handleGitCommit(
+  call: ForgeToolCall,
+  args: GitCommitArgs,
+  ctx: ToolExecutionContext,
+): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const gitResult = await gitService.gitCommit(ctx.projectRoot, args.message, ctx.signal);
+  if (!gitResult.ok) {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
+  }
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: gitResult.data } };
 }

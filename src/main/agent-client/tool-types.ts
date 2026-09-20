@@ -119,7 +119,16 @@ export type KnownToolName =
   | "start_project_process"
   | "list_project_processes"
   | "read_project_process_output"
-  | "stop_project_process";
+  | "stop_project_process"
+  // ── Safe Git V1 ───────────────────────────────────────────────────
+  | "git_status"
+  | "git_diff"
+  | "git_log"
+  | "git_show"
+  | "git_branch_info"
+  | "git_stage"
+  | "git_unstage"
+  | "git_commit";
 
 export const KNOWN_TOOL_NAMES = new Set<string>([
   "list_directory",
@@ -178,6 +187,15 @@ export const KNOWN_TOOL_NAMES = new Set<string>([
   "list_project_processes",
   "read_project_process_output",
   "stop_project_process",
+  // Safe Git V1
+  "git_status",
+  "git_diff",
+  "git_log",
+  "git_show",
+  "git_branch_info",
+  "git_stage",
+  "git_unstage",
+  "git_commit",
 ]);
 
 // ── Validation result ───────────────────────────────────────────────────────
@@ -251,6 +269,13 @@ export interface ValidationOk {
     | StartProjectProcessArgs
     | ReadProjectProcessOutputArgs
     | StopProjectProcessArgs
+    // Safe Git V1
+    | GitDiffArgs
+    | GitLogArgs
+    | GitShowArgs
+    | GitStageArgs
+    | GitUnstageArgs
+    | GitCommitArgs
     | Record<string, never>;
 }
 
@@ -352,6 +377,15 @@ export function validateToolCall(call: ForgeToolCall): ValidationResult {
     case "list_project_processes":       return { ok: true, toolName: "list_project_processes", args: {} };
     case "read_project_process_output":  return validateReadProjectProcessOutput(args);
     case "stop_project_process":         return validateStopProjectProcess(args);
+    // ── Safe Git V1 ───────────────────────────────────────────────────
+    case "git_status":      return { ok: true, toolName: "git_status", args: {} };
+    case "git_diff":        return validateGitDiff(args);
+    case "git_log":         return validateGitLog(args);
+    case "git_show":        return validateGitShow(args);
+    case "git_branch_info": return { ok: true, toolName: "git_branch_info", args: {} };
+    case "git_stage":       return validateGitStage(args);
+    case "git_unstage":     return validateGitUnstage(args);
+    case "git_commit":      return validateGitCommit(args);
   }
 }
 
@@ -1253,6 +1287,105 @@ const TOOL_DEFS: Array<{
       required: ['process_id'],
     },
   },
+  // ── Safe Git V1 ─────────────────────────────────────────────────────
+  {
+    name: 'git_status',
+    description:
+      'Read the current git repository status: branch, staged files, unstaged files, untracked files, conflicts, and ahead/behind upstream. ' +
+      'Always call this before staging or committing to understand the current state.',
+    parameters: { type: 'object', properties: {} as Record<string, unknown>, required: [] as never[] },
+  },
+  {
+    name: 'git_diff',
+    description:
+      'Show git diff. By default shows unstaged working tree changes. ' +
+      'Use staged=true to see what is staged for the next commit. ' +
+      'Optionally filter by specific relative paths. Output is bounded to 64 KB.',
+    parameters: {
+      type: 'object',
+      properties: {
+        staged: { type: 'boolean', description: 'If true, show staged diff (what would be committed). Default: false (unstaged).' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'Optional list of relative paths to restrict the diff to.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'git_log',
+    description:
+      'Show the commit log. Returns structured entries with hash, author, date, and subject. ' +
+      'Optionally filter by a specific file path.',
+    parameters: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Max commits to return (1-100, default 20).' },
+        path: { type: 'string', description: 'Optional relative file path to filter log.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'git_show',
+    description:
+      'Show details of a specific commit: metadata (author, date, subject, body) and bounded diff. ' +
+      'Accepts any valid commit-ish (full hash, short hash, HEAD, HEAD~1, branch name, tag).',
+    parameters: {
+      type: 'object',
+      properties: {
+        revision: { type: 'string', description: 'Commit-ish to inspect (e.g. HEAD, abc1234, main, HEAD~2).' },
+      },
+      required: ['revision'],
+    },
+  },
+  {
+    name: 'git_branch_info',
+    description:
+      'List all local branches, identify the current branch, and show upstream tracking and ahead/behind counts. ' +
+      'Read-only - does not create or switch branches.',
+    parameters: { type: 'object', properties: {} as Record<string, unknown>, required: [] as never[] },
+  },
+  {
+    name: 'git_stage',
+    description:
+      'Stage specific files or directories for the next commit. ' +
+      'Paths must be relative to the project root. No wildcards. No implicit add-all. ' +
+      'IMPORTANT: Call git_status first to understand what exists and needs staging.',
+    parameters: {
+      type: 'object',
+      properties: {
+        paths: { type: 'array', items: { type: 'string' }, description: 'Relative paths to stage (e.g. ["src/foo.ts", "README.md"]).' },
+      },
+      required: ['paths'],
+    },
+  },
+  {
+    name: 'git_unstage',
+    description:
+      'Unstage specific files from the staging area. Does NOT modify the working tree. ' +
+      'Paths must be relative to the project root.',
+    parameters: {
+      type: 'object',
+      properties: {
+        paths: { type: 'array', items: { type: 'string' }, description: 'Relative paths to unstage.' },
+      },
+      required: ['paths'],
+    },
+  },
+  {
+    name: 'git_commit',
+    description:
+      'Create a commit from all currently staged changes. ' +
+      'Does NOT implicitly stage anything - call git_stage first. ' +
+      'IMPORTANT: Commits require user approval via the Forge approval UI before they are applied. ' +
+      'Message must be descriptive and between 3 and 5000 characters.',
+    parameters: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', description: 'Commit message. Use present-tense imperative style.' },
+      },
+      required: ['message'],
+    },
+  },
 ] as Array<{ name: KnownToolName; description: string; parameters: Record<string, unknown> }>;
 
 
@@ -1795,4 +1928,108 @@ export function buildAnthropicToolDefs(): AnthropicToolDef[] {
     description: def.description,
     input_schema: def.parameters,
   }));
+}
+// ── Safe Git V1 arg interfaces ─────────────────────────────────────────────
+
+export interface GitDiffArgs {
+  staged?: boolean;
+  paths?: string[];
+}
+
+export interface GitLogArgs {
+  limit?: number;
+  path?: string;
+}
+
+export interface GitShowArgs {
+  revision: string;
+}
+
+export interface GitStageArgs {
+  paths: string[];
+}
+
+export interface GitUnstageArgs {
+  paths: string[];
+}
+
+export interface GitCommitArgs {
+  message: string;
+}
+
+// ── Safe Git V1 validators ─────────────────────────────────────────────────
+
+function validateGitDiff(args: Record<string, unknown>): ValidationResult {
+  const r: GitDiffArgs = {};
+  if (args['staged'] !== undefined) {
+    if (typeof args['staged'] !== 'boolean') {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_diff: staged must be a boolean' };
+    }
+    r.staged = args['staged'] as boolean;
+  }
+  if (args['paths'] !== undefined) {
+    if (!Array.isArray(args['paths']) || args['paths'].some((p) => typeof p !== 'string')) {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_diff: paths must be an array of strings' };
+    }
+    r.paths = args['paths'] as string[];
+  }
+  return { ok: true, toolName: 'git_diff', args: r };
+}
+
+function validateGitLog(args: Record<string, unknown>): ValidationResult {
+  const r: GitLogArgs = {};
+  if (args['limit'] !== undefined) {
+    if (typeof args['limit'] !== 'number' || !Number.isInteger(args['limit']) || args['limit'] < 1) {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_log: limit must be a positive integer' };
+    }
+    r.limit = args['limit'] as number;
+  }
+  if (args['path'] !== undefined) {
+    if (typeof args['path'] !== 'string' || !args['path']) {
+      return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_log: path must be a non-empty string' };
+    }
+    r.path = args['path'] as string;
+  }
+  return { ok: true, toolName: 'git_log', args: r };
+}
+
+function validateGitShow(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['revision'] !== 'string' || !args['revision']) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_show: revision must be a non-empty string' };
+  }
+  const r: GitShowArgs = { revision: args['revision'] as string };
+  return { ok: true, toolName: 'git_show', args: r };
+}
+
+function validateGitStage(args: Record<string, unknown>): ValidationResult {
+  if (!Array.isArray(args['paths']) || args['paths'].length === 0) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_stage: paths must be a non-empty array of strings' };
+  }
+  if (args['paths'].some((p) => typeof p !== 'string' || !p)) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_stage: all paths must be non-empty strings' };
+  }
+  const r: GitStageArgs = { paths: args['paths'] as string[] };
+  return { ok: true, toolName: 'git_stage', args: r };
+}
+
+function validateGitUnstage(args: Record<string, unknown>): ValidationResult {
+  if (!Array.isArray(args['paths']) || args['paths'].length === 0) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_unstage: paths must be a non-empty array of strings' };
+  }
+  if (args['paths'].some((p) => typeof p !== 'string' || !p)) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_unstage: all paths must be non-empty strings' };
+  }
+  const r: GitUnstageArgs = { paths: args['paths'] as string[] };
+  return { ok: true, toolName: 'git_unstage', args: r };
+}
+
+function validateGitCommit(args: Record<string, unknown>): ValidationResult {
+  if (typeof args['message'] !== 'string' || args['message'].trim().length < 3) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_commit: message must be at least 3 characters' };
+  }
+  if (args['message'].length > 5000) {
+    return { ok: false, errorCode: 'INVALID_ARGUMENT', errorMessage: 'git_commit: message must be under 5000 characters' };
+  }
+  const r: GitCommitArgs = { message: args['message'] as string };
+  return { ok: true, toolName: 'git_commit', args: r };
 }
