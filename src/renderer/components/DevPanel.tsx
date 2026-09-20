@@ -262,6 +262,93 @@ function IncidentsPanel({ snapshot }: { snapshot: DevSnapshot }) {
   );
 }
 
+function PermissionChecksPanel() {
+  const [checks, setChecks] = useState<unknown[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await window.forgeApi.permissions.getChecks(200);
+      setChecks(data);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const filtered = (checks as Array<{
+    id: string;
+    capabilityId: string;
+    decision: string;
+    source: string;
+    reason: string;
+    checkedAt?: number;
+    durationMs?: number;
+  }>).filter((c) =>
+    !filter ||
+    c.capabilityId.toLowerCase().includes(filter.toLowerCase()) ||
+    c.decision.toLowerCase().includes(filter.toLowerCase()) ||
+    c.source.toLowerCase().includes(filter.toLowerCase())
+  ).slice().reverse();
+
+  return (
+    <div>
+      <div className="mb-2 flex gap-2">
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter by capability, decision, source…"
+          className="flex-1 bg-white/5 border border-white/10 rounded px-2 py-1 text-xs text-white/80 placeholder:text-white/30 outline-none focus:border-white/20"
+        />
+        <button
+          onClick={() => void load()}
+          disabled={loading}
+          className="px-2 py-1 text-xs bg-white/8 text-white/60 rounded hover:bg-white/12 transition-colors disabled:opacity-40"
+        >
+          {loading ? "…" : "Refresh"}
+        </button>
+      </div>
+      <div className="space-y-0.5 max-h-96 overflow-y-auto font-mono">
+        {filtered.map((c, i) => (
+          <div key={c.id ?? i} className={`text-[10px] px-2 py-1 rounded flex gap-2 items-center ${
+            c.decision === "DENY"
+              ? "bg-red-900/20 text-red-300/80"
+              : c.decision === "ASK"
+              ? "bg-amber-900/10 text-amber-300/70"
+              : "bg-white/3 text-white/50"
+          }`}>
+            <span className="text-white/20 flex-shrink-0 w-16 text-right">
+              {c.checkedAt ? new Date(c.checkedAt).toLocaleTimeString() : ""}
+            </span>
+            <span className={`flex-shrink-0 w-12 font-semibold ${
+              c.decision === "DENY" ? "text-red-400" : c.decision === "ASK" ? "text-amber-400" : "text-emerald-400"
+            }`}>
+              {c.decision}
+            </span>
+            <span className="flex-shrink-0 text-white/30 w-14 truncate">{c.source}</span>
+            <span className="truncate text-white/70">{c.capabilityId}</span>
+            <span className="text-white/25 truncate">{c.reason}</span>
+            {c.durationMs !== undefined && (
+              <span className="flex-shrink-0 text-white/20">{c.durationMs}ms</span>
+            )}
+          </div>
+        ))}
+        {filtered.length === 0 && !loading && (
+          <div className="text-xs text-white/30 text-center py-4">No permission checks recorded</div>
+        )}
+      </div>
+      {checks.length > 0 && (
+        <div className="mt-2 text-[10px] text-white/20 text-right">
+          {checks.length} total checks · {filtered.length} shown
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LogsPanel() {
   const [entries, setEntries] = useState<unknown[]>([]);
   const [loading, setLoading] = useState(false);
@@ -364,7 +451,7 @@ function ExportPanel() {
 
 // ── Main DevPanel ──────────────────────────────────────────────────────────
 
-type Tab = "overview" | "runs" | "queue" | "browser" | "incidents" | "logs" | "export";
+type Tab = "overview" | "runs" | "queue" | "browser" | "incidents" | "permissions" | "logs" | "export";
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -372,6 +459,7 @@ const TABS: Array<{ id: Tab; label: string }> = [
   { id: "queue", label: "Queue" },
   { id: "browser", label: "Browser" },
   { id: "incidents", label: "Incidents" },
+  { id: "permissions", label: "Perm Checks" },
   { id: "logs", label: "Logs" },
   { id: "export", label: "Export" },
 ];
@@ -480,6 +568,7 @@ export function DevPanel({ onClose }: DevPanelProps) {
               {tab === "browser" && <BrowserPanel snapshot={snapshot} />}
               {tab === "incidents" && <IncidentsPanel snapshot={snapshot} />}
               {tab === "logs" && <LogsPanel />}
+              {tab === "permissions" && <PermissionChecksPanel />}
               {tab === "export" && <ExportPanel />}
             </>
           )}

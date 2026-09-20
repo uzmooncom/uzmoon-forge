@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
-import type { AgentConfig, ConnectionTestResult, Protocol } from "@shared/types.js";
+import React, { useEffect, useState, useCallback } from "react";
+import type { AgentConfig, ConnectionTestResult, Protocol, CapabilityDef, CapabilityPolicy, CapabilityPolicyStore } from "@shared/types.js";
 
 interface Props {
   config: AgentConfig;
@@ -8,7 +8,7 @@ interface Props {
   onSave: (updated: AgentConfig) => Promise<void>;
 }
 
-type Section = "agent" | "appearance" | "privacy" | "about";
+type Section = "agent" | "appearance" | "permissions" | "privacy" | "about";
 
 export default function SettingsModal({
   config,
@@ -100,7 +100,7 @@ export default function SettingsModal({
         <div className="flex min-h-[360px]">
           {/* Sidebar nav */}
           <nav className="w-40 flex-shrink-0 border-r border-[#1a1a1e] p-3 space-y-0.5">
-            {(["agent", "appearance", "privacy", "about"] as Section[]).map((s) => (
+            {(["agent", "appearance", "permissions", "privacy", "about"] as Section[]).map((s) => (
               <button
                 key={s}
                 onClick={() => setSection(s)}
@@ -114,6 +114,8 @@ export default function SettingsModal({
                   ? "Agent Connection"
                   : s === "appearance"
                   ? "Appearance"
+                  : s === "permissions"
+                  ? "Permissions"
                   : s === "privacy"
                   ? "Privacy"
                   : "About"}
@@ -143,6 +145,7 @@ export default function SettingsModal({
               />
             )}
             {section === "appearance" && <AppearanceSection />}
+            {section === "permissions" && <PermissionsSection />}
             {section === "privacy" && (
               <PrivacySection
                 sharingEnabled={sharingEnabled}
@@ -403,6 +406,204 @@ function PrivacySection({
         This setting only controls whether the share payload button is available
         in the Reliability panel. No data is ever sent automatically.
       </p>
+    </div>
+  );
+}
+
+
+// ── Permissions Section ─────────────────────────────────────────────────────
+
+const CATEGORY_LABELS: Record<string, string> = {
+  browser: "Browser",
+  terminal: "Terminal",
+  git: "Git",
+  filesystem: "Filesystem",
+  network: "Network",
+  process: "Process",
+  device: "Device",
+  future: "Future",
+};
+
+const RISK_COLOR: Record<string, string> = {
+  LOW: "text-[#34d399]",
+  MEDIUM: "text-[#fbbf24]",
+  HIGH: "text-[#f97316]",
+  CRITICAL: "text-[#f87171]",
+};
+
+const POLICY_OPTIONS: { value: CapabilityPolicy; label: string }[] = [
+  { value: "ALWAYS_ALLOW", label: "Always Allow" },
+  { value: "ASK", label: "Ask Each Time" },
+  { value: "DENY", label: "Always Deny" },
+];
+
+function PermissionsSection(): React.ReactElement {
+  const [caps, setCaps] = useState<CapabilityDef[]>([]);
+  const [store, setStore] = useState<CapabilityPolicyStore | null>(null);
+  const [activePreset, setActivePreset] = useState<"SAFE" | "ASK" | "FULL_ACCESS" | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [activeCategory, setActiveCategory] = useState<string>("browser");
+
+  const reload = useCallback(async () => {
+    const [capList, storeData] = await Promise.all([
+      window.forgeApi.permissions.getCapabilities(),
+      window.forgeApi.permissions.getStore(),
+    ]);
+    setCaps(capList);
+    setStore(storeData);
+    setActivePreset(storeData.preset ?? null);
+    if (capList.length > 0 && !activeCategory) {
+      const first = capList[0];
+      if (first) setActiveCategory(first.category);
+    }
+    setLoading(false);
+  }, [activeCategory]);
+
+  useEffect(() => { void reload(); }, [reload]);
+
+  const categories = [...new Set(caps.map((c) => c.category))];
+
+  const getEffectivePolicy = (capId: string): CapabilityPolicy => {
+    if (!store) return "ASK";
+    return store.globalPolicies[capId] ?? caps.find((c) => c.id === capId)?.defaultPolicy ?? "ASK";
+  };
+
+  const handleSetPolicy = async (capId: string, policy: CapabilityPolicy): Promise<void> => {
+    setSaving(capId);
+    try {
+      await window.forgeApi.permissions.setGlobal(capId, policy);
+      await reload();
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const handleSetPreset = async (preset: "SAFE" | "ASK" | "FULL_ACCESS"): Promise<void> => {
+    setSaving("preset");
+    try {
+      await window.forgeApi.permissions.setPreset(preset);
+      setActivePreset(preset);
+      await reload();
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const handleClearPreset = async (): Promise<void> => {
+    setSaving("preset");
+    try {
+      await window.forgeApi.permissions.clearPreset();
+      setActivePreset(null);
+      await reload();
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex h-40 items-center justify-center">
+        <span className="text-xs text-[#3a3a42]">Loading capabilities…</span>
+      </div>
+    );
+  }
+
+  const visibleCaps = caps.filter((c) => c.category === activeCategory);
+
+  return (
+    <div className="flex flex-col gap-4 h-full">
+      {/* Preset bar */}
+      <div>
+        <p className="mb-2 text-[10px] font-medium uppercase tracking-wide text-[#7a7a85]">Preset</p>
+        <div className="flex gap-1.5">
+          {(["SAFE", "ASK", "FULL_ACCESS"] as const).map((p) => (
+            <button
+              key={p}
+              onClick={() => void (activePreset === p ? handleClearPreset() : handleSetPreset(p))}
+              disabled={saving === "preset"}
+              className={`flex-1 rounded-lg border px-2 py-1.5 text-[10px] font-medium transition-colors disabled:opacity-40 ${
+                activePreset === p
+                  ? "border-[#6366f1]/60 bg-[#6366f1]/10 text-[#6366f1]"
+                  : "border-[#262629] bg-[#141416] text-[#7a7a85] hover:border-[#3a3a42] hover:text-[#e8e8ec]"
+              }`}
+            >
+              {p === "FULL_ACCESS" ? "Full Access" : p === "SAFE" ? "Safe" : "Ask All"}
+            </button>
+          ))}
+        </div>
+        {activePreset && (
+          <p className="mt-1.5 text-[10px] text-[#3a3a42]">
+            Active preset: <span className="text-[#6366f1]">{activePreset}</span>.
+            Individual overrides still apply on top.
+          </p>
+        )}
+      </div>
+
+      {/* Category tabs */}
+      <div className="flex gap-1 flex-wrap">
+        {categories.map((cat) => (
+          <button
+            key={cat}
+            onClick={() => setActiveCategory(cat)}
+            className={`rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${
+              activeCategory === cat
+                ? "bg-[#1a1a1e] text-[#e8e8ec]"
+                : "text-[#3a3a42] hover:text-[#7a7a85]"
+            }`}
+          >
+            {CATEGORY_LABELS[cat] ?? cat}
+          </button>
+        ))}
+      </div>
+
+      {/* Capability list */}
+      <div className="flex-1 overflow-y-auto space-y-2 pr-0.5" style={{ maxHeight: 220 }}>
+        {visibleCaps.map((cap) => {
+          const current = getEffectivePolicy(cap.id);
+          const hasOverride = store?.globalPolicies[cap.id] !== undefined;
+          return (
+            <div key={cap.id} className="rounded-lg border border-[#1a1a1e] bg-[#0a0a0c] px-3 py-2.5">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] font-medium text-[#e8e8ec]">{cap.name}</span>
+                    <span className={`text-[9px] font-semibold ${RISK_COLOR[cap.risk] ?? "text-[#7a7a85]"}`}>
+                      {cap.risk}
+                    </span>
+                    {cap.isDestructive && (
+                      <span className="text-[9px] text-[#f87171]">DESTRUCTIVE</span>
+                    )}
+                  </div>
+                  <p className="mt-0.5 text-[10px] leading-relaxed text-[#3a3a42]">{cap.description}</p>
+                </div>
+                <select
+                  value={current}
+                  disabled={saving === cap.id}
+                  onChange={(e) => void handleSetPolicy(cap.id, e.target.value as CapabilityPolicy)}
+                  className="flex-shrink-0 rounded-md border border-[#262629] bg-[#141416] px-2 py-1 text-[10px] text-[#e8e8ec] focus:border-[#6366f1] focus:outline-none disabled:opacity-40 cursor-pointer"
+                >
+                  {POLICY_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                  {/* Show current policy from preset/default if not in standard set */}
+                  {!POLICY_OPTIONS.some((o) => o.value === current) && (
+                    <option value={current}>{current}</option>
+                  )}
+                </select>
+              </div>
+              {hasOverride && (
+                <button
+                  onClick={() => void handleSetPolicy(cap.id, cap.defaultPolicy)}
+                  className="mt-1.5 text-[9px] text-[#3a3a42] hover:text-[#7a7a85] transition-colors"
+                >
+                  Reset to default ({cap.defaultPolicy})
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
