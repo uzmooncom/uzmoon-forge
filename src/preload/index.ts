@@ -822,6 +822,10 @@ const forgeApi = {
 
   // ── Task / Plan Runtime V1 ────────────────────────────────────────────────
   tasks: {
+    /** Whether task runtime is enabled (fast synchronous check via env-set flag) */
+    isEnabled: (): boolean =>
+      (window as unknown as { __forgeTasksEnabled?: boolean }).__forgeTasksEnabled === true,
+
     /** Get the active task snapshot for a conversation (null if none) */
     getActive: (convId: string): Promise<TaskRuntimeSnapshot | null> =>
       ipcRenderer.invoke(TASK_IPC.GET_ACTIVE, convId),
@@ -901,5 +905,14 @@ const forgeApi = {
 };
 
 contextBridge.exposeInMainWorld("forgeApi", forgeApi);
+
+// ── Feature flag injection ────────────────────────────────────────────────
+// Inject window.__forgeTasksEnabled synchronously so the renderer can read
+// it before React mounts. The value is determined by FORGE_TASKS_ENABLED env
+// var which is available in the preload process.
+contextBridge.exposeInMainWorld(
+  "__forgeTasksEnabled",
+  process.env["FORGE_TASKS_ENABLED"] === "1" || process.env["FORGE_TASKS_ENABLED"] === "true"
+);
 
 export type ForgeApi = typeof forgeApi;

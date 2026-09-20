@@ -31,6 +31,7 @@ import * as browserWindowController from "../browser/browser-window-controller.j
 import { isFakeProviderEnabled, releaseCheckpoint, waitForCheckpointBlocked } from "../agent-client/fake-provider.js";
 import * as permissionEngine from "../permissions/index.js";
 import * as taskManager from "../tasks/task-manager.js";
+import { classifyMessage, isTaskRuntimeEnabled } from "../tasks/task-classifier.js";
 import { generatePlan, replan as replanPlan } from "../tasks/task-planner.js";
 import { registerTaskInvariants } from "../tasks/task-invariants.js";
 import * as devProcessManager from "../commands/dev-process-manager.js";
@@ -551,6 +552,21 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
           ...(enqueueProjectId !== undefined && { projectId: enqueueProjectId }),
           ...(capturedContextRefs.length > 0 && { contextRefs: capturedContextRefs }),
         });
+
+        // ── Task classification (fire-and-forget, non-blocking) ────────────
+        // After a successful enqueue, check if the message should also spawn
+        // a Task. This is a separate concern from the conversation queue.
+        if (isTaskRuntimeEnabled()) {
+          const isProjectMode = enqueueProjectId !== undefined && enqueueProjectId !== null;
+          const classification = classifyMessage(content, isProjectMode);
+          if (classification === "task") {
+            // Fire-and-forget — task creation is async but does not block the response
+            void taskManager.createAndStartTask(conversationId, content).catch(() => {
+              // Task creation failure is non-fatal — conversation continues normally
+            });
+          }
+        }
+
         return {
           queueItemId: result.queueItem.id,
           userMessage: result.userMessage,
@@ -1933,6 +1949,8 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   taskManager.reconcileInterruptedTasks();
 
   // Task IPC channels
+  ipcMain.handle(TASK_IPC.IS_ENABLED, () => isTaskRuntimeEnabled());
+
   ipcMain.handle(
     TASK_IPC.GET_ACTIVE,
     (_e: IpcMainInvokeEvent, convId: string) => {

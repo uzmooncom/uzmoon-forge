@@ -320,3 +320,74 @@ describe("makePlan", () => {
     expect(plan.steps[0]!.taskId).toBe("my-task");
   });
 });
+// ── inferStepResult — adversarial negation guard ──────────────────────────
+
+describe("inferStepResult — adversarial negation guard", () => {
+  it("positive: 'cannot proceed' → blocked", () => {
+    const r = inferStepResult("I cannot proceed with this step.", false);
+    expect(r.status).toBe("blocked");
+  });
+
+  it("positive: 'requires human' → blocked", () => {
+    const r = inferStepResult("This requires human verification before continuing.", false);
+    expect(r.status).toBe("blocked");
+  });
+
+  it("positive: 'blocked by' pattern → blocked", () => {
+    const r = inferStepResult("Step is blocked by missing authentication token.", false);
+    expect(r.status).toBe("blocked");
+  });
+
+  it("positive: 'missing credential' → blocked", () => {
+    const r = inferStepResult("Missing credential for GitHub API access.", false);
+    expect(r.status).toBe("blocked");
+  });
+
+  // Adversarial — negation guard must prevent false positives
+  it("adversarial: 'Nothing is blocked anymore' → completed (not blocked)", () => {
+    const r = inferStepResult("Nothing is blocked anymore, everything is working.", false);
+    expect(r.status).toBe("completed");
+  });
+
+  it("adversarial: 'no longer blocked' → completed", () => {
+    const r = inferStepResult("The issue is no longer blocked after the fix was applied.", false);
+    expect(r.status).toBe("completed");
+  });
+
+  it("adversarial: 'not blocked' → completed", () => {
+    const r = inferStepResult("We are not blocked — the PR has been merged.", false);
+    expect(r.status).toBe("completed");
+  });
+
+  it("adversarial: 'We do not need to replan' → completed (not replan_required)", () => {
+    // inferStepResult does not produce replan_required from text, but the adversarial
+    // pattern of negated language should still produce completed
+    const r = inferStepResult("We do not need to replan. The current steps are sufficient.", false);
+    expect(r.status).toBe("completed");
+  });
+
+  it("adversarial: 'The previous attempt failed but the fix works' → completed", () => {
+    const r = inferStepResult(
+      "The previous attempt failed, but the fix now works correctly. All tests pass.",
+      false
+    );
+    // Past-tense failure in subordinate clause — current outcome is completed
+    expect(r.status).toBe("completed");
+  });
+
+  it("adversarial: 'cannot be blocked' → completed (negated modal)", () => {
+    const r = inferStepResult("The workflow cannot be blocked by this configuration.", false);
+    // 'cannot be blocked' has 'cannot be' before 'blocked' — negation applies
+    expect(r.status).toBe("completed");
+  });
+
+  it("agentRunFailed=true always → failed (overrides text content)", () => {
+    const r = inferStepResult("Step completed successfully with all evidence attached.", true);
+    expect(r.status).toBe("failed");
+  });
+
+  it("empty text + agentRunFailed=false → completed", () => {
+    const r = inferStepResult("", false);
+    expect(r.status).toBe("completed");
+  });
+});

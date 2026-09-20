@@ -1,13 +1,20 @@
 /**
  * task-classifier.test.ts — Unit tests for task-classifier.ts
+ *
+ * Classification is intent/capability/context based — NOT word-count based.
+ * Short action-intent messages MUST be classified as task in project mode.
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { classifyMessage, isTaskRuntimeEnabled } from "./task-classifier.js";
 
 // ── isTaskRuntimeEnabled ───────────────────────────────────────────────────
 
 describe("isTaskRuntimeEnabled", () => {
-  const origEnv = process.env["FORGE_TASKS_ENABLED"];
+  let origEnv: string | undefined;
+
+  beforeEach(() => {
+    origEnv = process.env["FORGE_TASKS_ENABLED"];
+  });
 
   afterEach(() => {
     if (origEnv === undefined) {
@@ -41,90 +48,155 @@ describe("isTaskRuntimeEnabled", () => {
     process.env["FORGE_TASKS_ENABLED"] = "false";
     expect(isTaskRuntimeEnabled()).toBe(false);
   });
+
+  it("default (no env var set) is false — task runtime is opt-in", () => {
+    delete process.env["FORGE_TASKS_ENABLED"];
+    expect(isTaskRuntimeEnabled()).toBe(false);
+  });
 });
 
-// ── classifyMessage — Short messages ─────────────────────────────────────
+// ── Pure questions / conversational openers — always conversation ─────────
 
-describe("classifyMessage — short messages", () => {
-  it("returns conversation for very short messages", () => {
-    expect(classifyMessage("Hi", false)).toBe("conversation");
-    expect(classifyMessage("Hello there", false)).toBe("conversation");
-    expect(classifyMessage("Yes", false)).toBe("conversation");
-  });
-
-  it("returns conversation for pure questions", () => {
+describe("classifyMessage — conversational messages", () => {
+  it("pure question with ? → conversation", () => {
     expect(classifyMessage("What is TypeScript?", false)).toBe("conversation");
     expect(classifyMessage("How does React work?", false)).toBe("conversation");
     expect(classifyMessage("Can you explain this to me?", false)).toBe("conversation");
+    expect(classifyMessage("What is TypeScript?", true)).toBe("conversation");
+  });
+
+  it("conversational openers → conversation", () => {
+    expect(classifyMessage("Hi", false)).toBe("conversation");
+    expect(classifyMessage("Hello there", false)).toBe("conversation");
+    expect(classifyMessage("Yes", false)).toBe("conversation");
+    expect(classifyMessage("Thanks!", true)).toBe("conversation");
+    expect(classifyMessage("Sounds good", true)).toBe("conversation");
+    expect(classifyMessage("Ok", true)).toBe("conversation");
+  });
+
+  it("'explain' / 'describe' without action → conversation", () => {
+    expect(classifyMessage("Explain how this function works", false)).toBe("conversation");
+    expect(classifyMessage("Describe the architecture", false)).toBe("conversation");
+  });
+
+  it("what-is / how-does without ? → still conversation (pattern match)", () => {
+    expect(classifyMessage("What is the purpose of this module", false)).toBe("conversation");
+    expect(classifyMessage("How does authentication work here", false)).toBe("conversation");
+  });
+
+  it("simple question in project mode → conversation", () => {
+    expect(classifyMessage("What does this function do?", true)).toBe("conversation");
+    expect(classifyMessage("How do I run the tests?", true)).toBe("conversation");
   });
 });
 
-// ── classifyMessage — Non-project mode ───────────────────────────────────
+// ── Short action-intent messages — must be task in project mode ───────────
 
-describe("classifyMessage — non-project mode", () => {
-  it("returns conversation for simple action in global chat", () => {
-    expect(classifyMessage("Fix the bug", false)).toBe("conversation");
+describe("classifyMessage — short action-intent messages in project mode", () => {
+  it('"Fix the bug" → task (action verb + object)', () => {
+    expect(classifyMessage("Fix the bug", true)).toBe("task");
   });
 
-  it("returns conversation for single task indicator", () => {
-    // Low word count + single task keyword → conversation in global mode
-    expect(classifyMessage("Implement this feature please", false)).toBe("conversation");
+  it('"Fix this" → task (action verb + object)', () => {
+    expect(classifyMessage("Fix this", true)).toBe("task");
   });
 
-  it("returns task for strongly multi-step messages", () => {
-    // Multiple task patterns → task
+  it('"Find and fix the issue" → task', () => {
+    expect(classifyMessage("Find and fix the issue", true)).toBe("task");
+  });
+
+  it('"Check the design" → task (check implies verify, modify)', () => {
+    expect(classifyMessage("Check the design", true)).toBe("task");
+  });
+
+  it('"Add a button" → task', () => {
+    expect(classifyMessage("Add a button", true)).toBe("task");
+  });
+
+  it('"Remove the modal" → task', () => {
+    expect(classifyMessage("Remove the modal", true)).toBe("task");
+  });
+
+  it('"Refactor this" → task', () => {
+    expect(classifyMessage("Refactor this", true)).toBe("task");
+  });
+
+  it('"Debug the crash" → task', () => {
+    expect(classifyMessage("Debug the crash", true)).toBe("task");
+  });
+
+  it('"Update the README" → task', () => {
+    expect(classifyMessage("Update the README", true)).toBe("task");
+  });
+
+  it('"Implement the login flow" → task', () => {
+    expect(classifyMessage("Implement the login flow", true)).toBe("task");
+  });
+});
+
+// ── Simple actions in project mode ────────────────────────────────────────
+
+describe("classifyMessage — simple actions in project mode", () => {
+  it('"Run the project" → simple_action (matches SIMPLE_ACTION_PATTERNS)', () => {
+    expect(classifyMessage("Run the project", true)).toBe("simple_action");
+  });
+
+  it('"Open the browser" → simple_action', () => {
+    expect(classifyMessage("Open the browser now", true)).toBe("simple_action");
+  });
+
+  it('"Run the tests" → simple_action', () => {
+    expect(classifyMessage("Run the tests", true)).toBe("simple_action");
+  });
+
+  it('"Take a screenshot" → simple_action', () => {
+    expect(classifyMessage("Take a screenshot", true)).toBe("simple_action");
+  });
+});
+
+// ── Multi-step / compound tasks ───────────────────────────────────────────
+
+describe("classifyMessage — multi-step tasks", () => {
+  it("multi-step instruction → task in project mode", () => {
+    const msg = "Implement the user authentication flow, add tests, and update the documentation";
+    expect(classifyMessage(msg, true)).toBe("task");
+  });
+
+  it("multi-sentence project request → task", () => {
+    const msg = "Refactor the database layer. Make sure all tests still pass. Update the migration scripts.";
+    expect(classifyMessage(msg, true)).toBe("task");
+  });
+
+  it("compound global chat task → task (2+ TASK_PATTERNS)", () => {
     const msg = "Implement a REST API endpoint, write tests for it, and then deploy to staging";
     expect(classifyMessage(msg, false)).toBe("task");
   });
 
-  it("returns task for compound research goals with high word count", () => {
+  it("research + compound goal (global) → task", () => {
     const msg = "Research the best approaches for implementing a CI/CD pipeline and summarize your findings for me";
     expect(classifyMessage(msg, false)).toBe("task");
   });
 });
 
-// ── classifyMessage — Project mode ───────────────────────────────────────
+// ── Non-project mode — conservative ──────────────────────────────────────
 
-describe("classifyMessage — project mode", () => {
-  it("returns conversation for short messages below MIN_TASK_WORD_COUNT", () => {
-    // 3 words < MIN_TASK_WORD_COUNT=6, no SIMPLE_ACTION_PATTERNS match → conversation
-    expect(classifyMessage("Fix the bug", true)).toBe("conversation");
-    expect(classifyMessage("Add a button", true)).toBe("conversation");
+describe("classifyMessage — non-project mode (conservative)", () => {
+  it("single task keyword with low word count → conversation in global mode", () => {
+    expect(classifyMessage("Implement this please", false)).toBe("conversation");
   });
 
-  it("returns simple_action for 'Open the browser' (matches SIMPLE_ACTION_PATTERNS[0])", () => {
-    // /^(open|close|show|hide|navigate|go to|browse to|open the browser)\b/
-    expect(classifyMessage("Open the browser now", true)).toBe("simple_action");
-  });
-
-  it("returns task for multi-step instructions", () => {
-    const msg = "Implement the user authentication flow, add tests, and update the documentation";
-    expect(classifyMessage(msg, true)).toBe("task");
-  });
-
-  it("returns task for multi-sentence project request", () => {
-    const msg = "Refactor the database layer. Make sure all tests still pass. Update the migration scripts.";
-    expect(classifyMessage(msg, true)).toBe("task");
-  });
-
-  it("returns task for long action verb sentences in project mode", () => {
-    const msg = "Implement the entire authentication system including login, registration, and password reset functionality";
-    expect(classifyMessage(msg, true)).toBe("task");
-  });
-
-  it("returns conversation for a simple question in project mode", () => {
-    expect(classifyMessage("What does this function do?", true)).toBe("conversation");
-  });
-
-  it("returns conversation for very short message in project mode", () => {
-    expect(classifyMessage("Run tests", true)).toBe("conversation");
+  it("short fix request in global mode → conversation (not project context)", () => {
+    // Global mode is conservative — even "Fix the bug" stays conversation
+    // without project context for safety
+    expect(classifyMessage("Fix the bug", false)).toBe("conversation");
   });
 });
 
-// ── classifyMessage — Edge cases ─────────────────────────────────────────
+// ── Edge cases ────────────────────────────────────────────────────────────
 
 describe("classifyMessage — edge cases", () => {
-  it("handles messages with just whitespace as short", () => {
+  it("empty message → conversation", () => {
+    expect(classifyMessage("", false)).toBe("conversation");
     expect(classifyMessage("   ", false)).toBe("conversation");
   });
 
@@ -132,5 +204,11 @@ describe("classifyMessage — edge cases", () => {
     const lower = classifyMessage("implement the user auth flow with tests and docs", true);
     const upper = classifyMessage("IMPLEMENT THE USER AUTH FLOW WITH TESTS AND DOCS", true);
     expect(lower).toBe(upper);
+  });
+
+  it("classifier errors fall back to conversation (never crashes)", () => {
+    // Should never throw
+    expect(() => classifyMessage("any message", true)).not.toThrow();
+    expect(() => classifyMessage("any message", false)).not.toThrow();
   });
 });

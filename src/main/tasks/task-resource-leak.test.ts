@@ -158,9 +158,9 @@ describe("idempotency key cleanup", () => {
 // ── classifyMessage conservative fallback ─────────────────────────────────
 
 describe("classifyMessage error safety", () => {
-  it("returns 'conversation' for normal short message in project mode", () => {
-    // Short message → below MIN_TASK_WORD_COUNT
-    expect(classifyMessage("Fix the bug", true)).toBe("conversation");
+  it("returns 'task' for short action-intent message in project mode", () => {
+    // Short message with clear action verb → task (intent-based classifier, no word-count gate)
+    expect(classifyMessage("Fix the bug", true)).toBe("task");
   });
 
   it("returns 'conversation' for non-project mode regardless", () => {

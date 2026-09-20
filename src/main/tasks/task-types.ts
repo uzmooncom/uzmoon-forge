@@ -275,7 +275,62 @@ export function extractStepResult(finalText: string): TaskStepResult | null {
  * Build a fallback StepResult from the agent's final text when no explicit
  * forge_step_result fence is present. Infers status from content.
  */
+/**
+ * Checks if any of the given keyword phrases appear in the text WITHOUT a
+ * preceding negation word in the same sentence-fragment. This prevents
+ * "Nothing is blocked anymore" or "We do not need to replan" from triggering
+ * incorrect state transitions.
+ */
+function _matchesWithoutNegation(lower: string, keywords: string[]): boolean {
+  const NEGATION_WORDS = [
+    "not ", "no ", "no longer", "never", "nothing is", "isn't", "aren't",
+    "don't", "doesn't", "won't", "can't", "cannot be", "hasn't", "hadn't",
+    "wasn't", "weren't", "didn't",
+  ];
+  for (const kw of keywords) {
+    const idx = lower.indexOf(kw);
+    if (idx === -1) continue;
+    // Look at the 40 characters before the keyword for negation
+    const before = lower.slice(Math.max(0, idx - 40), idx);
+    const hasNegation = NEGATION_WORDS.some((n) => before.includes(n));
+    if (!hasNegation) return true;
+  }
+  return false;
+}
+
+/**
+ * "blocked" alone as a keyword is common in negative contexts.
+ * Require it to appear in an active-voice blocking pattern.
+ */
+function _matchesBlockedKeyword(lower: string): boolean {
+  // Must appear in active-voice blocking position, not in negated or past-tense forms.
+  const ACTIVE_BLOCKED_PATTERNS: RegExp[] = [
+    /i am blocked/,
+    /step is blocked/,
+    /currently blocked/,
+    /blocked by/,
+    /blocked on/,
+    /blocked: /,
+    /^blocked /,
+    /^blocked,/,
+    /^blocked$/,
+  ];
+  const NEGATION_WORDS = [
+    "not ", "no ", "no longer", "never", "nothing is", "isn't", "aren't",
+    "don't", "doesn't", "won't", "can't", "cannot be", "hasn't", "hadn't",
+    "wasn't", "weren't", "didn't",
+  ];
+  for (const pat of ACTIVE_BLOCKED_PATTERNS) {
+    const match = pat.exec(lower);
+    if (!match) continue;
+    const before = lower.slice(Math.max(0, match.index - 40), match.index);
+    const hasNegation = NEGATION_WORDS.some((n) => before.includes(n));
+    if (!hasNegation) return true;
+  }
+  return false;
+}
 export function inferStepResult(finalText: string, agentRunFailed: boolean): TaskStepResult {
+
   if (agentRunFailed) {
     return {
       status: "failed",
@@ -283,16 +338,28 @@ export function inferStepResult(finalText: string, agentRunFailed: boolean): Tas
       evidenceRefs: [],
     };
   }
-  // If text mentions blocking words, treat as blocked
+
+  // Check for blocking signals with negation guard.
+  // Adversarial guard: "Nothing is blocked anymore", "not blocked", "no longer blocked"
+  // must NOT trigger 'blocked'. Keyword must appear in active blocking position.
   const lower = finalText.toLowerCase();
-  const blockerPatterns = ["cannot proceed", "blocked", "requires human", "missing credential"];
-  if (blockerPatterns.some((p) => lower.includes(p))) {
+
+  const isBlocked =
+    _matchesWithoutNegation(lower, [
+      "cannot proceed",
+      "unable to proceed",
+      "requires human",
+      "missing credential",
+    ]) || _matchesBlockedKeyword(lower);
+
+  if (isBlocked) {
     return {
       status: "blocked",
       summary: finalText.slice(0, 300),
       evidenceRefs: [],
     };
   }
+
   return {
     status: "completed",
     summary: finalText.slice(0, 300) || "Step completed",

@@ -2251,6 +2251,8 @@ export interface TaskRuntimeSnapshot {
 
 export const TASK_IPC = {
   // Renderer → Main
+  /** Check whether task runtime is enabled (FORGE_TASKS_ENABLED env var) */
+  IS_ENABLED:          "task:isEnabled",
   /** Get the current task for a conversation, if any */
   GET_ACTIVE:          "task:getActive",
   /** Get a task by id */

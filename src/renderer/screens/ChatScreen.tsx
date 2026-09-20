@@ -554,7 +554,7 @@ export default function ChatScreen({
   // Load all tasks for the active conversation on switch (gated on feature flag)
   useEffect(() => {
     if (!activeConvId) return;
-    const enabled = (window as unknown as { __forgeTasksEnabled?: boolean }).__forgeTasksEnabled ?? false;
+    const enabled = window.__forgeTasksEnabled ?? false;
     if (!enabled) return;
     // Load ALL tasks for this conv (including completed) for history display
     window.forgeApi.tasks.listByConv(activeConvId).then((tasks) => {
@@ -580,7 +580,7 @@ export default function ChatScreen({
 
   // Subscribe to task events (all convs) — gated on feature flag
   useEffect(() => {
-    const enabled = (window as unknown as { __forgeTasksEnabled?: boolean }).__forgeTasksEnabled ?? false;
+    const enabled = window.__forgeTasksEnabled ?? false;
     if (!enabled) return;
 
     const upsertSnapshot = (snap: TaskRuntimeSnapshot) => {

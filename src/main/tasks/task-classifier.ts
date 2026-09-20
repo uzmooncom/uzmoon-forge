@@ -7,14 +7,17 @@
  *   "task"          — multi-step goal requiring task orchestration
  *
  * This module uses ONLY heuristics — no LLM call, no IO.
- * It is intentionally conservative: when in doubt, classify as "conversation"
- * so existing behaviour is preserved.
+ *
+ * Classification is INTENT/CAPABILITY/CONTEXT based.
+ * A short message CAN be a task if it has clear action intent in project mode.
+ * Word count is NOT used as a primary gate.
  *
  * Heuristics (in order):
- * 1. Very short messages or pure questions → conversation
- * 2. Single-imperative known-action patterns → simple_action
- * 3. Multi-step indicators, goal verbs, compound work → task
- * 4. Default → conversation
+ * 1. Pure questions / conversational openers → conversation
+ * 2. Very short greetings/affirmations → conversation
+ * 3. Single-imperative known-action patterns → simple_action (project mode)
+ * 4. Action-verb intent signals → task (project mode) or gated task (global)
+ * 5. Default → conversation
  */
 
 import type { TaskClassification } from "../../shared/types.js";
@@ -26,58 +29,64 @@ import type { TaskClassification } from "../../shared/types.js";
  * Matched against the lowercased trimmed message.
  */
 const CONVERSATION_PATTERNS: RegExp[] = [
-  /^(what|who|when|where|why|how|is|are|can|does|do|should|would|could|will|explain|describe|tell me)\b/,
-  /^(hi|hello|hey|thanks|thank you|ok|okay|yes|no|sure|got it|sounds good|great|perfect|nice)/,
-  /^(what is|what are|what does|what do|how does|how do|why is|why are)\b/,
+  // Question starters
+  /^(what|who|when|where|why|how|is|are|can|does|do|should|would|could|will)\b.*\?/,
+  /^(what is|what are|what does|what do|how does|how do|why is|why are|can you explain|explain)\b/,
+  // Conversational openers / reactions
+  /^(hi|hello|hey|thanks|thank you|ok|okay|yes|no|sure|got it|sounds good|great|perfect|nice|awesome)\b/,
+  // Pure describe/tell-me without action
+  /^(describe|tell me|show me what|what is|what are)\b/,
 ];
 
 /**
  * Patterns that indicate a simple, single-action directive.
  * These do NOT need full task orchestration.
+ * Only matched in project mode.
  */
 const SIMPLE_ACTION_PATTERNS: RegExp[] = [
   /^(open|close|show|hide|navigate|go to|browse to|open the browser)\b/,
-  /^(run|execute|start|stop|restart|launch)\s+(the\s+)?(server|app|tests?|build|linter|dev server)\b/,
+  /^(run|execute|start|stop|restart|launch)\s+(the\s+)?(server|app|tests?|build|linter|dev server|project)\b/,
   /^(search|find|look for|look up)\s+\w+/,
-  /^(list|show|display|get)\s+(all\s+)?(files?|folders?|projects?|conversations?|messages?)\b/,
+  /^(list|display|get)\s+(all\s+)?(files?|folders?|projects?|conversations?|messages?)\b/,
   /^(take|capture)\s+a?\s*(screenshot)\b/,
-  /^(read|view|open|show)\s+(the\s+)?(file|this file)\b/,
+  /^(read|view)\s+(the\s+)?(file|this file)\b/,
 ];
 
 /**
- * Patterns that strongly indicate a multi-step task.
+ * Action-verb patterns that indicate task-worthy intent.
+ * A single match in project mode = task (no word-count requirement).
+ * In global mode: requires 2+ matches or 1 match + high word count.
  */
 const TASK_PATTERNS: RegExp[] = [
-  // Goal verbs with objects — fix/build/implement/create imply verify-after
-  /\b(fix|repair|resolve|debug|troubleshoot)\s+\w/,
-  /\b(implement|build|create|add|integrate|set up|setup)\s+\w/,
-  /\b(refactor|clean up|improve|optimize|rewrite)\s+\w/,
-  /\b(migrate|upgrade|update)\s+\w/,
+  // Fix/debug verbs — "Fix the bug", "Fix this", "Debug it", "Resolve the issue"
+  /\b(fix|repair|resolve|debug|troubleshoot)\b/,
+  // Build/implement — "Implement auth", "Build the feature", "Create a modal"
+  /\b(implement|build|create|add|integrate|set up|setup)\b/,
+  // Improve/refactor
+  /\b(refactor|clean up|improve|optimize|rewrite)\b/,
+  // Migrate/upgrade
+  /\b(migrate|upgrade|update|change|modify|edit)\b/,
   // Compound work signals
   /\b(and then|and also|afterwards|then verify|then commit|then test|then check)\b/,
   /\b(make sure it works?|verify (it|that|the)|check (if|that|the result)|confirm (it|that))\b/,
   /\b(run the tests?|run tests?|execute tests?|make (the )?tests? pass)\b/,
   /\b(commit (the|it|these?)|push (it|the changes?|to))\b/,
-  // Research tasks
+  // Research tasks (only when substantial)
   /\b(research|investigate|analyze|analyse|compare|survey|summarize|summarise)\b.{10,}/,
   // UI/browser verification implied
   /\b(look (right|good|correct|better)|visually|in the browser|rendered|screenshot)\b/,
   // Explicit multi-step phrasing
   /\b(step by step|phase(s| \d)|plan (to|for)|approach|strategy)\b/,
-  /^(go ahead and|please)\s+\w.{20,}/,
 ];
 
 /**
- * Minimum word count to even consider as a task.
- * Very short messages are almost always conversation.
+ * Action verbs that on their own (without "simple action" pattern) indicate
+ * task intent in project mode — even in short messages.
+ * "Fix the bug" → fix + object → task
+ * "Fix this" → fix + object → task
+ * "Run the project" → matches SIMPLE_ACTION_PATTERNS first → simple_action
  */
-const MIN_TASK_WORD_COUNT = 6;
-
-/**
- * Maximum word count for a "simple action" message.
- * Long messages are more likely multi-step work.
- */
-const MAX_SIMPLE_ACTION_WORDS = 12;
+const PROJECT_ACTION_VERB_PATTERN = /^(fix|repair|resolve|debug|implement|build|create|add|refactor|clean up|improve|optimize|rewrite|migrate|upgrade|update|change|modify|remove|delete|write|check|verify|find|search|review|test|analyse|analyze|inspect|examine)\b/;
 
 // ── Classifier ───────────────────────────────────────────────────────────────
 
@@ -108,48 +117,55 @@ function _classifyMessageImpl(
   const lower = trimmed.toLowerCase();
   const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
 
-  // Very short messages → conversation
-  if (wordCount <= 3) return "conversation";
+  // Absolute minimum — empty or single token
+  if (wordCount === 0) return "conversation";
 
-  // Pure questions / conversational openers → conversation
+  // Pure questions / conversational openers — always conversation
   for (const pattern of CONVERSATION_PATTERNS) {
     if (pattern.test(lower)) return "conversation";
   }
 
-  // Non-project conversations: be very conservative about task classification.
-  // Only classify as task if strongly multi-step.
+  // Very short greetings / single words with no action meaning
+  if (wordCount <= 1) return "conversation";
+
+  // Non-project mode: conservative
   if (!isProjectMode) {
     const taskScore = countMatches(lower, TASK_PATTERNS);
     if (taskScore >= 2) return "task";
-    // Research with a clear compound goal in global chat
+    // Research/compound goal with high word count
     if (taskScore === 1 && wordCount >= 12) return "task";
     return "conversation";
   }
 
-  // Project mode: more willing to classify as task
+  // ── Project mode ──────────────────────────────────────────────────────────
 
-  // Check simple action patterns first (project mode may legitimately use these)
-  if (wordCount <= MAX_SIMPLE_ACTION_WORDS) {
+  // Compound messages ("find and fix", "search and update") bypass simple_action
+  // and fall through to task detection even if they start with a known simple verb.
+  const isCompound = /\b(and (fix|update|modify|change|implement|refactor|repair|resolve|debug|clean|improve|optimize|rewrite|migrate|upgrade|create|add|remove|delete|write))\b/.test(lower);
+
+  // Simple action patterns (fast path for well-known single actions)
+  if (!isCompound) {
     for (const pattern of SIMPLE_ACTION_PATTERNS) {
       if (pattern.test(lower)) return "simple_action";
     }
   }
 
-  // Check task patterns
+  // Check TASK_PATTERNS score (multi-step or compound indicators)
   const taskScore = countMatches(lower, TASK_PATTERNS);
 
-  if (taskScore >= 1 && wordCount >= MIN_TASK_WORD_COUNT) {
+  if (taskScore >= 1) {
     return "task";
   }
 
-  // Multi-sentence messages in project mode are likely tasks
+  // Short project message with clear action-verb intent
+  // e.g. "Fix the bug", "Fix this", "Check the design", "Find and fix the issue"
+  if (PROJECT_ACTION_VERB_PATTERN.test(lower)) {
+    return "task";
+  }
+
+  // Multi-sentence project messages are likely tasks
   const sentenceCount = (trimmed.match(/[.!?]+/g) ?? []).length;
-  if (sentenceCount >= 2 && wordCount >= MIN_TASK_WORD_COUNT) {
-    return "task";
-  }
-
-  // Long single-sentence project messages with action verbs
-  if (wordCount >= 15 && /\b(fix|implement|build|update|change|modify|edit|write|create|add|remove|delete)\b/.test(lower)) {
+  if (sentenceCount >= 2 && wordCount >= 6) {
     return "task";
   }
 
