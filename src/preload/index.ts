@@ -741,6 +741,16 @@ const forgeApi = {
       ipcRenderer.invoke(TELEMETRY_IPC.CLEAR),
   },
 
+  // ── Test-only: fake provider checkpoint control ──────────────────────
+  // Only registered when FORGE_TEST_PROVIDER=fake (handlers guard themselves).
+  // Calling these in non-test mode results in an IPC "no handler" rejection.
+  test: {
+    releaseCheckpoint: (name: string): Promise<void> =>
+      ipcRenderer.invoke(IPC.TEST_CHECKPOINT_RELEASE, name),
+    waitForCheckpointBlocked: (name: string): Promise<void> =>
+      ipcRenderer.invoke(IPC.TEST_CHECKPOINT_WAIT, name),
+  },
+
   // ── Dev Panel API (V17) ──────────────────────────────────────────────
   devPanel: {
     getSnapshot: (): Promise<unknown> =>

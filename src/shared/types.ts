@@ -336,6 +336,11 @@ export const IPC = {
   PROJECT_VALIDATE_DIR: "project:validateDir",
   PROJECT_PICK_DIR: "project:pickDir",
   PROJECT_REVEAL_DIR: "project:revealDir",
+
+  // Test-only: fake provider checkpoint control
+  // Only active when FORGE_TEST_PROVIDER=fake
+  TEST_CHECKPOINT_RELEASE: "test:checkpointRelease",
+  TEST_CHECKPOINT_WAIT: "test:checkpointWait",
 } as const;
 
 /** Extended send request including per-message agent target */

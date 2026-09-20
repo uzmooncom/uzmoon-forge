@@ -28,6 +28,7 @@ import { buildDevSnapshot, getRunTimeline, buildDiagnosticBundle, initDevState }
 import * as commandManager from "../commands/command-manager.js";
 import * as browserManager from "../browser/browser-manager.js";
 import * as browserWindowController from "../browser/browser-window-controller.js";
+import { isFakeProviderEnabled, releaseCheckpoint, waitForCheckpointBlocked } from "../agent-client/fake-provider.js";
 import * as devProcessManager from "../commands/dev-process-manager.js";
 import { buildGitHubIssuePayload } from "../reliability/sanitizer.js";
 void sweepOrphanedSnapshots; // imported for startup use — called from main.ts
@@ -1729,4 +1730,21 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     DEV_PANEL_IPC.EXPORT_BUNDLE,
     () => buildDiagnosticBundle()
   );
+
+  // ── Test-only: fake provider checkpoint control ──────────────────────
+  // Only active when FORGE_TEST_PROVIDER=fake. Allows E2E tests to block
+  // and unblock the fake provider at named checkpoints deterministically.
+  if (isFakeProviderEnabled()) {
+    ipcMain.handle(
+      IPC.TEST_CHECKPOINT_RELEASE,
+      (_e: IpcMainInvokeEvent, name: string) => {
+        releaseCheckpoint(name);
+      }
+    );
+
+    ipcMain.handle(
+      IPC.TEST_CHECKPOINT_WAIT,
+      (_e: IpcMainInvokeEvent, name: string) => waitForCheckpointBlocked(name)
+    );
+  }
 }
