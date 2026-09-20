@@ -56,6 +56,7 @@ import {
   type GitCommitArgs,
 } from "../agent-client/tool-types.js";
 import * as gitService from "../git/git-service.js";
+import { resolvePermission } from "../permissions/index.js";
 import { COMMAND_LIMITS } from "../commands/command-limits.js";
 import type { CommandEvidenceRef } from "../../shared/types.js";
 import * as service from "./service.js";
@@ -1854,6 +1855,13 @@ async function handleGitStage(
   args: GitStageArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const permStage = resolvePermission({ capabilityId: "git.stage", projectId: ctx.projectId, conversationId: ctx.conversationId, requestId: ctx.requestId, agentRunId: ctx.requestId, toolCallId: call.callId });
+  if (permStage.decision === "DENY") {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_DENIED", errorMessage: `git.stage denied by Permission Center (${permStage.source}: ${permStage.reason})` } };
+  }
+  if (permStage.decision === "ASK") {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_REQUIRED", errorMessage: "git.stage requires user approval. Update Permission Center settings to allow this capability." } };
+  }
   const gitResult = await gitService.gitStage(ctx.projectRoot, args.paths, ctx.signal);
   if (!gitResult.ok) {
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
@@ -1866,6 +1874,13 @@ async function handleGitUnstage(
   args: GitUnstageArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const permUnstage = resolvePermission({ capabilityId: "git.unstage", projectId: ctx.projectId, conversationId: ctx.conversationId, requestId: ctx.requestId, agentRunId: ctx.requestId, toolCallId: call.callId });
+  if (permUnstage.decision === "DENY") {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_DENIED", errorMessage: `git.unstage denied by Permission Center (${permUnstage.source}: ${permUnstage.reason})` } };
+  }
+  if (permUnstage.decision === "ASK") {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_REQUIRED", errorMessage: "git.unstage requires user approval. Update Permission Center settings to allow this capability." } };
+  }
   const gitResult = await gitService.gitUnstage(ctx.projectRoot, args.paths, ctx.signal);
   if (!gitResult.ok) {
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
@@ -1878,6 +1893,13 @@ async function handleGitCommit(
   args: GitCommitArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const permCommit = resolvePermission({ capabilityId: "git.commit", projectId: ctx.projectId, conversationId: ctx.conversationId, requestId: ctx.requestId, agentRunId: ctx.requestId, toolCallId: call.callId });
+  if (permCommit.decision === "DENY") {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_DENIED", errorMessage: `git.commit denied by Permission Center (${permCommit.source}: ${permCommit.reason})` } };
+  }
+  if (permCommit.decision === "ASK") {
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_REQUIRED", errorMessage: "git.commit requires user approval. Update Permission Center settings to allow this capability." } };
+  }
   const gitResult = await gitService.gitCommit(ctx.projectRoot, args.message, ctx.signal);
   if (!gitResult.ok) {
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC, PERMISSION_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -45,6 +45,10 @@ import type {
   BrowserHistoryEntry,
   BrowserStatusSnapshot,
   DevProcessRecord,
+  CapabilityPolicy,
+  CapabilityDef,
+  CapabilityPolicyStore,
+  PermissionCheckRecord,
 } from "../shared/types.js";
 
 type UnsubFn = () => void;
@@ -764,6 +768,35 @@ const forgeApi = {
       ipcRenderer.on(DEV_PANEL_IPC.SNAPSHOT_UPDATED, listener);
       return () => ipcRenderer.removeListener(DEV_PANEL_IPC.SNAPSHOT_UPDATED, listener);
     },
+  },
+
+  permissions: {
+    getStore: (): Promise<CapabilityPolicyStore> =>
+      ipcRenderer.invoke(PERMISSION_IPC.GET_STORE),
+    getCapabilities: (): Promise<CapabilityDef[]> =>
+      ipcRenderer.invoke(PERMISSION_IPC.GET_CAPABILITIES),
+    getChecks: (limit?: number): Promise<PermissionCheckRecord[]> =>
+      ipcRenderer.invoke(PERMISSION_IPC.GET_CHECKS, limit),
+    getSessionGrants: (): Promise<Record<string, string[]>> =>
+      ipcRenderer.invoke(PERMISSION_IPC.GET_SESSION_GRANTS),
+    setGlobal: (capabilityId: string, policy: CapabilityPolicy): Promise<void> =>
+      ipcRenderer.invoke(PERMISSION_IPC.SET_GLOBAL, capabilityId, policy),
+    setProject: (projectId: string, capabilityId: string, policy: CapabilityPolicy): Promise<void> =>
+      ipcRenderer.invoke(PERMISSION_IPC.SET_PROJECT, projectId, capabilityId, policy),
+    clearProject: (projectId: string, capabilityId: string): Promise<void> =>
+      ipcRenderer.invoke(PERMISSION_IPC.CLEAR_PROJECT, projectId, capabilityId),
+    setPreset: (preset: "SAFE" | "ASK" | "FULL_ACCESS"): Promise<void> =>
+      ipcRenderer.invoke(PERMISSION_IPC.SET_PRESET, preset),
+    clearPreset: (): Promise<void> =>
+      ipcRenderer.invoke(PERMISSION_IPC.CLEAR_PRESET),
+    resetGlobal: (): Promise<void> =>
+      ipcRenderer.invoke(PERMISSION_IPC.RESET_GLOBAL),
+    resetProject: (projectId: string): Promise<void> =>
+      ipcRenderer.invoke(PERMISSION_IPC.RESET_PROJECT, projectId),
+    grantSession: (capabilityId: string, projectId?: string): Promise<void> =>
+      ipcRenderer.invoke(PERMISSION_IPC.GRANT_SESSION, capabilityId, projectId),
+    revokeSession: (capabilityId: string, projectId?: string): Promise<void> =>
+      ipcRenderer.invoke(PERMISSION_IPC.REVOKE_SESSION, capabilityId, projectId),
   },
 };
 

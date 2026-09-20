@@ -739,6 +739,58 @@ define({
   maxHealingLevel: 1,
 });
 
+// ── Permission Center V1 Invariants ──────────────────────────────────────────
+
+define({
+  id: 'PERMISSION_UNKNOWN_CAPABILITY',
+  description:
+    'All capability IDs passed to resolvePermission() must be registered in the capability registry. ' +
+    'Unknown capability IDs are automatically denied — this invariant records the misconfiguration.',
+  category: 'SECURITY_INVARIANT',
+  severity: 'high',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'PERMISSION_DENIED_ENFORCED',
+  description:
+    'When resolvePermission() returns DENY, the calling tool handler must return an error immediately. ' +
+    'No operation must proceed after a DENY decision.',
+  category: 'SECURITY_INVARIANT',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'PERMISSION_SESSION_GRANT_NEVER_PERSISTED',
+  description:
+    'Session grants (ALLOW_SESSION) must never appear in the CapabilityPolicyStore written to disk. ' +
+    'They are in-memory only and must be cleared on app restart.',
+  category: 'SECURITY_INVARIANT',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
+define({
+  id: 'PERMISSION_POLICY_STORE_VALID',
+  description:
+    'The CapabilityPolicyStore loaded from disk must have the correct shape. ' +
+    'If invalid, it must be replaced with the default store rather than crashing.',
+  category: 'SECURITY_INVARIANT',
+  severity: 'high',
+  maxHealingLevel: 2,
+});
+
+define({
+  id: 'PERMISSION_RESOLUTION_DETERMINISTIC',
+  description:
+    'For the same (capabilityId, projectId, store, sessionGrants), resolvePermission() must always ' +
+    'return the same decision. Non-deterministic permission decisions are a security violation.',
+  category: 'SECURITY_INVARIANT',
+  severity: 'critical',
+  maxHealingLevel: 1,
+});
+
 // ── InvariantMonitor ──────────────────────────────────────────────────────────
 
 /** Called when a violation is detected — plug in to the incident pipeline */

@@ -1144,6 +1144,11 @@ export interface AppSettings {
    * When true: sanitized payload is built and returned for user to share.
    */
   incidentSharingEnabled: boolean;
+  /**
+   * Permission Center V1 — persisted capability policy store.
+   * Session grants are NEVER stored here (in-memory only).
+   */
+  capabilityPolicies?: CapabilityPolicyStore;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -1861,4 +1866,169 @@ export const RELIABILITY_IPC = {
   METRICS_GET: "reliability:metricsGet",
   /** Push from main: new incident recorded */
   INCIDENT_RECORDED: "reliability:incidentRecorded",
+} as const;
+
+// ── Permission Center V1 ──────────────────────────────────────────────────
+
+/**
+ * Permission Center capability policy level.
+ * Canonical authorization decision for a capability.
+ */
+export type CapabilityPolicy =
+  | "DENY"            // always block, no approval possible
+  | "ASK"             // suspend and ask user on each occurrence
+  | "ALLOW_SESSION"   // allow for this app session (in-memory, reset on restart)
+  | "ALLOW_PROJECT"   // allow for a specific project (persisted by projectId)
+  | "ALWAYS_ALLOW";   // allow globally (persisted)
+
+/**
+ * Resolved permission decision returned by resolvePermission().
+ */
+export type PermissionDecision = "ALLOW" | "DENY" | "ASK";
+
+/**
+ * Source that determined the resolved permission decision.
+ * Used in Dev Panel diagnostics and ForgeLogger events.
+ */
+export type PermissionSource =
+  | "default"    // capability defaultPolicy
+  | "preset"     // preset (SAFE / ASK / FULL_ACCESS)
+  | "global"     // user-set global override
+  | "project"    // project-specific override
+  | "session"    // in-memory session grant
+  | "agentRun";  // not used for initial resolution (future)
+
+/**
+ * Full result of resolvePermission().
+ */
+export interface PermissionResult {
+  decision: PermissionDecision;
+  source: PermissionSource;
+  capabilityId: string;
+  /** Human-readable reason for diagnostics */
+  reason: string;
+}
+
+/**
+ * Risk level of a capability.
+ */
+export type CapabilityRisk = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+
+/**
+ * Category of a capability.
+ */
+export type CapabilityCategory =
+  | "browser"
+  | "terminal"
+  | "git"
+  | "filesystem"
+  | "network"
+  | "process"
+  | "device"
+  | "future";
+
+/**
+ * Canonical capability definition in the registry.
+ */
+export interface CapabilityDef {
+  id: string;
+  category: CapabilityCategory;
+  name: string;
+  description: string;
+  risk: CapabilityRisk;
+  defaultPolicy: CapabilityPolicy;
+  requiresProject: boolean;
+  isDestructive: boolean;
+  isNetworked: boolean;
+  isCredentialSensitive: boolean;
+  requiresHumanPresence?: boolean;
+}
+
+/**
+ * Context passed to resolvePermission().
+ * Used for scope lookup and audit logging.
+ */
+export interface PermissionCheckContext {
+  capabilityId: string;
+  projectId?: string;
+  conversationId: string;
+  requestId: string;
+  agentRunId: string;
+  toolCallId?: string;
+  /** Optional human-readable resource hint for approval UI */
+  resource?: string;
+}
+
+/**
+ * Persisted capability policy store.
+ * Stored in AppSettings (via db.ts).
+ * Session grants are NEVER stored here.
+ */
+export interface CapabilityPolicyStore {
+  /** Optional active preset */
+  preset?: "SAFE" | "ASK" | "FULL_ACCESS";
+  /** Global overrides keyed by capabilityId */
+  globalPolicies: Record<string, CapabilityPolicy>;
+  /** Project-specific overrides keyed by projectId, then capabilityId */
+  projectOverrides: Record<string, Record<string, CapabilityPolicy>>;
+}
+
+export const DEFAULT_CAPABILITY_POLICY_STORE: CapabilityPolicyStore = {
+  globalPolicies: {},
+  projectOverrides: {},
+};
+
+/**
+ * Optional presets for the Permission Center.
+ * Presets define default resolution baselines.
+ * Explicit per-capability overrides are applied ON TOP of the preset.
+ */
+export type PermissionPreset = "SAFE" | "ASK" | "FULL_ACCESS";
+
+/**
+ * A single recorded permission check for Dev Panel display.
+ */
+export interface PermissionCheckRecord {
+  id: string;
+  capabilityId: string;
+  decision: PermissionDecision;
+  source: PermissionSource;
+  reason: string;
+  projectId?: string;
+  conversationId: string;
+  requestId: string;
+  agentRunId: string;
+  approvalId?: string;
+  durationMs: number;
+  checkedAt: number;
+}
+
+/** IPC channels for Permission Center V1 */
+export const PERMISSION_IPC = {
+  /** Get the full CapabilityPolicyStore */
+  GET_STORE:              "permission:getStore",
+  /** Set global policy for a capability */
+  SET_GLOBAL:             "permission:setGlobal",
+  /** Set project override for a capability */
+  SET_PROJECT:            "permission:setProject",
+  /** Clear project override for a capability */
+  CLEAR_PROJECT:          "permission:clearProject",
+  /** Set preset (overrides defaults, explicit overrides remain) */
+  SET_PRESET:             "permission:setPreset",
+  /** Clear preset (revert to capability defaults) */
+  CLEAR_PRESET:           "permission:clearPreset",
+  /** Reset all global policies to defaults */
+  RESET_GLOBAL:           "permission:resetGlobal",
+  /** Reset project overrides for a project */
+  RESET_PROJECT:          "permission:resetProject",
+  /** Get all capability definitions */
+  GET_CAPABILITIES:       "permission:getCapabilities",
+  /** Get recent permission check records (for Dev Panel) */
+  GET_CHECKS:             "permission:getChecks",
+  /** Grant session-level permission for a capability (in-memory only) */
+  GRANT_SESSION:          "permission:grantSession",
+  /** Revoke session-level permission for a capability */
+  REVOKE_SESSION:         "permission:revokeSession",
+  /** Get all active session grants */
+  GET_SESSION_GRANTS:     "permission:getSessionGrants",
 } as const;

@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell, app
 import { randomUUID, createHash } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC, PERMISSION_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -29,6 +29,7 @@ import * as commandManager from "../commands/command-manager.js";
 import * as browserManager from "../browser/browser-manager.js";
 import * as browserWindowController from "../browser/browser-window-controller.js";
 import { isFakeProviderEnabled, releaseCheckpoint, waitForCheckpointBlocked } from "../agent-client/fake-provider.js";
+import * as permissionEngine from "../permissions/index.js";
 import * as devProcessManager from "../commands/dev-process-manager.js";
 import { buildGitHubIssuePayload } from "../reliability/sanitizer.js";
 void sweepOrphanedSnapshots; // imported for startup use — called from main.ts
@@ -1729,6 +1730,87 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   ipcMain.handle(
     DEV_PANEL_IPC.EXPORT_BUNDLE,
     () => buildDiagnosticBundle()
+  );
+
+  // ── Permission Center V1 ──────────────────────────────────────────────
+
+  ipcMain.handle(
+    PERMISSION_IPC.GET_STORE,
+    () => permissionEngine.loadStore()
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.GET_CAPABILITIES,
+    () => permissionEngine.getAllCapabilities()
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.GET_CHECKS,
+    (_e: IpcMainInvokeEvent, limit?: number) => permissionEngine.getRecentChecks(limit)
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.GET_SESSION_GRANTS,
+    () => permissionEngine.getSessionGrants()
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.SET_GLOBAL,
+    (_e: IpcMainInvokeEvent, capabilityId: string, policy: import("../../shared/types.js").CapabilityPolicy) => {
+      permissionEngine.setGlobalPolicy(capabilityId, policy);
+    }
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.SET_PROJECT,
+    (_e: IpcMainInvokeEvent, projectId: string, capabilityId: string, policy: import("../../shared/types.js").CapabilityPolicy) => {
+      permissionEngine.setProjectPolicy(projectId, capabilityId, policy);
+    }
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.CLEAR_PROJECT,
+    (_e: IpcMainInvokeEvent, projectId: string, capabilityId: string) => {
+      permissionEngine.clearProjectPolicy(projectId, capabilityId);
+    }
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.SET_PRESET,
+    (_e: IpcMainInvokeEvent, preset: "SAFE" | "ASK" | "FULL_ACCESS") => {
+      permissionEngine.setPreset(preset);
+    }
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.CLEAR_PRESET,
+    () => permissionEngine.clearPreset()
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.RESET_GLOBAL,
+    () => permissionEngine.resetGlobalPolicies()
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.RESET_PROJECT,
+    (_e: IpcMainInvokeEvent, projectId: string) => {
+      permissionEngine.resetProjectPolicies(projectId);
+    }
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.GRANT_SESSION,
+    (_e: IpcMainInvokeEvent, capabilityId: string, projectId?: string) => {
+      permissionEngine.grantSession(capabilityId, projectId);
+    }
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.REVOKE_SESSION,
+    (_e: IpcMainInvokeEvent, capabilityId: string, projectId?: string) => {
+      permissionEngine.revokeSession(capabilityId, projectId);
+    }
   );
 
   // ── Test-only: fake provider checkpoint control ──────────────────────
