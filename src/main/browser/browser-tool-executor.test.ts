@@ -69,6 +69,7 @@ vi.mock("../browser/browser-manager.js", () => mockBm);
 
 vi.mock("../database/db.js", () => ({
   getDb: vi.fn().mockReturnValue(true),
+  getAppSettings: vi.fn().mockReturnValue({ capabilityPolicies: undefined }),
   saveBrowserTab: vi.fn(),
   getBrowserTab: vi.fn().mockReturnValue(null),
   listBrowserTabs: vi.fn().mockReturnValue([]),
@@ -97,6 +98,12 @@ vi.mock("../reliability/invariants.js", () => ({
 
 vi.mock("../reliability/index.js", () => ({
   tryGetTraceRecorder: vi.fn().mockReturnValue(null),
+}));
+
+vi.mock("../permissions/index.js", () => ({
+  resolvePermission: vi.fn().mockReturnValue({ decision: "ALLOW", source: "default", reason: "test" }),
+  requestPermissionApproval: vi.fn().mockResolvedValue({ decision: "ALLOW", approvalId: "test" }),
+  recordCheck: vi.fn(),
 }));
 
 import { executeProjectTool } from "../../main/project-files/tool-executor.js";

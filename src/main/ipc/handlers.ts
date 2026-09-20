@@ -199,11 +199,19 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
   // the browser window before creating tabs — avoids tabs with no WebContentsView
   browserManager.setEnsureWindowOpenFn(() => browserWindowController.openBrowserWindow());
 
+  // Inject IPC sender into permission engine so it can push APPROVAL_REQUEST events
+  // to the renderer when a capability check returns ASK.
+  permissionEngine.setPermissionIpcSender((channel: string, payload: unknown) => {
+    mainSender.send(channel, payload);
+  });
+
   // Inject approval cancellation callback into QueueManager.
   // When a run is stopped, QueueManager calls this to deny any pending browser approvals.
   // This is a DI hook to avoid QueueManager → browser-manager circular import.
   setCancelApprovalsCallback((requestId: string) => {
     browserManager.cancelApprovalsForRequest(requestId);
+    // Also cancel any pending permission approvals for this request
+    permissionEngine.cancelPendingApprovals({ requestId });
   });
 
   // ── Resolve default agent profile ──────────────────────────────────────
@@ -1002,6 +1010,31 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
 
       if (!selectedFileEditIds || selectedFileEditIds.length === 0) {
         return { ok: false, error: "No file edits selected" };
+      }
+
+      // ── Permission Center: project.modify check ────────────────────────────
+      {
+        const permCtx = {
+          capabilityId: "project.modify",
+          projectId: proposal.projectId,
+        };
+        const perm = permissionEngine.resolvePermission(permCtx);
+        if (perm.decision === "DENY") {
+          return { ok: false, error: `project.modify denied by Permission Center (${perm.source}: ${perm.reason})` };
+        }
+        if (perm.decision === "ASK") {
+          try {
+            const approval = await permissionEngine.requestPermissionApproval(
+              permCtx,
+              `Apply ${selectedFileEditIds.length} file edit(s) to project`
+            );
+            if (approval.decision !== "ALLOW") {
+              return { ok: false, error: "project.modify denied by user" };
+            }
+          } catch {
+            return { ok: false, error: "project.modify approval cancelled" };
+          }
+        }
       }
 
       // Acquire apply locks for all target files
@@ -1810,6 +1843,13 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     PERMISSION_IPC.REVOKE_SESSION,
     (_e: IpcMainInvokeEvent, capabilityId: string, projectId?: string) => {
       permissionEngine.revokeSession(capabilityId, projectId);
+    }
+  );
+
+  ipcMain.handle(
+    PERMISSION_IPC.APPROVAL_RESPOND,
+    (_e: IpcMainInvokeEvent, response: import("../../shared/types.js").PermissionApprovalResponse) => {
+      permissionEngine.respondToApproval(response);
     }
   );
 

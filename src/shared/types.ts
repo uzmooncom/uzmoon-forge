@@ -1951,9 +1951,10 @@ export interface CapabilityDef {
 export interface PermissionCheckContext {
   capabilityId: string;
   projectId?: string;
-  conversationId: string;
-  requestId: string;
-  agentRunId: string;
+  /** Present when called from agent tool executor; absent from IPC-level callers */
+  conversationId?: string;
+  requestId?: string;
+  agentRunId?: string;
   toolCallId?: string;
   /** Optional human-readable resource hint for approval UI */
   resource?: string;
@@ -1995,9 +1996,9 @@ export interface PermissionCheckRecord {
   source: PermissionSource;
   reason: string;
   projectId?: string;
-  conversationId: string;
-  requestId: string;
-  agentRunId: string;
+  conversationId?: string;
+  requestId?: string;
+  agentRunId?: string;
   approvalId?: string;
   durationMs: number;
   checkedAt: number;
@@ -2031,4 +2032,37 @@ export const PERMISSION_IPC = {
   REVOKE_SESSION:         "permission:revokeSession",
   /** Get all active session grants */
   GET_SESSION_GRANTS:     "permission:getSessionGrants",
+  /** Main→renderer: pending approval request (sent when resolvePermission returns ASK) */
+  APPROVAL_REQUEST:        "permission:approvalRequest",
+  /** Renderer→main: user responded to an approval request */
+  APPROVAL_RESPOND:        "permission:approvalRespond",
+  /** Main→renderer: approval was cancelled (e.g. Stop button) */
+  APPROVAL_CANCELLED:      "permission:approvalCancelled",
 } as const;
+
+/** User action in response to a permission approval prompt */
+export type PermissionApprovalAction =
+  | "allow_once"      // this exact operation only (requestId+toolCallId scoped)
+  | "allow_session"   // rest of this app session
+  | "allow_project"   // persisted for this project
+  | "always_allow"    // persisted globally
+  | "deny";           // deny this one operation
+
+/** Pending permission approval payload sent to renderer */
+export interface PermissionApprovalRequest {
+  approvalId: string;
+  capabilityId: string;
+  capabilityName: string;
+  reason: string;          // human-readable why this was triggered
+  projectId?: string;
+  conversationId?: string;
+  requestId?: string;
+  agentRunId?: string;
+  toolCallId?: string;
+}
+
+/** User's response to a permission approval prompt */
+export interface PermissionApprovalResponse {
+  approvalId: string;
+  action: PermissionApprovalAction;
+}

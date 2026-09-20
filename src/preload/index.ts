@@ -47,6 +47,8 @@ import type {
   DevProcessRecord,
   CapabilityPolicy,
   CapabilityDef,
+  PermissionApprovalRequest,
+  PermissionApprovalResponse,
   CapabilityPolicyStore,
   PermissionCheckRecord,
 } from "../shared/types.js";
@@ -797,6 +799,21 @@ const forgeApi = {
       ipcRenderer.invoke(PERMISSION_IPC.GRANT_SESSION, capabilityId, projectId),
     revokeSession: (capabilityId: string, projectId?: string): Promise<void> =>
       ipcRenderer.invoke(PERMISSION_IPC.REVOKE_SESSION, capabilityId, projectId),
+    /** Respond to a pending permission approval request */
+    approvalRespond: (response: PermissionApprovalResponse): Promise<void> =>
+      ipcRenderer.invoke(PERMISSION_IPC.APPROVAL_RESPOND, response),
+    /** Subscribe to incoming permission approval requests from the main process */
+    onApprovalRequest: (cb: (req: PermissionApprovalRequest) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, req: PermissionApprovalRequest) => cb(req);
+      ipcRenderer.on(PERMISSION_IPC.APPROVAL_REQUEST, listener);
+      return () => ipcRenderer.off(PERMISSION_IPC.APPROVAL_REQUEST, listener);
+    },
+    /** Subscribe to approval cancellation events (e.g. Stop button pressed) */
+    onApprovalCancelled: (cb: (approvalId: string) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, payload: { approvalId: string }) => cb(payload.approvalId);
+      ipcRenderer.on(PERMISSION_IPC.APPROVAL_CANCELLED, listener);
+      return () => ipcRenderer.off(PERMISSION_IPC.APPROVAL_CANCELLED, listener);
+    },
   },
 };
 

@@ -2,14 +2,16 @@
  * permission-engine.ts — Canonical permission resolution engine for Permission Center V1.
  *
  * Resolution order (highest specificity wins):
- *   1. Session grant (ALLOW_SESSION — in-memory, cleared on restart)
- *   2. Project override (ALLOW_PROJECT or explicit DENY/ALWAYS_ALLOW for project)
- *   3. Global override (DENY / ALWAYS_ALLOW set by user)
- *   4. Preset baseline (SAFE / ASK / FULL_ACCESS)
- *   5. Capability defaultPolicy
+ *   1. Allow-once grants (run-scoped: requestId+toolCallId, cleared after single use)
+ *   2. Session grants (in-memory, cleared on restart)
+ *   3. Project override
+ *   4. Global override
+ *   5. Preset baseline (SAFE / ASK / FULL_ACCESS)
+ *   6. Capability defaultPolicy
  *
  * INVARIANT: Policy storage is the single source of truth.
  * Session grants are never persisted.
+ * Allow-once grants are per-operation and consumed on use.
  * Permission checks are deterministic given the same store + session state.
  */
 import { randomUUID } from "crypto";
@@ -19,26 +21,55 @@ import type {
   PermissionResult,
   PermissionCheckContext,
   PermissionCheckRecord,
+  PermissionApprovalRequest,
+  PermissionApprovalResponse,
+  PermissionApprovalAction,
 } from "../../shared/types.js";
 import { getCapability, isKnownCapability } from "./capability-registry.js";
 import { loadStore, saveStore } from "./permission-store.js";
 import { forgeLogger } from "../telemetry/logger.js";
 
-// ── Module-level in-memory session grants ───────────────────────────────────
+// ── Module-level state ───────────────────────────────────────────────────────
 
-/** session grants: capabilityId → Set<projectId | "__global__"> */
+/** Session grants: capabilityId → Set<projectId | "__global__"> */
 const _sessionGrants = new Map<string, Set<string>>();
+
+/**
+ * Allow-once grants: key = `${requestId}:${toolCallId}:${capabilityId}` → boolean (consumed marker).
+ * These are ephemeral and consumed on first use.
+ */
+const _allowOnceGrants = new Map<string, boolean>();
+
+/**
+ * Pending approval requests: approvalId → { resolve, reject, capabilityId, requestId? }
+ * Used for ASK flow suspend/resume.
+ */
+const _pendingApprovals = new Map<string, {
+  resolve: (action: PermissionApprovalAction) => void;
+  reject: (reason: Error) => void;
+  capabilityId: string;
+  requestId?: string;
+  agentRunId?: string;
+  toolCallId?: string;
+}>();
 
 /** Recent permission check records for Dev Panel (ring buffer, max 200) */
 const _checkRecords: PermissionCheckRecord[] = [];
 const MAX_CHECK_RECORDS = 200;
 
+/**
+ * Main-process sender function for IPC push events.
+ * Injected by registerHandlers() to avoid circular dependency.
+ */
+type IpcSenderFn = (channel: string, payload: unknown) => void;
+let _ipcSender: IpcSenderFn | null = null;
+
+export function setPermissionIpcSender(fn: IpcSenderFn): void {
+  _ipcSender = fn;
+}
+
 // ── Preset resolution ────────────────────────────────────────────────────────
 
-/**
- * Resolve the effective policy for a capability from a preset.
- * Returns null if preset does not override this capability.
- */
 function resolveFromPreset(
   capabilityId: string,
   preset: "SAFE" | "ASK" | "FULL_ACCESS"
@@ -47,16 +78,13 @@ function resolveFromPreset(
   if (!cap) return null;
 
   if (preset === "FULL_ACCESS") {
-    // FULL_ACCESS: allow everything that is not DENY by default (hard limits stay)
-    // CRITICAL risk capabilities keep their default (DENY)
     if (cap.risk === "CRITICAL") return cap.defaultPolicy;
-    if (cap.defaultPolicy === "DENY") return "DENY"; // hard block stays
+    if (cap.defaultPolicy === "DENY") return "DENY";
     return "ALWAYS_ALLOW";
   }
 
   if (preset === "ASK") {
-    // ASK: LOW risk reads are ALWAYS_ALLOW; everything else is ASK
-    if (cap.defaultPolicy === "DENY") return "DENY"; // hard blocks stay
+    if (cap.defaultPolicy === "DENY") return "DENY";
     if (cap.risk === "LOW" && !cap.isDestructive) return "ALWAYS_ALLOW";
     return "ASK";
   }
@@ -66,7 +94,6 @@ function resolveFromPreset(
     if (cap.risk === "LOW" && !cap.isDestructive) return "ALWAYS_ALLOW";
     if (cap.risk === "CRITICAL") return "DENY";
     if (cap.isDestructive) return "DENY";
-    // MEDIUM / HIGH: ASK
     return "ASK";
   }
 
@@ -85,14 +112,20 @@ function policyToDecision(policy: CapabilityPolicy): PermissionDecision {
   }
 }
 
-// ── Core resolution ──────────────────────────────────────────────────────────
+// ── Allow-once key ───────────────────────────────────────────────────────────
+
+function _allowOnceKey(requestId: string, toolCallId: string, capabilityId: string): string {
+  return `${requestId}:${toolCallId}:${capabilityId}`;
+}
+
+// ── Core synchronous resolution ──────────────────────────────────────────────
 
 /**
  * Resolve the effective permission for a capability given the current policy store
- * and session state.
+ * and session state. Synchronous — does NOT trigger the approval dialog.
  *
- * This is the single canonical entry point. All subsystems must call this.
- * Do NOT implement separate policy resolution in terminal, git, or browser code.
+ * When decision === "ASK", callers must call requestPermissionApproval() to
+ * suspend and wait for user input, then act on the response.
  */
 export function resolvePermission(ctx: PermissionCheckContext): PermissionResult {
   const start = Date.now();
@@ -116,7 +149,26 @@ export function resolvePermission(ctx: PermissionCheckContext): PermissionResult
   const cap = getCapability(capabilityId)!;
   const store = loadStore();
 
-  // ── 1. Session grant ───────────────────────────────────────────────────────
+  // ── 1. Allow-once grant ────────────────────────────────────────────────────
+  if (ctx.requestId && ctx.toolCallId) {
+    const key = _allowOnceKey(ctx.requestId, ctx.toolCallId, capabilityId);
+    if (_allowOnceGrants.has(key)) {
+      _allowOnceGrants.delete(key); // consumed — single use only
+      const result: PermissionResult = {
+        decision: "ALLOW",
+        source: "session",
+        capabilityId,
+        reason: "Allow-once grant (consumed)",
+      };
+      _recordCheck(ctx, result, start);
+      forgeLogger.debug("permission", "PERMISSION_ALLOWED", {
+        metadata: { capabilityId, source: "allow_once" },
+      });
+      return result;
+    }
+  }
+
+  // ── 2. Session grant ───────────────────────────────────────────────────────
   {
     const grantSet = _sessionGrants.get(capabilityId);
     if (grantSet) {
@@ -135,7 +187,7 @@ export function resolvePermission(ctx: PermissionCheckContext): PermissionResult
     }
   }
 
-  // ── 2. Project override ───────────────────────────────────────────────────
+  // ── 3. Project override ───────────────────────────────────────────────────
   if (projectId) {
     const projectPolicies = store.projectOverrides[projectId];
     if (projectPolicies && capabilityId in projectPolicies) {
@@ -153,7 +205,7 @@ export function resolvePermission(ctx: PermissionCheckContext): PermissionResult
     }
   }
 
-  // ── 3. Global override ────────────────────────────────────────────────────
+  // ── 4. Global override ────────────────────────────────────────────────────
   if (capabilityId in store.globalPolicies) {
     const policy = store.globalPolicies[capabilityId]!;
     const decision = policyToDecision(policy);
@@ -168,7 +220,7 @@ export function resolvePermission(ctx: PermissionCheckContext): PermissionResult
     return result;
   }
 
-  // ── 4. Preset ─────────────────────────────────────────────────────────────
+  // ── 5. Preset ─────────────────────────────────────────────────────────────
   if (store.preset) {
     const presetPolicy = resolveFromPreset(capabilityId, store.preset);
     if (presetPolicy !== null) {
@@ -185,7 +237,7 @@ export function resolvePermission(ctx: PermissionCheckContext): PermissionResult
     }
   }
 
-  // ── 5. Capability default ─────────────────────────────────────────────────
+  // ── 6. Capability default ─────────────────────────────────────────────────
   const decision = policyToDecision(cap.defaultPolicy);
   const result: PermissionResult = {
     decision,
@@ -198,13 +250,181 @@ export function resolvePermission(ctx: PermissionCheckContext): PermissionResult
   return result;
 }
 
-// ── Session grant management ──────────────────────────────────────────────
+// ── Async ASK approval flow ──────────────────────────────────────────────────
 
 /**
- * Create a session grant for a capability.
- * Optionally scoped to a projectId (null = global session grant).
- * Session grants are never persisted — cleared on restart.
+ * Request user approval for a capability when resolvePermission() returns ASK.
+ *
+ * Sends PERMISSION_IPC.APPROVAL_REQUEST to renderer, suspends until the user responds,
+ * then applies the user's action (Allow Once / Session / Project / Always / Deny).
+ *
+ * Returns the final PermissionResult after user action.
+ * Rejects if the approval is cancelled (e.g. Stop button pressed).
  */
+export async function requestPermissionApproval(
+  ctx: PermissionCheckContext,
+  reason: string
+): Promise<PermissionResult> {
+  const cap = getCapability(ctx.capabilityId);
+  if (!cap) {
+    return {
+      decision: "DENY",
+      source: "default",
+      capabilityId: ctx.capabilityId,
+      reason: "Unknown capability",
+    };
+  }
+
+  const approvalId = randomUUID();
+
+  const approvalRequest: PermissionApprovalRequest = {
+    approvalId,
+    capabilityId: ctx.capabilityId,
+    capabilityName: cap.name,
+    reason,
+    ...(ctx.projectId !== undefined && { projectId: ctx.projectId }),
+    ...(ctx.conversationId !== undefined && { conversationId: ctx.conversationId }),
+    ...(ctx.requestId !== undefined && { requestId: ctx.requestId }),
+    ...(ctx.agentRunId !== undefined && { agentRunId: ctx.agentRunId }),
+    ...(ctx.toolCallId !== undefined && { toolCallId: ctx.toolCallId }),
+  };
+
+  forgeLogger.info("permission", "PERMISSION_APPROVAL_REQUESTED", {
+    metadata: { capabilityId: ctx.capabilityId, approvalId, reason },
+  });
+
+  return new Promise<PermissionResult>((resolve, reject) => {
+    _pendingApprovals.set(approvalId, {
+      resolve: (action: PermissionApprovalAction) => {
+        const result = _applyApprovalAction(action, ctx);
+        forgeLogger.info("permission", action === "deny" ? "PERMISSION_APPROVAL_DENIED" : "PERMISSION_APPROVAL_GRANTED", {
+          metadata: { capabilityId: ctx.capabilityId, approvalId, action },
+        });
+        resolve(result);
+      },
+      reject,
+      capabilityId: ctx.capabilityId,
+      ...(ctx.requestId !== undefined && { requestId: ctx.requestId }),
+      ...(ctx.agentRunId !== undefined && { agentRunId: ctx.agentRunId }),
+      ...(ctx.toolCallId !== undefined && { toolCallId: ctx.toolCallId }),
+    });
+
+    // Push to renderer
+    _ipcSender?.("permission:approvalRequest", approvalRequest);
+  });
+}
+
+/**
+ * Apply a user's approval action, modifying state as needed.
+ * Called internally when the user responds to an approval prompt.
+ */
+function _applyApprovalAction(
+  action: PermissionApprovalAction,
+  ctx: PermissionCheckContext
+): PermissionResult {
+  switch (action) {
+    case "allow_once": {
+      // Record allow-once grant. The grant key is consumed by the NEXT resolvePermission call
+      // for the same requestId+toolCallId — the caller should re-call resolvePermission after this.
+      if (ctx.requestId && ctx.toolCallId) {
+        const key = _allowOnceKey(ctx.requestId, ctx.toolCallId, ctx.capabilityId);
+        _allowOnceGrants.set(key, true);
+      }
+      return {
+        decision: "ALLOW",
+        source: "session",
+        capabilityId: ctx.capabilityId,
+        reason: "Allow-once approved by user",
+      };
+    }
+    case "allow_session": {
+      grantSession(ctx.capabilityId, ctx.projectId);
+      return {
+        decision: "ALLOW",
+        source: "session",
+        capabilityId: ctx.capabilityId,
+        reason: "Session grant approved by user",
+      };
+    }
+    case "allow_project": {
+      if (ctx.projectId) {
+        setProjectPolicy(ctx.projectId, ctx.capabilityId, "ALLOW_PROJECT");
+      } else {
+        grantSession(ctx.capabilityId, undefined);
+      }
+      return {
+        decision: "ALLOW",
+        source: ctx.projectId ? "project" : "session",
+        capabilityId: ctx.capabilityId,
+        reason: "Project grant approved by user",
+      };
+    }
+    case "always_allow": {
+      setGlobalPolicy(ctx.capabilityId, "ALWAYS_ALLOW");
+      return {
+        decision: "ALLOW",
+        source: "global",
+        capabilityId: ctx.capabilityId,
+        reason: "Global allow set by user",
+      };
+    }
+    case "deny":
+    default: {
+      return {
+        decision: "DENY",
+        source: "session",
+        capabilityId: ctx.capabilityId,
+        reason: "Denied by user",
+      };
+    }
+  }
+}
+
+/**
+ * Respond to a pending approval (called from IPC handler when renderer responds).
+ */
+export function respondToApproval(response: PermissionApprovalResponse): void {
+  const entry = _pendingApprovals.get(response.approvalId);
+  if (!entry) {
+    forgeLogger.warn("permission", "PERMISSION_WARN", {
+      metadata: { event: "stale_approval_response", approvalId: response.approvalId },
+    });
+    return;
+  }
+  _pendingApprovals.delete(response.approvalId);
+  entry.resolve(response.action);
+}
+
+/**
+ * Cancel all pending approvals for a given agentRunId or requestId.
+ * Called when Stop is pressed — mirrors browser cancelApprovalsForRequest.
+ */
+export function cancelPendingApprovals(opts: { requestId?: string; agentRunId?: string }): void {
+  for (const [approvalId, entry] of _pendingApprovals) {
+    const matches =
+      (opts.requestId && entry.requestId === opts.requestId) ||
+      (opts.agentRunId && entry.agentRunId === opts.agentRunId);
+    if (matches) {
+      _pendingApprovals.delete(approvalId);
+      entry.reject(new Error("CANCELLED"));
+      // Notify renderer that approval was dismissed
+      _ipcSender?.("permission:approvalCancelled", { approvalId });
+      forgeLogger.info("permission", "PERMISSION_WARN", {
+        metadata: { event: "approval_cancelled", approvalId, capabilityId: entry.capabilityId },
+      });
+    }
+  }
+}
+
+/**
+ * Get count of pending approvals (for diagnostics).
+ */
+export function getPendingApprovalCount(): number {
+  return _pendingApprovals.size;
+}
+
+// ── Session grant management ──────────────────────────────────────────────
+
 export function grantSession(capabilityId: string, projectId?: string): void {
   if (!isKnownCapability(capabilityId)) return;
   let grantSet = _sessionGrants.get(capabilityId);
@@ -219,9 +439,6 @@ export function grantSession(capabilityId: string, projectId?: string): void {
   });
 }
 
-/**
- * Revoke a session grant for a capability.
- */
 export function revokeSession(capabilityId: string, projectId?: string): void {
   const grantSet = _sessionGrants.get(capabilityId);
   if (!grantSet) return;
@@ -230,10 +447,6 @@ export function revokeSession(capabilityId: string, projectId?: string): void {
   if (grantSet.size === 0) _sessionGrants.delete(capabilityId);
 }
 
-/**
- * Get all active session grants.
- * Returns map of capabilityId → array of project keys (or "__global__").
- */
 export function getSessionGrants(): Record<string, string[]> {
   const result: Record<string, string[]> = {};
   for (const [capId, keys] of _sessionGrants) {
@@ -242,40 +455,31 @@ export function getSessionGrants(): Record<string, string[]> {
   return result;
 }
 
-/**
- * Clear all session grants. Called on app restart / permission engine reset.
- */
 export function clearAllSessionGrants(): void {
   _sessionGrants.clear();
 }
 
 // ── Persistent policy management ─────────────────────────────────────────
 
-/**
- * Set a global policy override for a capability.
- */
 export function setGlobalPolicy(capabilityId: string, policy: CapabilityPolicy): void {
   if (!isKnownCapability(capabilityId)) return;
   const store = loadStore();
   store.globalPolicies[capabilityId] = policy;
   saveStore(store);
-  forgeLogger.info("permission", "PERMISSION_GLOBAL_POLICY_SET", {
+  forgeLogger.info("permission", "PERMISSION_GLOBAL_GRANT_CREATED", {
     metadata: { scope: "global", capabilityId, policy },
   });
 }
 
-/**
- * Remove a global policy override for a capability (reverts to preset/default).
- */
 export function clearGlobalPolicy(capabilityId: string): void {
   const store = loadStore();
   delete store.globalPolicies[capabilityId];
   saveStore(store);
+  forgeLogger.info("permission", "PERMISSION_OVERRIDE_CHANGED", {
+    metadata: { scope: "global", capabilityId, action: "clear" },
+  });
 }
 
-/**
- * Set a project-scoped policy override for a capability.
- */
 export function setProjectPolicy(
   projectId: string,
   capabilityId: string,
@@ -288,14 +492,11 @@ export function setProjectPolicy(
   }
   store.projectOverrides[projectId]![capabilityId] = policy;
   saveStore(store);
-  forgeLogger.info("permission", "PERMISSION_OVERRIDE_CHANGED", {
+  forgeLogger.info("permission", "PERMISSION_PROJECT_GRANT_CREATED", {
     metadata: { scope: "project", projectId, capabilityId, policy },
-    });
+  });
 }
 
-/**
- * Remove a project-scoped policy override for a capability.
- */
 export function clearProjectPolicy(projectId: string, capabilityId: string): void {
   const store = loadStore();
   const projectPolicies = store.projectOverrides[projectId];
@@ -305,43 +506,32 @@ export function clearProjectPolicy(projectId: string, capabilityId: string): voi
     delete store.projectOverrides[projectId];
   }
   saveStore(store);
+  forgeLogger.info("permission", "PERMISSION_OVERRIDE_CHANGED", {
+    metadata: { scope: "project", projectId, capabilityId, action: "clear" },
+  });
 }
 
-/**
- * Set the active preset.
- * Per-capability explicit overrides are NOT cleared by preset changes.
- */
 export function setPreset(preset: "SAFE" | "ASK" | "FULL_ACCESS"): void {
   const store = loadStore();
   store.preset = preset;
   saveStore(store);
   forgeLogger.info("permission", "PERMISSION_OVERRIDE_CHANGED", {
     metadata: { scope: "preset", preset },
-    });
+  });
 }
 
-/**
- * Clear the active preset (revert to capability defaults).
- */
 export function clearPreset(): void {
   const store = loadStore();
   delete store.preset;
   saveStore(store);
 }
 
-/**
- * Reset all global policies to defaults.
- * Project overrides and preset are NOT affected.
- */
 export function resetGlobalPolicies(): void {
   const store = loadStore();
   store.globalPolicies = {};
   saveStore(store);
 }
 
-/**
- * Reset all project-specific overrides for a project.
- */
 export function resetProjectPolicies(projectId: string): void {
   const store = loadStore();
   delete store.projectOverrides[projectId];
@@ -362,9 +552,9 @@ function _recordCheck(
     source: result.source,
     reason: result.reason,
     ...(ctx.projectId !== undefined ? { projectId: ctx.projectId } : {}),
-    conversationId: ctx.conversationId,
-    requestId: ctx.requestId,
-    agentRunId: ctx.agentRunId,
+    ...(ctx.conversationId !== undefined ? { conversationId: ctx.conversationId } : {}),
+    ...(ctx.requestId !== undefined ? { requestId: ctx.requestId } : {}),
+    ...(ctx.agentRunId !== undefined ? { agentRunId: ctx.agentRunId } : {}),
     durationMs: Date.now() - startMs,
     checkedAt: Date.now(),
   };
@@ -374,31 +564,28 @@ function _recordCheck(
   }
 }
 
-function _emitAllowed(ctx: PermissionCheckContext, result: PermissionResult): void {
-  forgeLogger.debug("permission", "PERMISSION_CHECKED", {
-    metadata: { capabilityId: ctx.capabilityId, source: result.source },
-    });
+function _emitAllowed(_ctx: PermissionCheckContext, result: PermissionResult): void {
+  forgeLogger.debug("permission", "PERMISSION_ALLOWED", {
+    metadata: { capabilityId: result.capabilityId, source: result.source },
+  });
 }
 
 function _emitByDecision(ctx: PermissionCheckContext, result: PermissionResult): void {
   if (result.decision === "ALLOW") {
-    forgeLogger.debug("permission", "PERMISSION_CHECKED", {
+    forgeLogger.debug("permission", "PERMISSION_ALLOWED", {
       metadata: { capabilityId: ctx.capabilityId, source: result.source },
     });
   } else if (result.decision === "DENY") {
-    forgeLogger.info("permission", "PERMISSION_OVERRIDE_CHANGED", {
+    forgeLogger.info("permission", "PERMISSION_DENIED", {
       metadata: { capabilityId: ctx.capabilityId, source: result.source, reason: result.reason },
     });
   } else {
-    forgeLogger.info("permission", "PERMISSION_OVERRIDE_CHANGED", {
-      metadata: { capabilityId: ctx.capabilityId, source: result.source },
+    forgeLogger.info("permission", "PERMISSION_CHECKED", {
+      metadata: { capabilityId: ctx.capabilityId, source: result.source, decision: "ASK" },
     });
   }
 }
 
-/**
- * Get recent permission check records (for Dev Panel).
- */
 export function getRecentChecks(limit = 100): PermissionCheckRecord[] {
   const start = Math.max(0, _checkRecords.length - limit);
   return _checkRecords.slice(start).reverse();
@@ -409,5 +596,13 @@ export function getRecentChecks(limit = 100): PermissionCheckRecord[] {
 /** @internal For tests only */
 export function _resetPermissionEngineForTest(): void {
   _sessionGrants.clear();
+  _allowOnceGrants.clear();
+  _pendingApprovals.clear();
   _checkRecords.length = 0;
+  _ipcSender = null;
+}
+
+/** @internal For tests only — get pending approval count */
+export function _getPendingApprovalsForTest(): Map<string, unknown> {
+  return _pendingApprovals as Map<string, unknown>;
 }

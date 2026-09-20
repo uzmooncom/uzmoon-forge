@@ -27,7 +27,16 @@
 import os from "os";
 import path from "path";
 import fs from "fs";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+// Mock permission engine so run_command tests don't hang waiting for approval.
+// The CommandManager itself handles the actual approval flow — permission engine
+// should not block these integration tests.
+vi.mock("../permissions/index.js", () => ({
+  resolvePermission: vi.fn().mockReturnValue({ decision: "ALLOW", source: "default", reason: "test" }),
+  requestPermissionApproval: vi.fn().mockResolvedValue({ decision: "ALLOW", approvalId: "test" }),
+  recordCheck: vi.fn(),
+}));
 import {
   propose,
   approveCommand,

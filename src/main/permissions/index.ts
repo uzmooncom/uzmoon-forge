@@ -5,6 +5,11 @@
  */
 export {
   resolvePermission,
+  requestPermissionApproval,
+  respondToApproval,
+  cancelPendingApprovals,
+  getPendingApprovalCount,
+  setPermissionIpcSender,
   grantSession,
   revokeSession,
   getSessionGrants,
@@ -19,6 +24,7 @@ export {
   resetProjectPolicies,
   getRecentChecks,
   _resetPermissionEngineForTest,
+  _getPendingApprovalsForTest,
 } from "./permission-engine.js";
 
 export {

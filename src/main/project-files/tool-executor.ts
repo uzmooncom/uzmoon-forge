@@ -56,7 +56,7 @@ import {
   type GitCommitArgs,
 } from "../agent-client/tool-types.js";
 import * as gitService from "../git/git-service.js";
-import { resolvePermission } from "../permissions/index.js";
+import { resolvePermission, requestPermissionApproval } from "../permissions/index.js";
 import { COMMAND_LIMITS } from "../commands/command-limits.js";
 import type { CommandEvidenceRef } from "../../shared/types.js";
 import * as service from "./service.js";
@@ -87,6 +87,82 @@ export interface ToolExecutionResult {
   imageAttachment?: { mimeType: string; data: string };
   /** Milliseconds elapsed executing the tool */
   durationMs: number;
+}
+
+// ── Permission check helper ──────────────────────────────────────────────────
+
+/**
+ * Check permission for a capability.
+ * - ALLOW: returns null (proceed).
+ * - DENY:  returns an error result immediately.
+ * - ASK:   suspends, sends approval to renderer, waits for user action,
+ *          then returns null (proceed) or an error result (denied/cancelled).
+ *
+ * Usage:
+ *   const block = await checkPermission("git.commit", call, ctx, "Commit staged changes");
+ *   if (block) return block;
+ *   // ... do the operation
+ */
+async function checkPermission(
+  capabilityId: string,
+  call: ForgeToolCall,
+  ctx: ToolExecutionContext,
+  reason: string
+): Promise<Omit<ToolExecutionResult, "durationMs"> | null> {
+  const permCtx = {
+    capabilityId,
+    projectId: ctx.projectId,
+    conversationId: ctx.conversationId,
+    requestId: ctx.requestId,
+    agentRunId: ctx.requestId,
+    toolCallId: call.callId,
+  };
+
+  const perm = resolvePermission(permCtx);
+
+  if (perm.decision === "DENY") {
+    return {
+      result: {
+        callId: call.callId,
+        toolName: call.name,
+        ok: false,
+        errorCode: "PERMISSION_DENIED",
+        errorMessage: `${capabilityId} denied by Permission Center (${perm.source}: ${perm.reason})`,
+      },
+    };
+  }
+
+  if (perm.decision === "ASK") {
+    try {
+      const approval = await requestPermissionApproval(permCtx, reason);
+      if (approval.decision !== "ALLOW") {
+        return {
+          result: {
+            callId: call.callId,
+            toolName: call.name,
+            ok: false,
+            errorCode: "PERMISSION_DENIED",
+            errorMessage: `${capabilityId} denied by user`,
+          },
+        };
+      }
+      // ALLOW — proceed (fall through)
+    } catch (err) {
+      // Cancelled (e.g. Stop button)
+      return {
+        result: {
+          callId: call.callId,
+          toolName: call.name,
+          ok: false,
+          errorCode: "PERMISSION_DENIED",
+          errorMessage: `${capabilityId} approval cancelled`,
+        },
+      };
+    }
+  }
+
+  // ALLOW — proceed
+  return null;
 }
 
 // ── Main dispatcher ─────────────────────────────────────────────────────────
@@ -284,7 +360,7 @@ export async function executeProjectTool(
       break;
     // ── Safe Git V1 ────────────────────────────────────────────────────
     case "git_status":
-      result = await handleGitStatus(ctx);
+      result = await handleGitStatus(call, ctx);
       break;
     case "git_diff":
       result = await handleGitDiff(call, validation.args as GitDiffArgs, ctx);
@@ -296,7 +372,7 @@ export async function executeProjectTool(
       result = await handleGitShow(call, validation.args as GitShowArgs, ctx);
       break;
     case "git_branch_info":
-      result = await handleGitBranchInfo(ctx);
+      result = await handleGitBranchInfo(call, ctx);
       break;
     case "git_stage":
       result = await handleGitStage(call, validation.args as GitStageArgs, ctx);
@@ -319,6 +395,8 @@ async function handleListDirectory(
   args: ListDirectoryArgs,
   ctx: ToolExecutionContext
 ): Promise<Omit<ToolExecutionResult, "durationMs">> {
+  const listBlock = await checkPermission("project.read", call, ctx, `List directory: ${args.path ?? "."}`);
+  if (listBlock) return listBlock;
   const relPath = args.path ?? "";
   const depth = args.depth ?? 1;
   const limit = args.limit ?? TOOL_LIMITS.MAX_DIRECTORY_RESULTS;
@@ -457,6 +535,8 @@ async function handleReadFile(
   args: ReadFileArgs,
   ctx: ToolExecutionContext
 ): Promise<Omit<ToolExecutionResult, "durationMs">> {
+  const readBlock = await checkPermission("project.read", call, ctx, `Read file: ${args.path}`);
+  if (readBlock) return readBlock;
   // Budget check BEFORE reading
   if (ctx.readBytesUsed >= TOOL_LIMITS.MAX_TOTAL_AGENT_READ_BYTES) {
     return {
@@ -581,6 +661,8 @@ async function handleReadFileRange(
   args: ReadFileRangeArgs,
   ctx: ToolExecutionContext
 ): Promise<Omit<ToolExecutionResult, "durationMs">> {
+  const rangeBlock = await checkPermission("project.read", call, ctx, `Read file range: ${args.path}`);
+  if (rangeBlock) return rangeBlock;
   // Budget check
   if (ctx.readBytesUsed >= TOOL_LIMITS.MAX_TOTAL_AGENT_READ_BYTES) {
     return {
@@ -706,6 +788,67 @@ function sanitizeError(error: string): string {
 }
 
 
+// ── Terminal risk → capability mapper ──────────────────────────────────────
+
+/**
+ * Map a CommandRiskClass to the canonical terminal capability ID.
+ * Returns null for risk classes that are hard-blocked by CommandManager
+ * policy (shell_interpreter, source_write_bypass, git, remote_execution,
+ * destructive) — those are blocked before Permission Center is consulted.
+ *
+ * For soft-blocked (DENY by default) capabilities we still route through
+ * the engine so project/global overrides and presets can take effect.
+ */
+function _terminalRiskToCapability(
+  riskClass: import("../../shared/types.js").CommandRiskClass,
+  args: RunCommandArgs
+): string | null {
+  switch (riskClass) {
+    // Hard-blocked by CommandManager — Permission Center does not override
+    case "shell_interpreter":      return null; // always blocked
+    case "source_write_bypass":    return null; // always blocked
+    case "git":                    return null; // use git.* tools instead
+    case "remote_execution":       return null; // always blocked
+    case "destructive":            return null; // always blocked
+
+    // Soft capabilities — route through Permission Center
+    case "read_only":              return "terminal.read_only";
+    case "verification":           return _classifyVerificationCapability(args.executable, args.args);
+    case "package_install":        return "terminal.package_install";
+    case "network":                return "terminal.network";
+    case "mutation":               return "terminal.modify_files";
+    case "project_script":         return _classifyScriptCapability(args.executable, args.args);
+    case "unknown":                return "terminal.shell";
+    default:                       return "terminal.shell";
+  }
+}
+
+/** Classify a verification command to the most specific capability. */
+function _classifyVerificationCapability(executable: string, args: string[]): string {
+  const exec = executable.toLowerCase();
+  // Build commands
+  if (["tsc", "vite", "webpack", "rollup", "esbuild", "turbo"].includes(exec)) return "terminal.build";
+  if (exec === "pnpm" || exec === "npm" || exec === "yarn" || exec === "bun") {
+    const sub = args[0] ?? "";
+    if (["build", "compile", "bundle"].includes(sub)) return "terminal.build";
+    if (["test", "vitest", "jest", "mocha"].includes(sub)) return "terminal.test";
+    if (["lint", "eslint", "tslint", "biome"].includes(sub)) return "terminal.lint";
+  }
+  if (["vitest", "jest", "mocha", "jasmine", "ava", "tap"].includes(exec)) return "terminal.test";
+  if (["eslint", "tslint", "biome", "oxlint", "prettier"].includes(exec)) return "terminal.lint";
+  return "terminal.build";
+}
+
+/** Classify a package script to build / test / lint or general shell. */
+function _classifyScriptCapability(executable: string, args: string[]): string {
+  const sub = args[1] ?? args[0] ?? ""; // pnpm run <script>
+  const scriptName = sub.toLowerCase();
+  if (["build", "compile", "bundle", "prepare", "package"].some(s => scriptName.includes(s))) return "terminal.build";
+  if (["test", "spec", "vitest", "jest", "e2e", "coverage"].some(s => scriptName.includes(s))) return "terminal.test";
+  if (["lint", "format", "check"].some(s => scriptName.includes(s))) return "terminal.lint";
+  return "terminal.shell";
+}
+
 // ── run_command handler ─────────────────────────────────────────────────────
 
 async function handleRunCommand(
@@ -725,6 +868,30 @@ async function handleRunCommand(
       },
     };
   }
+
+  // ── Permission Center: classify command risk → capability check ────────────
+  // Classify risk before attempting to execute, so permission policy is applied
+  // regardless of CommandManager trust rules. CommandManager safety (shell: false,
+  // containment, sanitization) is NOT bypassed — it runs AFTER permission check.
+  {
+    const { classifyRisk } = await import("../commands/command-policy.js");
+    const riskClass = classifyRisk({
+      executable: args.executable,
+      args: args.args,
+      cwdRelative: args.cwdRelative ?? "",
+    });
+    const capabilityId = _terminalRiskToCapability(riskClass, args);
+    if (capabilityId) {
+      const block = await checkPermission(
+        capabilityId,
+        call,
+        ctx,
+        `Run command: ${args.executable} (risk: ${riskClass})`
+      );
+      if (block) return block;
+    }
+  }
+
   // Increment budget counter before proposal (prevents race if two tool calls overlap)
   ctx.commandsRunThisRequest++;
 
@@ -1175,6 +1342,8 @@ async function handleBrowserOpenUrl(
   args: BrowserOpenUrlArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const navBlock = await checkPermission("browser.web.navigate", call, ctx, `Navigate to ${args.url}`);
+  if (navBlock) return navBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1194,6 +1363,8 @@ async function handleBrowserReadPage(
   args: BrowserTabRefArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const readBlock = await checkPermission("browser.web.read", call, ctx, "Read browser page content");
+  if (readBlock) return readBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1212,6 +1383,8 @@ async function handleBrowserFindText(
   args: BrowserFindTextArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const readBlock = await checkPermission("browser.web.read", call, ctx, "Find text in browser page");
+  if (readBlock) return readBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1230,6 +1403,8 @@ async function handleBrowserClick(
   args: BrowserClickArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const interactBlock = await checkPermission("browser.web.interact", call, ctx, "Click browser element");
+  if (interactBlock) return interactBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1248,6 +1423,8 @@ async function handleBrowserType(
   args: BrowserTypeArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const interactBlock = await checkPermission("browser.web.interact", call, ctx, "Type text into browser element");
+  if (interactBlock) return interactBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1266,6 +1443,8 @@ async function handleBrowserFill(
   args: BrowserFillArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const interactBlock = await checkPermission("browser.web.interact", call, ctx, "Fill browser input");
+  if (interactBlock) return interactBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1284,6 +1463,8 @@ async function handleBrowserSelect(
   args: BrowserSelectArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const interactBlock = await checkPermission("browser.web.interact", call, ctx, "Select browser option");
+  if (interactBlock) return interactBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1302,6 +1483,8 @@ async function handleBrowserPressKey(
   args: BrowserPressKeyArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const interactBlock = await checkPermission("browser.web.interact", call, ctx, "Press key in browser");
+  if (interactBlock) return interactBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1320,6 +1503,8 @@ async function handleBrowserScroll(
   args: BrowserScrollArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const interactBlock = await checkPermission("browser.web.interact", call, ctx, "Scroll browser page");
+  if (interactBlock) return interactBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1406,6 +1591,8 @@ async function handleBrowserWaitFor(
   args: BrowserWaitForArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const waitBlock = await checkPermission("browser.web.interact", call, ctx, "Wait for browser condition");
+  if (waitBlock) return waitBlock;
   const { BROWSER_LIMITS } = await import('../../shared/types.js');
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
@@ -1589,6 +1776,8 @@ async function handleBrowserRefAction(
   args: { tab_id: string; ref: string },
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const interactBlock = await checkPermission("browser.web.interact", call, ctx, `Browser action: ${action}`);
+  if (interactBlock) return interactBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1613,6 +1802,8 @@ async function handleBrowserDrag(
   args: BrowserDragArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const interactBlock = await checkPermission("browser.web.interact", call, ctx, "Drag browser element");
+  if (interactBlock) return interactBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1631,6 +1822,8 @@ async function handleBrowserCheckbox(
   args: BrowserCheckboxArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const interactBlock = await checkPermission("browser.web.interact", call, ctx, "Set checkbox state in browser");
+  if (interactBlock) return interactBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1649,6 +1842,8 @@ async function handleBrowserUploadFile(
   args: BrowserUploadFileArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const uploadBlock = await checkPermission("browser.web.upload", call, ctx, "Upload file via browser");
+  if (uploadBlock) return uploadBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1674,6 +1869,8 @@ async function handleBrowserGetMedia(
   args: BrowserGetMediaArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const mediaBlock = await checkPermission("browser.web.media_control", call, ctx, "Get media element state");
+  if (mediaBlock) return mediaBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1692,6 +1889,8 @@ async function handleBrowserControlMedia(
   args: BrowserControlMediaArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const mediaBlock = await checkPermission("browser.web.media_control", call, ctx, "Control media element");
+  if (mediaBlock) return mediaBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1710,6 +1909,8 @@ async function handleBrowserHandleDialog(
   args: BrowserHandleDialogArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const interactBlock = await checkPermission("browser.web.interact", call, ctx, "Handle browser dialog");
+  if (interactBlock) return interactBlock;
   const bm = await import('../browser/browser-manager.js');
   const ctrlResult = await bm.resolveAgentBrowserTarget(ctx.requestId, ctx.conversationId);
   if (!ctrlResult.ctrl) return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: 'BROWSER_ACCESS_DENIED', errorMessage: ctrlResult.errorMessage } };
@@ -1795,13 +1996,16 @@ async function handleStopProjectProcess(
 // ── Safe Git V1 handlers ────────────────────────────────────────────────────
 
 async function handleGitStatus(
+  call: ForgeToolCall,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const block = await checkPermission("git.read", call, ctx, "Read git status");
+  if (block) return block;
   const gitResult = await gitService.gitStatus(ctx.projectRoot, ctx.signal);
   if (!gitResult.ok) {
-    return { result: { callId: '', toolName: 'git_status', ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
   }
-  return { result: { callId: '', toolName: 'git_status', ok: true, data: gitResult.data } };
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: gitResult.data } };
 }
 
 async function handleGitDiff(
@@ -1809,6 +2013,8 @@ async function handleGitDiff(
   args: GitDiffArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const block = await checkPermission("git.diff", call, ctx, "Read git diff");
+  if (block) return block;
   const gitResult = await gitService.gitDiff(ctx.projectRoot, { ...(args.staged !== undefined ? { staged: args.staged } : {}), ...(args.paths !== undefined ? { paths: args.paths } : {}) }, ctx.signal);
   if (!gitResult.ok) {
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
@@ -1821,6 +2027,8 @@ async function handleGitLog(
   args: GitLogArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const block = await checkPermission("git.log", call, ctx, "Read git log");
+  if (block) return block;
   const gitResult = await gitService.gitLog(ctx.projectRoot, { ...(args.limit !== undefined ? { limit: args.limit } : {}), ...(args.path !== undefined ? { path: args.path } : {}) }, ctx.signal);
   if (!gitResult.ok) {
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
@@ -1833,6 +2041,8 @@ async function handleGitShow(
   args: GitShowArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const block = await checkPermission("git.show", call, ctx, "Read git commit details");
+  if (block) return block;
   const gitResult = await gitService.gitShow(ctx.projectRoot, args.revision, ctx.signal);
   if (!gitResult.ok) {
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
@@ -1841,13 +2051,16 @@ async function handleGitShow(
 }
 
 async function handleGitBranchInfo(
+  call: ForgeToolCall,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
+  const block = await checkPermission("git.read", call, ctx, "Read git branch info");
+  if (block) return block;
   const gitResult = await gitService.gitBranchInfo(ctx.projectRoot, ctx.signal);
   if (!gitResult.ok) {
-    return { result: { callId: '', toolName: 'git_branch_info', ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
+    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
   }
-  return { result: { callId: '', toolName: 'git_branch_info', ok: true, data: gitResult.data } };
+  return { result: { callId: call.callId, toolName: call.name, ok: true, data: gitResult.data } };
 }
 
 async function handleGitStage(
@@ -1855,13 +2068,8 @@ async function handleGitStage(
   args: GitStageArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
-  const permStage = resolvePermission({ capabilityId: "git.stage", projectId: ctx.projectId, conversationId: ctx.conversationId, requestId: ctx.requestId, agentRunId: ctx.requestId, toolCallId: call.callId });
-  if (permStage.decision === "DENY") {
-    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_DENIED", errorMessage: `git.stage denied by Permission Center (${permStage.source}: ${permStage.reason})` } };
-  }
-  if (permStage.decision === "ASK") {
-    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_REQUIRED", errorMessage: "git.stage requires user approval. Update Permission Center settings to allow this capability." } };
-  }
+  const stageBlock = await checkPermission("git.stage", call, ctx, "Stage files for commit");
+  if (stageBlock) return stageBlock;
   const gitResult = await gitService.gitStage(ctx.projectRoot, args.paths, ctx.signal);
   if (!gitResult.ok) {
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
@@ -1874,13 +2082,8 @@ async function handleGitUnstage(
   args: GitUnstageArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
-  const permUnstage = resolvePermission({ capabilityId: "git.unstage", projectId: ctx.projectId, conversationId: ctx.conversationId, requestId: ctx.requestId, agentRunId: ctx.requestId, toolCallId: call.callId });
-  if (permUnstage.decision === "DENY") {
-    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_DENIED", errorMessage: `git.unstage denied by Permission Center (${permUnstage.source}: ${permUnstage.reason})` } };
-  }
-  if (permUnstage.decision === "ASK") {
-    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_REQUIRED", errorMessage: "git.unstage requires user approval. Update Permission Center settings to allow this capability." } };
-  }
+  const unstageBlock = await checkPermission("git.unstage", call, ctx, "Unstage files");
+  if (unstageBlock) return unstageBlock;
   const gitResult = await gitService.gitUnstage(ctx.projectRoot, args.paths, ctx.signal);
   if (!gitResult.ok) {
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
@@ -1893,13 +2096,8 @@ async function handleGitCommit(
   args: GitCommitArgs,
   ctx: ToolExecutionContext,
 ): Promise<Omit<ToolExecutionResult, 'durationMs'>> {
-  const permCommit = resolvePermission({ capabilityId: "git.commit", projectId: ctx.projectId, conversationId: ctx.conversationId, requestId: ctx.requestId, agentRunId: ctx.requestId, toolCallId: call.callId });
-  if (permCommit.decision === "DENY") {
-    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_DENIED", errorMessage: `git.commit denied by Permission Center (${permCommit.source}: ${permCommit.reason})` } };
-  }
-  if (permCommit.decision === "ASK") {
-    return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: "PERMISSION_REQUIRED", errorMessage: "git.commit requires user approval. Update Permission Center settings to allow this capability." } };
-  }
+  const commitBlock = await checkPermission("git.commit", call, ctx, `Commit: ${args.message}`);
+  if (commitBlock) return commitBlock;
   const gitResult = await gitService.gitCommit(ctx.projectRoot, args.message, ctx.signal);
   if (!gitResult.ok) {
     return { result: { callId: call.callId, toolName: call.name, ok: false, errorCode: gitResult.errorCode ?? 'COMMAND_FAILED', errorMessage: gitResult.errorMessage ?? gitResult.summary } };
