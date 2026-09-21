@@ -951,8 +951,12 @@ export default function ChatScreen({
   );
 
   const handleRename = useCallback(async (id: string, title: string) => {
-    await window.forgeApi.updateConversation(id, { title });
-    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
+    try {
+      await window.forgeApi.updateConversation(id, { title });
+      setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
+    } catch {
+      // Rename failed — no state mutation needed (conversation retains old title)
+    }
   }, []);
 
   const handleDeleteRequest = useCallback((id: string) => { setDeleteConfirmId(id); }, []);
@@ -999,11 +1003,16 @@ export default function ChatScreen({
 
   const handleArchive = useCallback(
     async (id: string) => {
-      await window.forgeApi.updateConversation(id, { archivedAt: Date.now() });
-      const updated = await loadConversations();
-      if (activeConvId === id) {
-        if (updated.length > 0) setActiveConvId(updated[0]!.id);
-        else handleNewConversation();
+      try {
+        await window.forgeApi.updateConversation(id, { archivedAt: Date.now() });
+        const updated = await loadConversations();
+        if (activeConvId === id) {
+          if (updated.length > 0) setActiveConvId(updated[0]!.id);
+          else handleNewConversation();
+        }
+      } catch {
+        // Archive failed — reload to restore consistent sidebar state
+        void loadConversations();
       }
     },
     [activeConvId, loadConversations, handleNewConversation]
@@ -1011,15 +1020,19 @@ export default function ChatScreen({
 
   const handleExport = useCallback(
     async (id: string) => {
-      const conv = conversations.find((c) => c.id === id);
-      const markdown = await window.forgeApi.exportConversation(id);
-      const blob = new Blob([markdown], { type: "text/markdown" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${(conv?.title ?? "conversation").replace(/[^a-z0-9]/gi, "-")}.md`;
-      a.click();
-      URL.revokeObjectURL(url);
+      try {
+        const conv = conversations.find((c) => c.id === id);
+        const markdown = await window.forgeApi.exportConversation(id);
+        const blob = new Blob([markdown], { type: "text/markdown" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${(conv?.title ?? "conversation").replace(/[^a-z0-9]/gi, "-")}.md`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch {
+        // Export failed — nothing to clean up (no persistent state mutation was made)
+      }
     },
     [conversations]
   );
@@ -1276,11 +1289,6 @@ export default function ChatScreen({
       ...(stagedContextRefs && stagedContextRefs.length > 0 && { stagedContextRefs }),
     });
 
-    // Clear staged context after send
-    if (stagedContextRefs && stagedContextRefs.length > 0) {
-      onClearContext?.();
-    }
-
     if (res.error) {
       // Remove optimistic message and show error
       // For a brand-new draft conversation that failed on first send, roll back
@@ -1299,6 +1307,11 @@ export default function ChatScreen({
         });
       }
       return;
+    }
+
+    // Clear staged context refs only on success (not on error — user may retry with same context)
+    if (stagedContextRefs && stagedContextRefs.length > 0) {
+      onClearContext?.();
     }
 
     // Replace optimistic with persisted user message
