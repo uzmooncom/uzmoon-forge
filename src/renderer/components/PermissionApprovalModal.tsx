@@ -53,11 +53,14 @@ function categoryColor(category: string): string {
 interface PermissionApprovalModalProps {
   request: PermissionApprovalRequest;
   onRespond: (action: PermissionApprovalAction) => void;
+  /** Total number of pending approvals including this one */
+  queueLength?: number;
 }
 
 export function PermissionApprovalModal({
   request,
   onRespond,
+  queueLength = 1,
 }: PermissionApprovalModalProps): React.ReactElement {
   const category = capabilityCategory(request.capabilityId);
   const colorCls = categoryColor(category);
@@ -85,7 +88,14 @@ export function PermissionApprovalModal({
             <ShieldIcon size={16} />
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="text-sm font-semibold text-[#e8e8ec]">Permission Required</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-semibold text-[#e8e8ec]">Permission Required</h2>
+              {queueLength > 1 && (
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                  {queueLength} pending
+                </span>
+              )}
+            </div>
             <p className="text-[11px] text-[#7a7a85] mt-0.5">The agent is requesting access</p>
           </div>
           <button

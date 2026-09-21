@@ -620,7 +620,16 @@ export default function ChatScreen({
   const loadConversationsRef = useRef(loadConversations);
   useEffect(() => { loadConversationsRef.current = loadConversations; }, [loadConversations]);
 
-  useEffect(() => { void loadConversations(); }, [showArchived, loadConversations, projectId]);
+  useEffect(() => {
+    loadConversations().then((convs) => {
+      const cur = activeConvIdRef.current;
+      if (cur && !convs.find((c) => c.id === cur)) {
+        // Active conv is no longer visible (e.g. archived conv hidden after toggle)
+        if (convs.length > 0) setActiveConvId(convs[0]!.id);
+        else { setActiveConvId(null); setMessages([]); }
+      }
+    });
+  }, [showArchived, loadConversations, projectId]);
 
   const initializedRef = useRef(false);
   useEffect(() => {
@@ -635,13 +644,20 @@ export default function ChatScreen({
   // Load messages when conversation changes
   useEffect(() => {
     if (!activeConvId) { setMessages([]); return; }
-    window.forgeApi.getConversationMessages(activeConvId).then(setMessages);
+    // Capture convId so async callbacks can guard against stale-closure races
+    const convId = activeConvId;
+    window.forgeApi.getConversationMessages(convId).then((msgs) => {
+      // Only apply if still on the same conversation
+      if (activeConvIdRef.current !== convId) return;
+      setMessages(msgs);
+    });
     // Also fetch queue state for this conversation
-    window.forgeApi.getQueue(activeConvId).then((q) => {
+    window.forgeApi.getQueue(convId).then((q) => {
+      if (activeConvIdRef.current !== convId) return;
       if (q.items.length > 0 || q.paused) {
         setQueueMap((prev) => ({
           ...prev,
-          [activeConvId]: { conversationId: activeConvId, ...q },
+          [convId]: { conversationId: convId, ...q },
         }));
       }
     });
@@ -929,13 +945,18 @@ export default function ChatScreen({
     const id = deleteConfirmId;
     if (!id) return;
     setDeleteConfirmId(null);
+    // Cancel any active stream on this conv BEFORE deleting, to prevent orphan
+    // messages being inserted into messagesByConv after the conv record is gone.
+    if (streamingMap[id]) {
+      try { await window.forgeApi.cancelStream(id); } catch { /* best-effort */ }
+    }
     await window.forgeApi.deleteConversation(id);
     const updated = await loadConversations();
     if (activeConvId === id) {
       if (updated.length > 0) setActiveConvId(updated[0]!.id);
       else handleNewConversation();
     }
-  }, [deleteConfirmId, activeConvId, loadConversations, handleNewConversation]);
+  }, [deleteConfirmId, activeConvId, streamingMap, loadConversations, handleNewConversation]);
 
   const handlePin = useCallback(
     async (id: string) => {

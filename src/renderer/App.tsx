@@ -200,15 +200,21 @@ export default function App(): React.ReactElement {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [settingsConfig, setSettingsConfig] = useState<import("@shared/types.js").AgentConfig | null>(null);
   const [showDevPanel, setShowDevPanel] = useState(false);
-  const [pendingApproval, setPendingApproval] = useState<PermissionApprovalRequest | null>(null);
+  // Permission approval queue — FIFO so concurrent requests are never dropped
+  const [approvalQueue, setApprovalQueue] = useState<PermissionApprovalRequest[]>([]);
+  const pendingApproval = approvalQueue[0] ?? null;
 
   // Permission approval IPC — subscribe for the lifetime of the App
   useEffect(() => {
     const unsubRequest = window.forgeApi.permissions.onApprovalRequest((req) => {
-      setPendingApproval(req);
+      setApprovalQueue((prev) => {
+        // Don't enqueue a duplicate (same approvalId)
+        if (prev.some((r) => r.approvalId === req.approvalId)) return prev;
+        return [...prev, req];
+      });
     });
     const unsubCancelled = window.forgeApi.permissions.onApprovalCancelled((approvalId) => {
-      setPendingApproval((prev) => (prev?.approvalId === approvalId ? null : prev));
+      setApprovalQueue((prev) => prev.filter((r) => r.approvalId !== approvalId));
     });
     return () => { unsubRequest(); unsubCancelled(); };
   }, []);
@@ -216,7 +222,8 @@ export default function App(): React.ReactElement {
   const handleApprovalResponse = (action: PermissionApprovalAction): void => {
     if (!pendingApproval) return;
     void window.forgeApi.permissions.approvalRespond({ approvalId: pendingApproval.approvalId, action });
-    setPendingApproval(null);
+    // Dequeue the current approval — the next one (if any) will show automatically
+    setApprovalQueue((prev) => prev.filter((r) => r.approvalId !== pendingApproval.approvalId));
   };
 
   // V17: Cmd+Shift+D toggles the Dev Panel (development aid)
@@ -304,6 +311,7 @@ export default function App(): React.ReactElement {
         <PermissionApprovalModal
           request={pendingApproval}
           onRespond={handleApprovalResponse}
+          queueLength={approvalQueue.length}
         />
       )}
     </>
