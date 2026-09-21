@@ -825,9 +825,14 @@ const forgeApi = {
 
   // ── Task / Plan Runtime V1 ────────────────────────────────────────────────
   tasks: {
-    /** Whether task runtime is enabled (fast synchronous check via env-set flag) */
-    isEnabled: (): boolean =>
-      (window as unknown as { __forgeTasksEnabled?: boolean }).__forgeTasksEnabled === true,
+    /** Whether task runtime is enabled (fast synchronous check via env-set flag).
+     *  Reads process.env directly — the preload runs in the Node/Electron context
+     *  so process.env is available. window.__forgeTasksEnabled is only on the
+     *  renderer-side window and isn't accessible via contextBridge closures. */
+    isEnabled: (): boolean => {
+      const v = process.env["FORGE_TASKS_ENABLED"];
+      return v !== "0" && v !== "false";
+    },
 
     /** Get the active task snapshot for a conversation (null if none) */
     getActive: (convId: string): Promise<TaskRuntimeSnapshot | null> =>

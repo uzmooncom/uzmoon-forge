@@ -151,8 +151,9 @@ test.describe("Task Runtime V1 — Classification Smoke Tests", () => {
   });
 
   // ── 5: tasks.isEnabled() returns false without env var ────────────────
-  test("5: tasks.isEnabled() returns false without FORGE_TASKS_ENABLED", async () => {
-    const forge = await launchForge({ fakeProvider: true });
+  test("5: tasks.isEnabled() returns false with FORGE_TASKS_ENABLED=0", async () => {
+    // Tasks are enabled by default (opt-out). Explicitly set =0 to disable.
+    const forge = await launchForge({ fakeProvider: true, extraEnv: { FORGE_TASKS_ENABLED: "0" } });
     await forge.page.waitForLoadState("domcontentloaded");
     await forge.page.waitForTimeout(1000);
     try {
