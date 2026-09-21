@@ -336,7 +336,7 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
     (
       _e: IpcMainInvokeEvent,
       id: string,
-      patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt" | "defaultAgentProfileId">>
+      patch: db.ConversationPatch
     ): void => {
       db.updateConversation(database, id, patch);
     }

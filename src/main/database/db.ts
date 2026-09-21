@@ -538,17 +538,30 @@ export function createConversation(_db: true, conv: Conversation): void {
   persist();
 }
 
+export type ConversationPatch = Partial<Pick<Conversation, "title" | "updatedAt" | "defaultAgentProfileId">> & {
+  /** Set to a timestamp to pin; null to explicitly clear the pin */
+  pinnedAt?: number | null;
+  /** Set to a timestamp to archive; null to explicitly unarchive */
+  archivedAt?: number | null;
+};
+
 export function updateConversation(
   _db: true,
   id: string,
-  patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt" | "defaultAgentProfileId">>
+  patch: ConversationPatch
 ): void {
   const conv = store().conversations.find((c) => c.id === id);
   if (!conv) return;
   if (patch.title !== undefined) conv.title = patch.title;
   if (patch.updatedAt !== undefined) conv.updatedAt = patch.updatedAt;
-  if ("pinnedAt" in patch) conv.pinnedAt = patch.pinnedAt;
-  if ("archivedAt" in patch) conv.archivedAt = patch.archivedAt;
+  if ("pinnedAt" in patch) {
+    if (patch.pinnedAt == null) delete conv.pinnedAt;
+    else conv.pinnedAt = patch.pinnedAt;
+  }
+  if ("archivedAt" in patch) {
+    if (patch.archivedAt == null) delete conv.archivedAt;
+    else conv.archivedAt = patch.archivedAt;
+  }
   if ("defaultAgentProfileId" in patch) conv.defaultAgentProfileId = patch.defaultAgentProfileId;
   persist();
 }

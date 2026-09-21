@@ -942,7 +942,7 @@ export default function ChatScreen({
       const conv = conversations.find((c) => c.id === id);
       if (!conv) return;
       if (conv.pinnedAt) {
-        await window.forgeApi.updateConversation(id, {} as Parameters<typeof window.forgeApi.updateConversation>[1]);
+        await window.forgeApi.updateConversation(id, { pinnedAt: null });
         setConversations((prev) =>
           prev.map((c): Conversation => {
             if (c.id !== id) return c;

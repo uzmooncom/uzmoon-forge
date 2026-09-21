@@ -158,7 +158,10 @@ const forgeApi = {
 
   updateConversation: (
     id: string,
-    patch: Partial<Pick<Conversation, "title" | "updatedAt" | "pinnedAt" | "archivedAt" | "defaultAgentProfileId">>
+    patch: Partial<Pick<Conversation, "title" | "updatedAt" | "defaultAgentProfileId">> & {
+      pinnedAt?: number | null;
+      archivedAt?: number | null;
+    }
   ): Promise<void> => ipcRenderer.invoke(IPC.CONV_UPDATE, id, patch),
 
   deleteConversation: (id: string): Promise<void> =>
