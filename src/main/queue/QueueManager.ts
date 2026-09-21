@@ -909,7 +909,30 @@ export class QueueManager {
     void processPromise.finally(() => {
       _activeProcessingPromises.delete(processPromise);
     });
-    await processPromise;
+    try {
+      await processPromise;
+    } catch (unexpectedErr: unknown) {
+      // Safety net: processItem should handle all its own errors internally.
+      // If it throws anyway (e.g. DB error, unexpected exception in buildContextMessages),
+      // mark the item as failed so the queue is never permanently wedged.
+      forgeLogger.error("queue", "processItem.uncaughtError", {
+        conversationId: convId,
+        metadata: {
+          itemId: item.id,
+          err: unexpectedErr instanceof Error ? unexpectedErr.message : String(unexpectedErr),
+        },
+      });
+      try {
+        db.updateQueueItem(true, convId, item.id, {
+          status: "failed",
+          completedAt: Date.now(),
+          lastError: "Unexpected internal error. Please try again.",
+        });
+        db.setQueuePaused(true, convId, true);
+        this.pushQueueState(convId);
+      } catch { /* best-effort — DB might also be broken */ }
+      return;
+    }
 
     // After completion, try next (profile resolved fresh for next item)
     const next = db.nextQueuedItem(true, convId);

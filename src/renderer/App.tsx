@@ -146,6 +146,7 @@ function MainShell({ onOpenSettings }: MainShellProps) {
         <div className="flex-1 min-w-0 min-h-0 overflow-hidden">
           {activeProject ? (
             <ProjectWorkspace
+              key={activeProject.id}
               project={activeProject}
               onBack={handleBackToProjects}
               onOpenSettings={onOpenSettings}

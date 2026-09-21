@@ -1137,21 +1137,25 @@ export default function ChatScreen({
 
   const handleEditQueueItemSubmit = useCallback(async () => {
     if (!activeConvId || !editingQueueItemId || !input.trim()) return;
-    const ok = await window.forgeApi.editQueueItem(activeConvId, editingQueueItemId, input.trim());
-    if (ok) {
-      // Update displayed message immediately
-      setMessages((prev) => {
-        const qs = queueMap[activeConvId];
-        const item = qs?.items.find((i) => i.id === editingQueueItemId);
-        if (!item) return prev;
-        return prev.map((m) =>
-          m.id === item.messageId ? { ...m, content: input.trim() } : m
-        );
-      });
+    try {
+      const ok = await window.forgeApi.editQueueItem(activeConvId, editingQueueItemId, input.trim());
+      if (ok) {
+        // Update displayed message immediately
+        setMessages((prev) => {
+          const qs = queueMap[activeConvId];
+          const item = qs?.items.find((i) => i.id === editingQueueItemId);
+          if (!item) return prev;
+          return prev.map((m) =>
+            m.id === item.messageId ? { ...m, content: input.trim() } : m
+          );
+        });
+      }
+    } finally {
+      // Always exit edit mode — never leave the queue editor stuck open
+      setEditingQueueItemId(null);
+      setInput("");
+      setTimeout(() => textareaRef.current?.focus(), 30);
     }
-    setEditingQueueItemId(null);
-    setInput("");
-    setTimeout(() => textareaRef.current?.focus(), 30);
   }, [activeConvId, editingQueueItemId, input, queueMap]);
 
   // ══════════════════════════════════════════════════════════════════════
