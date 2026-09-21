@@ -795,6 +795,13 @@ export default function ChatScreen({
       streamConvMap.current.delete(streamId);
       if (!convId) return;
       setStreaming(null, convId);
+      // Always clear any waiting-for-human banner when a stream ends (stop/cancel/complete)
+      setWaitingForHumanMap((prev) => {
+        if (!prev[convId]) return prev;
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
       if (message) {
         if (convId === activeConvIdRef.current) {
           setMessages((prev) => {
@@ -819,6 +826,13 @@ export default function ChatScreen({
       streamConvMap.current.delete(streamId);
       if (!convId) return;
       setStreaming(null, convId);
+      // Clear any waiting-for-human banner when stream errors out
+      setWaitingForHumanMap((prev) => {
+        if (!prev[convId]) return prev;
+        const next = { ...prev };
+        delete next[convId];
+        return next;
+      });
       if (convId === activeConvIdRef.current) {
         setMessages((prev) => {
           if (prev.find((m) => m.id === message.id)) return prev;

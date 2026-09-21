@@ -2074,6 +2074,8 @@ Rules:
     const q = db.getConvQueue(true, convId);
     const item = q.items.find((i) => i.id === itemId);
     if (!item) return;
+    // Never retry a currently-processing item — would create two concurrent executions
+    if (item.status === "processing") return;
     const { lastError: _le, startedAt: _sa, completedAt: _ca, ...rest } = item;
     void _le; void _sa; void _ca;
     db.updateQueueItem(true, convId, itemId, { ...rest, status: "queued" });
@@ -2084,6 +2086,10 @@ Rules:
 
   /** Skip failed item */
   async skip(convId: string, itemId: string): Promise<void> {
+    const q = db.getConvQueue(true, convId);
+    const item = q.items.find((i) => i.id === itemId);
+    // Never skip a currently-processing item — cancellation goes through cancelStream instead
+    if (!item || item.status === "processing") return;
     db.updateQueueItem(true, convId, itemId, {
       status: "cancelled",
       completedAt: Date.now(),
