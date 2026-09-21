@@ -1239,7 +1239,8 @@ export default function ChatScreen({
     setMessages((prev) => [...prev, optimisticUserMsg]);
 
     // Set active conversation immediately for new drafts
-    if (!activeConvId) {
+    const wasNewConv = !activeConvId;
+    if (wasNewConv) {
       setActiveConvId(convId);
       draftConvId.current = randomId();
     }
@@ -1263,14 +1264,22 @@ export default function ChatScreen({
     }
 
     if (res.error) {
-      // Remove optimistic, show error
-      setMessages((prev) => {
-        const filtered = prev.filter((m) => m.id !== optimisticId);
-        return [...filtered, {
-          id: randomId(), conversationId: convId, role: "error" as const,
-          content: res.error!, createdAt: Date.now(), isError: true,
-        }];
-      });
+      // Remove optimistic message and show error
+      // For a brand-new draft conversation that failed on first send, roll back
+      // the active conversation so no ghost conversation is left in the sidebar.
+      if (wasNewConv) {
+        setActiveConvId(null);
+        draftConvId.current = convId; // restore original draft ID so retry works
+        setMessages([]);
+      } else {
+        setMessages((prev) => {
+          const filtered = prev.filter((m) => m.id !== optimisticId);
+          return [...filtered, {
+            id: randomId(), conversationId: convId, role: "error" as const,
+            content: res.error!, createdAt: Date.now(), isError: true,
+          }];
+        });
+      }
       return;
     }
 
