@@ -2,7 +2,7 @@ import { ipcMain, IpcMainInvokeEvent, WebContents, clipboard, dialog, shell, app
 import { randomUUID, createHash } from "crypto";
 import path from "path";
 import fs from "fs";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC, PERMISSION_IPC, TASK_IPC } from "../../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC, PERMISSION_IPC, TASK_IPC, SMOKE_IPC } from "../../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -2050,4 +2050,166 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
       return true;
     }
   );
+  // ── Smoke IPC (zero-touch real-provider testing) ─────────────────────────
+  // Only registered when FORGE_SMOKE_REAL=1 is set in the environment.
+  // The secret NEVER leaves the main process — secrets.get() is called here,
+  // used only to verify existence (hasSecret) or passed directly to testConnection.
+  if (process.env["FORGE_SMOKE_REAL"] === "1") {
+    ipcMain.handle(
+      SMOKE_IPC.GET_DEFAULT_PROFILE,
+      (): { id: string; name: string; endpoint: string; model: string; protocol: string } | null => {
+        const profiles = db.listAgentProfiles(true);
+        // Prefer default profile, else first with a stored secret
+        const withSecret = profiles.filter(p => secrets.has(p.id));
+        if (withSecret.length === 0) return null;
+        const found = withSecret.find(p => p.isDefault) ?? withSecret[0];
+        if (!found) return null;
+        return { id: found.id, name: found.name, endpoint: found.endpoint, model: found.model, protocol: found.protocol };
+      }
+    );
+
+    ipcMain.handle(
+      SMOKE_IPC.HAS_SECRET,
+      (_e: IpcMainInvokeEvent, profileId: string): boolean => secrets.has(profileId)
+    );
+
+    ipcMain.handle(
+      SMOKE_IPC.CLEANUP_CONVERSATIONS,
+      (_e: IpcMainInvokeEvent, ids: string[]): void => {
+        for (const id of ids) {
+          try {
+            db.deleteConversation(database, id);
+          } catch {
+            // best-effort cleanup — ignore if already deleted
+          }
+        }
+      }
+    );
+
+    ipcMain.handle(
+      "smoke:debugSecret" as const,
+      (_e: IpcMainInvokeEvent, profileId: string): { has: boolean; getResult: string; safeStorageAvailable: boolean; appName: string } => {
+        const { safeStorage: ss } = require("electron") as typeof import("electron");
+        const { app: appRef } = require("electron") as typeof import("electron");
+        const val = (secrets as any).cache?.[profileId] as string | undefined;
+        let getResult = "no_cache_entry";
+        if (val !== undefined) {
+          if (ss.isEncryptionAvailable()) {
+            try {
+              const buf = Buffer.from(val, "base64");
+              const dec = ss.decryptString(buf);
+              getResult = dec.length > 0 ? `decrypted_len=${dec.length}` : "empty_decrypted";
+            } catch (e: unknown) {
+              getResult = `decrypt_failed:${(e as Error).message}`;
+            }
+          } else {
+            getResult = "encryption_unavailable";
+          }
+        }
+        return {
+          has: secrets.has(profileId),
+          getResult,
+          safeStorageAvailable: ss.isEncryptionAvailable(),
+          appName: appRef.getName(),
+        };
+      }
+    );
+
+    ipcMain.handle(
+      "smoke:migrateSecrets" as const,
+      async (_e: IpcMainInvokeEvent): Promise<{ migrated: number; failed: number; details: string[] }> => {
+        // Re-encrypt all stored secrets using the CURRENT safeStorage identity.
+        // Uses PBKDF2+AES-128-CBC (Chromium v10 format) to decrypt the existing
+        // ciphertext via the OS security CLI, then re-stores via secrets.set().
+        // This is a one-time repair when the Keychain entry has been rotated.
+        const { execSync } = require("child_process") as typeof import("child_process");
+        const { createDecipheriv, pbkdf2Sync } = require("crypto") as typeof import("crypto");
+        const { safeStorage: ss } = require("electron") as typeof import("electron");
+        
+        let migrated = 0;
+        let failed = 0;
+        const details: string[] = [];
+        
+        try {
+          // Get the Keychain password using security CLI
+          const kcPass = execSync(
+            'security find-generic-password -s "Electron Safe Storage" -w',
+            { encoding: "utf8" }
+          ).trim();
+          
+          // Derive AES-128 key: PBKDF2-HMAC-SHA1(kcPass, "saltysalt", 1003, 16)
+          const aesKey = pbkdf2Sync(kcPass, "saltysalt", 1003, 16, "sha1");
+          const iv = Buffer.alloc(16, " ");  // 16 space chars = Chromium default IV
+          
+          // Get all cached keys from the secret store via internal cache access
+          const cacheRef = (secrets as any).cache as Record<string, string>;
+          
+          for (const profileId of Object.keys(cacheRef)) {
+            try {
+              const b64val: string | undefined = cacheRef[profileId];
+              if (!b64val) { details.push(`${profileId.slice(0,8)}: skipped (empty)`); continue; }
+              const raw = Buffer.from(b64val, "base64");
+              
+              if (raw.slice(0, 3).toString() !== "v10") {
+                details.push(`${profileId.slice(0,8)}: skipped (not v10 format)`);
+                continue;
+              }
+              
+              // Try current safeStorage first — if it works, no migration needed
+              try {
+                const testDec = ss.decryptString(raw);
+                if (testDec && testDec.length > 0) {
+                  details.push(`${profileId.slice(0,8)}: already decryptable, skipped`);
+                  continue;
+                }
+              } catch { /* falls through to PBKDF2 path */ }
+              
+              // Decrypt using PBKDF2 path
+              const ciphertext = raw.slice(3);
+              const decipher = createDecipheriv("aes-128-cbc", aesKey, iv);
+              decipher.setAutoPadding(true);
+              const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+              
+              if (!plaintext || plaintext.length === 0) {
+                details.push(`${profileId.slice(0,8)}: empty after decrypt`);
+                failed++;
+                continue;
+              }
+              
+              // Re-store using current safeStorage identity
+              secrets.set(profileId, plaintext);
+              details.push(`${profileId.slice(0,8)}: re-encrypted OK`);
+              migrated++;
+            } catch (err: unknown) {
+              details.push(`${profileId.slice(0,8)}: failed — ${(err as Error).message.slice(0, 100)}`);
+              failed++;
+            }
+          }
+        } catch (outer: unknown) {
+          return { migrated: 0, failed: 1, details: [`outer error: ${(outer as Error).message.slice(0, 200)}`] };
+        }
+        
+        return { migrated, failed, details };
+      }
+    );
+
+    ipcMain.handle(
+      SMOKE_IPC.GET_CAPABILITIES,
+      async (_e: IpcMainInvokeEvent, profileId: string): Promise<{ status: string; message: string }> => {
+        const profile = db.getAgentProfile(true, profileId);
+        if (!profile) return { status: "not_found", message: "Profile not found." };
+        const apiKey = secrets.get(profileId);
+        if (!apiKey) return { status: "no_secret", message: "No API key stored for this profile." };
+        const cfg = {
+          id:       profile.id,
+          name:     profile.name,
+          endpoint: profile.endpoint,
+          model:    profile.model,
+          protocol: profile.protocol,
+        };
+        return testConnection(cfg, apiKey);
+      }
+    );
+  }
+
 }

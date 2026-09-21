@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC, PERMISSION_IPC, TASK_IPC } from "../shared/types.js";
+import { IPC, PROJECT_FILE_IPC, EDIT_IPC, AGENT_TOOL_IPC, RELIABILITY_IPC, SETTINGS_IPC, COMMAND_IPC, BROWSER_IPC, DEV_PROCESS_IPC, TELEMETRY_IPC, DEV_PANEL_IPC, PERMISSION_IPC, TASK_IPC, SMOKE_IPC } from "../shared/types.js";
 import type {
   AgentConfig,
   AgentProfile,
@@ -910,6 +910,39 @@ const forgeApi = {
       return () => ipcRenderer.removeListener(TASK_IPC.STEP_UPDATED, listener);
     },
   },
+  // ── Smoke (zero-touch real-provider testing) ─────────────────────────────
+  // Only useful when FORGE_SMOKE_REAL=1 is set; handlers are no-ops otherwise.
+  smoke: {
+    /** Get the default profile metadata (no secret). Returns null if no profile with stored secret. */
+    getDefaultProfile: (): Promise<{ id: string; name: string; endpoint: string; model: string; protocol: string } | null> =>
+      ipcRenderer.invoke(SMOKE_IPC.GET_DEFAULT_PROFILE),
+
+    /** Return true if a secret is stored for this profileId — never exposes the value. */
+    hasSecret: (profileId: string): Promise<boolean> =>
+      ipcRenderer.invoke(SMOKE_IPC.HAS_SECRET, profileId),
+
+    /** Delete smoke test conversations from the DB (cleanup). */
+    cleanupConversations: (ids: string[]): Promise<void> =>
+      ipcRenderer.invoke(SMOKE_IPC.CLEANUP_CONVERSATIONS, ids),
+
+    /** Test provider connectivity for a profileId; returns ConnectionTestResult shape. */
+    getCapabilities: (profileId: string): Promise<{ status: string; message: string }> =>
+      ipcRenderer.invoke(SMOKE_IPC.GET_CAPABILITIES, profileId),
+
+    /** Debug: returns safeStorage state inside main process (no secret exposed). */
+    debugSecret: (profileId: string): Promise<{ has: boolean; getResult: string; safeStorageAvailable: boolean; appName: string } | null> =>
+      ipcRenderer.invoke("smoke:debugSecret" as any, profileId).catch(() => null),
+
+    /**
+     * Re-encrypt all stored secrets using the current safeStorage identity.
+     * Call this once when smoke tests find that stored secrets cannot be decrypted
+     * by the current Electron binary (e.g. after Keychain rotation).
+     * Never exposes the plaintext secret to the renderer.
+     */
+    migrateSecrets: (): Promise<{ migrated: number; failed: number; details: string[] }> =>
+      ipcRenderer.invoke("smoke:migrateSecrets" as any),
+  },
+
 };
 
 contextBridge.exposeInMainWorld("forgeApi", forgeApi);

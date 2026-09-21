@@ -17,7 +17,8 @@
     "test": "vitest run",
     "start": "electron dist/main/main/main.js",
     "package": "pnpm build && electron-builder",
-    "electron:rebuild": "electron-rebuild --version $(node_modules/.bin/electron --version | sed s/v//) --module-dir node_modules/.pnpm/better-sqlite3@11.10.0/node_modules/better-sqlite3 2>/dev/null || true"
+    "electron:rebuild": "electron-rebuild --version $(node_modules/.bin/electron --version | sed s/v//) --module-dir node_modules/.pnpm/better-sqlite3@11.10.0/node_modules/better-sqlite3 2>/dev/null || true",
+    "qa:real-provider": "FORGE_SMOKE_REAL=1 playwright test e2e/real-provider-smoke.spec.ts"
   },
   "dependencies": {
     "diff": "^9.0.0",

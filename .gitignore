@@ -7,4 +7,4 @@ dist/
 pnpm-approved-builds.yaml
 
 # OS
-Thumbs.db
+Thumbs.dbtest-results/

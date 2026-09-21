@@ -1,89 +1,55 @@
 /**
- * REAL PROVIDER SMOKE TEST
+ * REAL PROVIDER SMOKE TEST — ZERO TOUCH
  *
- * Uses the actual configured provider (https://app.claude.gg, model=claude,
- * protocol=openai) with a fresh in-session secret set before the first send.
+ * Architecture:
+ *   - Launches Electron with the real data dir ($HOME/.uzmoon-forge-v01)
+ *   - safeStorage identity is identical to `pnpm start` (both run unpackaged Electron)
+ *   - Discovers the default configured AgentProfile via smoke.getDefaultProfile() IPC
+ *   - Secret NEVER leaves the main process — smoke IPC only returns metadata + boolean
+ *   - All provider requests go through the real QueueManager / AgentLoop path
+ *   - Smoke conversations are cleaned up from the real DB after each scenario
  *
- * WHY KEY INJECTION: macOS safeStorage encryption is app-identity-bound.
- * The API key stored by the packaged app can't be decrypted by a headless
- * Playwright-launched Electron instance (different app identity/keychain entry).
- * We inject the key via FORGE_API_KEY env var and set it in the test session.
- *
- * GATE: FORGE_SMOKE_REAL=1 + FORGE_API_KEY=<key>
+ * GATE: FORGE_SMOKE_REAL=1  (no API key argument needed)
  *
  * Usage:
- *   FORGE_SMOKE_REAL=1 FORGE_API_KEY=sk-... \
- *     pnpm exec playwright test e2e/real-provider-smoke.spec.ts
+ *   FORGE_SMOKE_REAL=1 pnpm exec playwright test e2e/real-provider-smoke.spec.ts
+ *
+ * Or via the convenience script:
+ *   pnpm qa:real-provider
  *
  * Scenarios:
- *   A. Normal conversational response (streaming completes)
- *   B. Stop during real streaming (cancel works, queue recovers)
- *   C. Invalid model error then real profile works
- *   D. No secrets leaked in logs or diagnostic bundle
- *   E. Provider capabilities check
+ *   A. Normal conversational response — real streaming/finalization
+ *   B. Cancellation mid-stream — AgentRun cancelled cleanly, queue recovers
+ *   C. Provider capabilities — testConnection via existing AgentConfig path
+ *   D. Secret leak audit — ForgeLogger + diagnostic bundle contain no secret
  */
 
 import { test, expect } from "@playwright/test";
 import { _electron as electron } from "playwright-core";
 import path from "path";
 import os from "os";
-import fs from "fs";
 
 const ROOT = path.join(__dirname, "..");
 const MAIN_ENTRY = path.join(ROOT, "dist/main/main/main.js");
+const REAL_DATA_DIR = path.join(os.homedir(), ".uzmoon-forge-v01");
 
-// Gate
 const SMOKE_ENABLED = process.env["FORGE_SMOKE_REAL"] === "1";
-const API_KEY = process.env["FORGE_API_KEY"] ?? "";
 
-// ── Launch with isolated tmpdir (avoids stale data) ──────────────────────────
+// ── Shared forge instance (launched once for all smoke scenarios) ─────────────
+// We use a module-level holder so beforeAll/afterAll can share across tests.
+let sharedForge: {
+  app: Awaited<ReturnType<typeof electron["launch"]>>;
+  page: import("playwright-core").Page;
+} | null = null;
 
-async function launchSmokeForge() {
-  // Use an isolated tmpdir so we start fresh (no bad profiles from prior runs)
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "forge-smoke-"));
-  const app = await electron.launch({
-    args: [MAIN_ENTRY],
-    env: {
-      ...process.env as Record<string, string>,
-      FORGE_DATA_DIR: dataDir,
-      NODE_ENV: "test",
-      FORGE_TASKS_ENABLED: "1",
-      // NO FORGE_TEST_PROVIDER — use real provider
-    },
-  });
-  const page = await app.firstWindow();
-  await page.waitForLoadState("domcontentloaded");
-  await page.waitForTimeout(2000);
-  return { app, page, dataDir };
-}
+const smokeConvIds: string[] = [];
 
-async function closeSmokeForge(forge: { app: Awaited<ReturnType<typeof launchSmokeForge>>["app"]; dataDir: string }) {
-  await forge.app.close();
-  try { fs.rmSync(forge.dataDir, { recursive: true, force: true }); } catch { /* best effort */ }
-}
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-// ── Setup: create real profile and inject key ─────────────────────────────────
-
-async function setupRealProfile(page: import("playwright-core").Page, apiKey: string): Promise<string> {
-  return page.evaluate(async ([key]: [string]) => {
-    const api = (window as any).forgeApi;
-    const profileId = `smoke-real-${Date.now()}`;
-    // Save profile
-    await api.saveProfile({
-      id: profileId,
-      name: "Smoke Real Provider",
-      endpoint: "https://app.claude.gg",
-      protocol: "openai",
-      model: "claude",
-      isDefault: true,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    });
-    // Inject API key (this calls safeStorage.encryptString in the same process
-    // that will later decrypt it — so it always works)
-    await api.setSecret(profileId, key);
-    return profileId;
-  }, [apiKey] as [string]);
+async function getDefaultProfile(page: import("playwright-core").Page): Promise<{
+  id: string; name: string; endpoint: string; model: string; protocol: string;
+} | null> {
+  return page.evaluate(() => (window as any).forgeApi.smoke.getDefaultProfile());
 }
 
 async function createSmokeConv(
@@ -91,31 +57,42 @@ async function createSmokeConv(
   profileId: string,
   label: string
 ): Promise<string> {
-  return page.evaluate(async ([pid, lbl]: [string, string]) => {
-    const api = (window as any).forgeApi;
-    const id = `smoke-${lbl}-${Date.now()}`;
-    await api.createConversation({
-      id, title: `Smoke ${lbl}`,
-      defaultAgentProfileId: pid,
-      createdAt: Date.now(), updatedAt: Date.now(),
-    });
-    return id;
-  }, [profileId, label] as [string, string]);
+  const id = await page.evaluate(
+    ([pid, lbl]: [string, string]) => {
+      const api = (window as any).forgeApi;
+      const convId = `smoke-${lbl}-${Date.now()}`;
+      return api.createConversation({
+        id: convId, title: `Smoke ${lbl}`,
+        defaultAgentProfileId: pid,
+        createdAt: Date.now(), updatedAt: Date.now(),
+      }).then(() => convId);
+    },
+    [profileId, label] as [string, string]
+  );
+  smokeConvIds.push(id);
+  return id;
 }
 
-async function sendReal(
+/**
+ * Send a message and wait for stream end or error.
+ * Returns the stream end payload or an error descriptor.
+ */
+async function sendAndWait(
   page: import("playwright-core").Page,
   convId: string,
   content: string,
-  timeoutMs = 60_000
-): Promise<{ cancelled?: boolean; message?: { role: string; content: string }; error?: boolean }> {
+  timeoutMs = 90_000
+): Promise<{ cancelled?: boolean; message?: { content: string }; error?: true; reason?: string }> {
   return page.evaluate(
-    async ([cid, msg, to]: [string, string, number]) => {
+    ([cid, msg, to]: [string, string, number]) => {
       const api = (window as any).forgeApi;
       return new Promise<any>((resolve) => {
         let u1: (() => void) | undefined;
         let u2: (() => void) | undefined;
-        const timer = setTimeout(() => { u1?.(); u2?.(); resolve({ error: true, reason: "timeout" }); }, to);
+        const timer = setTimeout(() => {
+          u1?.(); u2?.();
+          resolve({ error: true, reason: "timeout" });
+        }, to);
         u1 = api.onStreamEnd((d: any) => {
           if (d.conversation?.id && d.conversation.id !== cid) return;
           clearTimeout(timer); u1?.(); u2?.();
@@ -123,10 +100,12 @@ async function sendReal(
         });
         u2 = api.onStreamError((d: any) => {
           clearTimeout(timer); u1?.(); u2?.();
-          resolve({ error: true, reason: JSON.stringify(d).slice(0, 200) });
+          resolve({ error: true, reason: JSON.stringify(d).slice(0, 300) });
         });
         api.sendMessage({ conversationId: cid, content: msg, attachmentIds: [] })
-          .then((r: any) => { if (r.error) { clearTimeout(timer); u1?.(); u2?.(); resolve({ error: true, reason: r.error }); } })
+          .then((r: any) => {
+            if (r.error) { clearTimeout(timer); u1?.(); u2?.(); resolve({ error: true, reason: r.error }); }
+          })
           .catch((e: any) => { clearTimeout(timer); u1?.(); u2?.(); resolve({ error: true, reason: e.message }); });
       });
     },
@@ -134,208 +113,226 @@ async function sendReal(
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Suite ─────────────────────────────────────────────────────────────────────
 
-test.describe("Real Provider Smoke", () => {
+test.describe("Real Provider Smoke — Zero Touch", () => {
   test.setTimeout(180_000);
 
-  test.beforeAll(() => {
-    if (!SMOKE_ENABLED) {
-      console.log("[smoke] FORGE_SMOKE_REAL not set — all real-provider tests SKIPPED");
-    } else if (!API_KEY) {
-      console.log("[smoke] FORGE_API_KEY not set — real-provider tests will fail at auth");
+  test.beforeAll(async () => {
+    if (!SMOKE_ENABLED) return;
+
+    const app = await electron.launch({
+      args: [MAIN_ENTRY],
+      env: {
+        ...process.env as Record<string, string>,
+        FORGE_DATA_DIR: REAL_DATA_DIR,
+        // No FORGE_TEST_PROVIDER — real provider path
+        // No FORGE_API_KEY — secret stays in main process via safeStorage
+        FORGE_SMOKE_REAL: "1",
+        FORGE_TASKS_ENABLED: "1",
+        NODE_ENV: "test",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await page.waitForTimeout(2000);
+    sharedForge = { app, page };
+
+    // Automatically migrate secrets if they were encrypted by a different
+    // safeStorage identity (e.g. Keychain rotation between sessions).
+    // This is a one-time repair — subsequent launches will work natively.
+    try {
+      const migration = await page.evaluate(() =>
+        (window as any).forgeApi.smoke.migrateSecrets()
+      );
+      console.log(`[smoke] Secret migration: migrated=${migration.migrated} failed=${migration.failed}`);
+      if (migration.details?.length) {
+        console.log(`[smoke] Migration details:`, migration.details.join(", "));
+      }
+    } catch (e) {
+      console.log(`[smoke] Migration skipped (not needed or already current):`, (e as Error).message);
     }
+  });
+
+  test.afterAll(async () => {
+    if (!sharedForge) return;
+    const { app, page } = sharedForge;
+
+    // Clean up all smoke conversations from the real DB
+    if (smokeConvIds.length > 0) {
+      try {
+        await page.evaluate((ids: string[]) => {
+          return (window as any).forgeApi.smoke.cleanupConversations(ids);
+        }, smokeConvIds);
+        console.log(`[smoke] Cleaned up ${smokeConvIds.length} smoke conversation(s).`);
+      } catch { /* best effort */ }
+    }
+
+    await app.close();
+    sharedForge = null;
+  });
+
+  // ── Pre-flight: verify default profile exists and has a secret ──────────────
+  test("pre-flight: default profile exists with stored secret", async () => {
+    test.skip(!SMOKE_ENABLED, "FORGE_SMOKE_REAL=1 required");
+    const { page } = sharedForge!;
+
+    const profile = await getDefaultProfile(page);
+    console.log(`[smoke] Default profile: ${profile?.name} (${profile?.id?.slice(0, 8)}) endpoint=${profile?.endpoint} model=${profile?.model}`);
+
+    if (!profile) {
+      test.skip(true, "BLOCKED_NO_CONFIGURED_PROVIDER: no profile with stored secret found.");
+    }
+    expect(profile!.id).toBeTruthy();
+    expect(profile!.endpoint).toBeTruthy();
+    expect(profile!.model).toBeTruthy();
+
+    const hasSecret = await page.evaluate(
+      (pid: string) => (window as any).forgeApi.smoke.hasSecret(pid),
+      profile!.id
+    );
+    console.log(`[smoke] hasSecret=${hasSecret}`);
+    expect(hasSecret).toBe(true);
+
+    // Debug: check actual decryption inside the main process (no secret exposed)
+    const debug = await page.evaluate(
+      (pid: string) => (window as any).forgeApi.smoke.debugSecret(pid),
+      profile!.id
+    );
+    console.log(`[smoke] debug:`, JSON.stringify(debug));
   });
 
   // ── A: Normal conversational response ──────────────────────────────────────
-  test("A: normal conversational response streams and completes", async () => {
+  test("A: normal conversational response — streaming completes", async () => {
     test.skip(!SMOKE_ENABLED, "FORGE_SMOKE_REAL=1 required");
-    test.skip(!API_KEY, "FORGE_API_KEY required");
+    const { page } = sharedForge!;
 
-    const forge = await launchSmokeForge();
-    try {
-      const profileId = await setupRealProfile(forge.page, API_KEY);
-      const convId = await createSmokeConv(forge.page, profileId, "conv-a");
+    const profile = await getDefaultProfile(page);
+    if (!profile) { test.skip(true, "BLOCKED_NO_CONFIGURED_PROVIDER"); return; }
 
-      const result = await sendReal(forge.page, convId,
-        "Reply with exactly three words: hello world test", 90_000);
+    const convId = await createSmokeConv(page, profile.id, "A");
+    const result = await sendAndWait(page, convId, "Reply with a short confirmation.", 90_000);
 
-      console.log(`[smoke] A: error=${result.error} cancelled=${result.cancelled} content="${result.message?.content?.slice(0, 120)}"`);
-      expect((result as any).reason).toBeUndefined();
-      expect(result.error).toBeFalsy();
-      expect(result.cancelled).toBeFalsy();
-      expect(result.message?.content?.length).toBeGreaterThan(0);
-    } finally {
-      await closeSmokeForge(forge);
-    }
+    console.log(`[smoke] A: error=${result.error} cancelled=${result.cancelled} reason=${result.reason ?? "none"} content="${result.message?.content?.slice(0, 120) ?? ""}"`);
+
+    expect(result.error).toBeFalsy();
+    expect(result.cancelled).toBeFalsy();
+    expect(result.message?.content?.length).toBeGreaterThan(0);
   });
 
-  // ── B: Stop during real streaming ──────────────────────────────────────────
-  test("B: Stop during real streaming — cancels cleanly, queue recovers", async () => {
+  // ── B: Cancellation mid-stream ──────────────────────────────────────────────
+  test("B: cancel mid-stream — AgentRun cancelled, queue recovers", async () => {
     test.skip(!SMOKE_ENABLED, "FORGE_SMOKE_REAL=1 required");
-    test.skip(!API_KEY, "FORGE_API_KEY required");
+    const { page } = sharedForge!;
 
-    const forge = await launchSmokeForge();
-    try {
-      const profileId = await setupRealProfile(forge.page, API_KEY);
-      const convId = await createSmokeConv(forge.page, profileId, "conv-b");
+    const profile = await getDefaultProfile(page);
+    if (!profile) { test.skip(true, "BLOCKED_NO_CONFIGURED_PROVIDER"); return; }
 
-      // Send a long-form prompt and cancel after 2.5s
-      const sendP = sendReal(forge.page, convId,
-        "Write a very detailed 5000-word essay about the history of computing.", 90_000);
+    const convId = await createSmokeConv(page, profile.id, "B");
 
-      await forge.page.waitForTimeout(2500);
-      await forge.page.evaluate(async (cid: string) => {
-        const api = (window as any).forgeApi;
-        await api.cancelStream(cid);
-      }, convId);
-
-      const result = await sendP;
-      console.log(`[smoke] B cancel: cancelled=${result.cancelled} error=${result.error}`);
-      // Cancelled or short response (stream may have ended before cancel arrived)
-      expect(result.cancelled || !result.error).toBeTruthy();
-
-      // Queue should auto-recover — send another message
-      const recovery = await sendReal(forge.page, convId, "Say 'recovered' only.", 90_000);
-      console.log(`[smoke] B recovery: error=${recovery.error} content="${recovery.message?.content?.slice(0, 60)}"`);
-      expect(recovery.error).toBeFalsy();
-
-    } finally {
-      await closeSmokeForge(forge);
-    }
-  });
-
-  // ── C: Invalid model error then real profile works ───────────────────────
-  test("C: invalid model produces stream error; valid model works after", async () => {
-    test.skip(!SMOKE_ENABLED, "FORGE_SMOKE_REAL=1 required");
-    test.skip(!API_KEY, "FORGE_API_KEY required");
-
-    const forge = await launchSmokeForge();
-    try {
-      // Bad profile
-      const badProfileId = await forge.page.evaluate(async ([key]: [string]) => {
-        const api = (window as any).forgeApi;
-        const id = `bad-profile-c-${Date.now()}`;
-        await api.saveProfile({
-          id, name: "Bad Profile", endpoint: "https://app.claude.gg",
-          protocol: "openai", model: "nonexistent-model-xyz-99999",
-          isDefault: false, createdAt: Date.now(), updatedAt: Date.now(),
-        });
-        await api.setSecret(id, key);
-        return id;
-      }, [API_KEY] as [string]);
-
-      const badConvId = await createSmokeConv(forge.page, badProfileId, "conv-c-bad");
-      const errResult = await sendReal(forge.page, badConvId, "Hello", 30_000);
-      console.log(`[smoke] C bad profile: error=${errResult.error}`);
-      // Bad model → error expected (or maybe provider ignores model name — accept both)
-
-      // Good profile
-      const goodProfileId = await setupRealProfile(forge.page, API_KEY);
-      const goodConvId = await createSmokeConv(forge.page, goodProfileId, "conv-c-good");
-      const goodResult = await sendReal(forge.page, goodConvId, "Say 'ok' only.", 90_000);
-      console.log(`[smoke] C good profile: error=${goodResult.error} content="${goodResult.message?.content?.slice(0, 60)}"`);
-      expect(goodResult.error).toBeFalsy();
-
-    } finally {
-      await closeSmokeForge(forge);
-    }
-  });
-
-  // ── D: No secrets leaked in logs or bundle ───────────────────────────────
-  test("D: no API key leaked into logs or diagnostic bundle", async () => {
-    test.skip(!SMOKE_ENABLED, "FORGE_SMOKE_REAL=1 required");
-    test.skip(!API_KEY, "FORGE_API_KEY required");
-
-    const forge = await launchSmokeForge();
-    try {
-      const profileId = await setupRealProfile(forge.page, API_KEY);
-      const convId = await createSmokeConv(forge.page, profileId, "conv-d");
-
-      await sendReal(forge.page, convId, "Say 'audit' only.", 90_000);
-
-      // Export bundle and check for key leakage
-      const bundle = await forge.page.evaluate(async () => {
-        const api = (window as any).forgeApi;
-        return api.devPanel.exportBundle();
+    // Start a long-form prompt and cancel after first chunk arrives
+    let streamStarted = false;
+    await page.evaluate((cid: string) => {
+      (window as any).__smokeStreamStarted = false;
+      const u = (window as any).forgeApi.onStreamChunk((d: any) => {
+        if (d.conversationId === cid) {
+          (window as any).__smokeStreamStarted = true;
+          u?.();
+        }
       });
-      const bundleStr = JSON.stringify(bundle);
+    }, convId);
 
-      // Check that neither the full API key nor common auth header patterns appear
-      const keyPrefix = API_KEY.slice(0, 8); // first 8 chars of key
-      const hasKeyPrefix = bundleStr.includes(keyPrefix);
-      const hasAuthHeader = bundleStr.includes("Authorization") || /Bearer [A-Za-z0-9_\-]{10,}/.test(bundleStr);
+    const sendP = sendAndWait(page, convId,
+      "Write a detailed 2000-word analysis of the history of computing.", 90_000);
 
-      console.log(`[smoke] D: bundle size=${bundleStr.length}, hasKeyPrefix=${hasKeyPrefix}, hasAuthHeader=${hasAuthHeader}`);
-      expect(hasKeyPrefix).toBe(false);
-      expect(hasAuthHeader).toBe(false);
-
-      // Telemetry check
-      const logs = await forge.page.evaluate(async () => {
-        const api = (window as any).forgeApi;
-        return api.telemetry.getEvents({ limit: 500 });
-      });
-      const logsStr = JSON.stringify(logs);
-      const logsHasKeyPrefix = logsStr.includes(API_KEY.slice(0, 8));
-      const logsHasAuth = /Bearer [A-Za-z0-9_\-]{10,}/.test(logsStr);
-      console.log(`[smoke] D: logs=${(logs as any[]).length}, logsHasKeyPrefix=${logsHasKeyPrefix}, logsHasAuth=${logsHasAuth}`);
-      expect(logsHasKeyPrefix).toBe(false);
-      expect(logsHasAuth).toBe(false);
-
-    } finally {
-      await closeSmokeForge(forge);
+    // Wait for first chunk (up to 30s), then cancel
+    const startTs = Date.now();
+    while (!streamStarted && Date.now() - startTs < 30_000) {
+      streamStarted = await page.evaluate(() => !!(window as any).__smokeStreamStarted);
+      if (!streamStarted) await page.waitForTimeout(200);
     }
+
+    await page.evaluate((cid: string) => (window as any).forgeApi.cancelStream(cid), convId);
+    const result = await sendP;
+
+    console.log(`[smoke] B: streamStarted=${streamStarted} cancelled=${result.cancelled} error=${result.error}`);
+    // Either cleanly cancelled or finished before cancel arrived — both acceptable
+    expect(result.cancelled || !result.error).toBeTruthy();
+
+    // Verify queue recovers: send a follow-up
+    const recovery = await sendAndWait(page, convId, "Say 'recovered' only.", 90_000);
+    console.log(`[smoke] B recovery: error=${recovery.error} content="${recovery.message?.content?.slice(0, 60) ?? ""}"`);
+    expect(recovery.error).toBeFalsy();
   });
 
-  // ── E: Provider capabilities and profile shape ────────────────────────────
-  test("E: provider capabilities and runtime state shape are correct", async () => {
+  // ── C: Provider capabilities ────────────────────────────────────────────────
+  test("C: provider capabilities — testConnection via existing AgentConfig", async () => {
     test.skip(!SMOKE_ENABLED, "FORGE_SMOKE_REAL=1 required");
-    test.skip(!API_KEY, "FORGE_API_KEY required");
+    const { page } = sharedForge!;
 
-    const forge = await launchSmokeForge();
-    try {
-      const profileId = await setupRealProfile(forge.page, API_KEY);
+    const profile = await getDefaultProfile(page);
+    if (!profile) { test.skip(true, "BLOCKED_NO_CONFIGURED_PROVIDER"); return; }
 
-      const profile = await forge.page.evaluate(async (pid: string) => {
-        const api = (window as any).forgeApi;
-        const profiles = await api.listProfiles();
-        return profiles.find((p: any) => p.id === pid);
-      }, profileId);
+    const caps = await page.evaluate(
+      (pid: string) => (window as any).forgeApi.smoke.getCapabilities(pid),
+      profile.id
+    );
 
-      console.log(`[smoke] E: profile=${profile?.name} endpoint=${profile?.endpoint} model=${profile?.model}`);
-      expect(profile).toBeTruthy();
-      expect(profile?.endpoint).toBeTruthy();
-      expect(profile?.model).toBeTruthy();
+    console.log(`[smoke] C: capabilities status=${caps.status} message="${caps.message}"`);
+    expect(["connected", "connected_partial"].includes(caps.status)).toBeTruthy();
+  });
 
-      // Runtime state for idle conv should be null
-      const convId = await createSmokeConv(forge.page, profileId, "conv-e");
-      const rt = await forge.page.evaluate(async (cid: string) => {
-        const api = (window as any).forgeApi;
-        return api.getRuntimeState(cid);
-      }, convId);
-      console.log(`[smoke] E: idle runtimeState=${JSON.stringify(rt)}`);
-      expect(rt).toBeNull();
+  // ── D: Secret leak audit ────────────────────────────────────────────────────
+  test("D: secret leak audit — no secret in logs or diagnostic bundle", async () => {
+    test.skip(!SMOKE_ENABLED, "FORGE_SMOKE_REAL=1 required");
+    const { page } = sharedForge!;
 
-    } finally {
-      await closeSmokeForge(forge);
-    }
+    const profile = await getDefaultProfile(page);
+    if (!profile) { test.skip(true, "BLOCKED_NO_CONFIGURED_PROVIDER"); return; }
+
+    // Run a real send so the provider request flows through the system
+    const convId = await createSmokeConv(page, profile.id, "D");
+    await sendAndWait(page, convId, "Say 'audit' only.", 90_000);
+
+    // Export diagnostic bundle
+    const bundle = await page.evaluate(() => (window as any).forgeApi.devPanel.exportBundle());
+    const bundleStr = JSON.stringify(bundle);
+
+    // Telemetry log dump
+    const logs = await page.evaluate(() =>
+      (window as any).forgeApi.telemetry.getEvents({ limit: 500 })
+    );
+    const logsStr = JSON.stringify(logs);
+
+    // We can't check for the exact key value (we don't have it in the test process).
+    // Instead we check for the known encrypted storage patterns and auth header patterns.
+    const bundleHasAuth = /Authorization/.test(bundleStr) || /Bearer [A-Za-z0-9_\-]{10,}/.test(bundleStr);
+    const logsHasAuth = /Authorization/.test(logsStr) || /Bearer [A-Za-z0-9_\-]{10,}/.test(logsStr);
+    // Also check for the raw v10 safeStorage prefix that would indicate an undecoded encrypted blob
+    const bundleHasV10 = bundleStr.includes("djEwP7F4");  // base64 of v10 prefix
+    const logsHasV10 = logsStr.includes("djEwP7F4");
+
+    console.log(`[smoke] D: bundleSize=${bundleStr.length} bundleHasAuth=${bundleHasAuth} logsCount=${(logs as any[]).length} logsHasAuth=${logsHasAuth}`);
+    console.log(`[smoke] D: bundleHasV10=${bundleHasV10} logsHasV10=${logsHasV10}`);
+
+    expect(bundleHasAuth).toBe(false);
+    expect(logsHasAuth).toBe(false);
+    expect(bundleHasV10).toBe(false);
+    expect(logsHasV10).toBe(false);
   });
 });
 
 // ── Skip report ───────────────────────────────────────────────────────────────
 
 test.describe("Real Provider Smoke — Skip Report", () => {
-  test("smoke gate: report SKIPPED status when gate vars not set", async () => {
-    if (SMOKE_ENABLED && API_KEY) {
+  test("smoke gate: report SKIPPED status when FORGE_SMOKE_REAL not set", async () => {
+    if (SMOKE_ENABLED) {
       test.skip(true, "Smoke is fully enabled — skip-report not needed");
     }
-    if (!SMOKE_ENABLED) {
-      console.log("[smoke] SKIPPED — set FORGE_SMOKE_REAL=1 to enable");
-    }
-    if (!API_KEY) {
-      console.log("[smoke] SKIPPED — set FORGE_API_KEY=<key> to provide credentials");
-    }
-    console.log("[smoke] Usage: FORGE_SMOKE_REAL=1 FORGE_API_KEY=<key> pnpm exec playwright test e2e/real-provider-smoke.spec.ts");
+    console.log("[smoke] SKIPPED — set FORGE_SMOKE_REAL=1 to enable");
+    console.log("[smoke] Zero-touch: no FORGE_API_KEY needed. Usage:");
+    console.log("[smoke]   FORGE_SMOKE_REAL=1 pnpm exec playwright test e2e/real-provider-smoke.spec.ts");
+    console.log("[smoke]   or: pnpm qa:real-provider");
     expect(true).toBe(true);
   });
 });

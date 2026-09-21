@@ -2325,3 +2325,19 @@ export type TaskLogEvent =
   | "TASK_STEP_ATTEMPT"
   | "TASK_BUDGET_EXCEEDED";
 
+
+// ── Smoke Test IPC (only registered when FORGE_SMOKE_REAL=1) ─────────────────
+// These channels provide a zero-touch real-provider smoke gate.
+// The main process registers these handlers ONLY when FORGE_SMOKE_REAL=1 is set.
+// The secret is NEVER exported to the renderer or Playwright — it stays entirely
+// within the main-process secret getter / QueueManager path.
+export const SMOKE_IPC = {
+  /** Return default/first usable AgentProfile metadata (no secret). */
+  GET_DEFAULT_PROFILE: "smoke:getDefaultProfile",
+  /** Return whether a secret is stored for a given profileId (boolean only). */
+  HAS_SECRET:          "smoke:hasSecret",
+  /** Delete a list of conversation IDs (and their messages/queue items) from the DB. */
+  CLEANUP_CONVERSATIONS: "smoke:cleanupConversations",
+  /** Return provider capabilities for a profileId (tests real API connection). */
+  GET_CAPABILITIES:    "smoke:getCapabilities",
+} as const;
