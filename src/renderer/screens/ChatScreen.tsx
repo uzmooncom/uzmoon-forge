@@ -970,11 +970,16 @@ export default function ChatScreen({
     if (streamingMap[id]) {
       try { await window.forgeApi.cancelStream(id); } catch { /* best-effort */ }
     }
-    await window.forgeApi.deleteConversation(id);
-    const updated = await loadConversations();
-    if (activeConvId === id) {
-      if (updated.length > 0) setActiveConvId(updated[0]!.id);
-      else handleNewConversation();
+    try {
+      await window.forgeApi.deleteConversation(id);
+      const updated = await loadConversations();
+      if (activeConvId === id) {
+        if (updated.length > 0) setActiveConvId(updated[0]!.id);
+        else handleNewConversation();
+      }
+    } catch {
+      // Delete failed — reload to restore consistent sidebar state
+      void loadConversations();
     }
   }, [deleteConfirmId, activeConvId, streamingMap, loadConversations, handleNewConversation]);
 
@@ -982,20 +987,24 @@ export default function ChatScreen({
     async (id: string) => {
       const conv = conversations.find((c) => c.id === id);
       if (!conv) return;
-      if (conv.pinnedAt) {
-        await window.forgeApi.updateConversation(id, { pinnedAt: null });
-        setConversations((prev) =>
-          prev.map((c): Conversation => {
-            if (c.id !== id) return c;
-            const { pinnedAt: _p, ...rest } = c;
-            void _p;
-            return rest as Conversation;
-          })
-        );
-      } else {
-        const pinnedAt = Date.now();
-        await window.forgeApi.updateConversation(id, { pinnedAt });
-        setConversations((prev) => prev.map((c): Conversation => (c.id === id ? { ...c, pinnedAt } : c)));
+      try {
+        if (conv.pinnedAt) {
+          await window.forgeApi.updateConversation(id, { pinnedAt: null });
+          setConversations((prev) =>
+            prev.map((c): Conversation => {
+              if (c.id !== id) return c;
+              const { pinnedAt: _p, ...rest } = c;
+              void _p;
+              return rest as Conversation;
+            })
+          );
+        } else {
+          const pinnedAt = Date.now();
+          await window.forgeApi.updateConversation(id, { pinnedAt });
+          setConversations((prev) => prev.map((c): Conversation => (c.id === id ? { ...c, pinnedAt } : c)));
+        }
+      } catch {
+        // Pin/unpin failed — no state mutation was applied, UI stays consistent
       }
     },
     [conversations]
