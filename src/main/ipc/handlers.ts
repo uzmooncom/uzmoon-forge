@@ -31,6 +31,7 @@ import * as browserWindowController from "../browser/browser-window-controller.j
 import { isFakeProviderEnabled, releaseCheckpoint, waitForCheckpointBlocked } from "../agent-client/fake-provider.js";
 import * as permissionEngine from "../permissions/index.js";
 import * as taskManager from "../tasks/task-manager.js";
+import { reconcileInterruptedMAState } from "../tasks/multi-agent/ma-reconciler.js";
 import { classifyMessage, isTaskRuntimeEnabled } from "../tasks/task-classifier.js";
 import { generatePlan, replan as replanPlan } from "../tasks/task-planner.js";
 import { registerTaskInvariants } from "../tasks/task-invariants.js";
@@ -1966,6 +1967,10 @@ export function registerHandlers(services: Services, mainSender: WebContents): v
 
   // Startup reconciliation — mark any interrupted tasks as paused
   taskManager.reconcileInterruptedTasks();
+
+  // Startup reconciliation for multi-agent state
+  // Must run AFTER task reconciliation (MA state depends on ForgeTask status)
+  reconcileInterruptedMAState();
 
   // Task IPC channels
   ipcMain.handle(TASK_IPC.IS_ENABLED, () => isTaskRuntimeEnabled());

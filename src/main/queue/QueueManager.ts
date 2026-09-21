@@ -2354,6 +2354,150 @@ export async function runTaskStep(
   }
 }
 
+// ── Multi-Agent: work item execution ──────────────────────────────────────────
+
+/**
+ * Execute a single AgentWorkItem. Structurally parallel to runTaskStep but
+ * keyed on workItemId instead of stepId and carries full MARunMetadata on the AgentRun.
+ *
+ * Invariant (correction #6): every AgentRun created here must carry
+ * workItemId + agentInstanceId in its metadata.
+ *
+ * This is the ONLY path that may create AgentRuns for multi-agent work items.
+ */
+export async function runWorkItemStep(
+  task: import("../../shared/types.js").ForgeTask,
+  workItem: import("../tasks/multi-agent/ma-types.js").AgentWorkItem,
+  plan: import("../../shared/types.js").ForgeTaskPlan,
+  messages: import("../agent-client/client.js").SimpleMessage[],
+  agentInstanceId: string,
+  signal: AbortSignal
+): Promise<{
+  loopResult: import("../agent-client/agent-loop.js").AgentLoopResult;
+  cancelled: boolean;
+}> {
+  const { conversationId, id: taskId } = task;
+  const { id: workItemId, attemptCount } = workItem;
+
+  // Resolve profile + config at dispatch time (same path as runTaskStep)
+  const conv = db.getConversation(true, conversationId);
+  const profileId = conv?.defaultAgentProfileId ?? db.getAppState(true).defaultAgentProfileId;
+  if (!profileId) throw new Error(`runWorkItemStep: no agent profile for conv ${conversationId}`);
+  const profile = db.getAgentProfile(true, profileId);
+  if (!profile) throw new Error(`runWorkItemStep: profile ${profileId} not found`);
+  const apiKey = _secretGetter(profileId);
+  if (!apiKey) throw new Error(`runWorkItemStep: no API key for profile ${profileId}`);
+
+  const cfg = {
+    id: profile.id,
+    name: profile.name,
+    endpoint: profile.endpoint,
+    protocol: profile.protocol,
+    model: profile.model,
+    ...(profile.apiKeyHeader !== undefined && { apiKeyHeader: profile.apiKeyHeader }),
+    ...(profile.timeoutMs !== undefined && { timeoutMs: profile.timeoutMs }),
+  };
+
+  const requestId = randomUUID();
+  const isProjectMode = !!(conv?.projectId);
+
+  // Work-item-scoped AbortController (parallel pattern to _taskStepControllers)
+  const workItemController = new AbortController();
+  _taskStepControllers.set(workItemId, workItemController);
+
+  if (signal.aborted) {
+    _cleanupTaskStep(workItemId);
+    return {
+      loopResult: {
+        finalText: "",
+        proposalFenceRaw: undefined,
+        stepCount: 0,
+        agentReadRefs: [],
+        toolActivity: [],
+        agentRun: {} as import("../../shared/types.js").AgentRun,
+      },
+      cancelled: true,
+    };
+  }
+  const onExternalAbort = () => workItemController.abort();
+  signal.addEventListener("abort", onExternalAbort);
+
+  try {
+    const loopResult = await runAgentLoop({
+      cfg,
+      apiKey,
+      messages,
+      system: undefined,
+      projectId: conv?.projectId ?? "",
+      projectRoot: (() => {
+        const proj = conv?.projectId ? db.getProject(true, conv.projectId) : null;
+        return proj?.workingDirectory ?? "";
+      })(),
+      requestId,
+      conversationId,
+      isProjectMode,
+      signal: workItemController.signal,
+      onChunk: () => { /* work items do not stream to UI */ },
+      onToolStart: () => {},
+      onToolEnd: () => {},
+      // MA metadata written to AgentRun record (correction #6)
+      taskId,
+      ...(workItem.taskStepId != null && { stepId: workItem.taskStepId }),
+      planVersion: plan.version,
+      stepAttempt: attemptCount + 1,
+      workItemId,
+      agentInstanceId,
+    });
+
+    // ── Evidence collection (same path as runTaskStep) ─────────────────
+    const agentRunId = loopResult.agentRun.requestId;
+    const registeredEvidenceIds = collectAndRegisterEvidence(
+      loopResult.agentRun,
+      taskId,
+      workItemId,
+      loopResult.commandEvidenceRefs ?? [],
+      [],
+      loopResult.agentReadRefs,
+    );
+
+    if (loopResult.taskStepResult?.evidenceRefs && loopResult.taskStepResult.evidenceRefs.length > 0) {
+      const { validRefs, invalidRefs } = validateEvidenceRefs(
+        loopResult.taskStepResult.evidenceRefs,
+        taskId,
+        agentRunId,
+      );
+      if (invalidRefs.length > 0) {
+        loopResult.taskStepResult.evidenceRefs = [
+          ...validRefs,
+          ...registeredEvidenceIds.filter((id) => loopResult.taskStepResult!.evidenceRefs.includes(id)),
+        ].filter((id, idx, arr) => arr.indexOf(id) === idx);
+      }
+    } else if (loopResult.taskStepResult && registeredEvidenceIds.length > 0) {
+      loopResult.taskStepResult.evidenceRefs = registeredEvidenceIds;
+    }
+
+    return { loopResult, cancelled: false };
+  } catch (err: unknown) {
+    if (workItemController.signal.aborted) {
+      return {
+        loopResult: {
+          finalText: "",
+          proposalFenceRaw: undefined,
+          stepCount: 0,
+          agentReadRefs: [],
+          toolActivity: [],
+          agentRun: {} as import("../../shared/types.js").AgentRun,
+        },
+        cancelled: true,
+      };
+    }
+    throw err;
+  } finally {
+    signal.removeEventListener("abort", onExternalAbort);
+    _cleanupTaskStep(workItemId);
+  }
+}
+
 // ── Task completion delegate ─────────────────────────────────────────────────
 // Module-level delegates wired by QueueManager.registerTaskCompletionDelegate().
 // Used by TaskManager to finalize task-owned queue items without exposing

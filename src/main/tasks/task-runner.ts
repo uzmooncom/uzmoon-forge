@@ -40,6 +40,8 @@ import type { PlannerResult } from "./task-planner.js";
 import { assertInvariant } from "../reliability/invariants.js";
 import { forgeLogger } from "../telemetry/logger.js";
 import type { AgentLoopResult } from "../agent-client/agent-loop.js";
+import { shouldUseMultiAgent, runMultiAgentOrchestration } from "./multi-agent/ma-manager.js";
+import type { TaskExecutionMode } from "./multi-agent/ma-types.js";
 
 // ── Budget constants ───────────────────────────────────────────────────────
 
@@ -96,6 +98,10 @@ export interface RunnerState {
   /** AbortController for the current step's agent run */
   controller: AbortController | null;
   consecutiveNoProgress: number;
+  /** Execution mode: single_agent (default) or multi_agent */
+  executionMode: TaskExecutionMode;
+  /** AbortController for multi-agent orchestration */
+  maController: AbortController | null;
 }
 
 // ── Module-level runner registry ───────────────────────────────────────────
@@ -120,6 +126,8 @@ export function hydrateRunner(task: ForgeTask, plan: ForgeTaskPlan): void {
     pauseRequested: false,
     controller: null,
     consecutiveNoProgress: 0,
+    executionMode: "single_agent",
+    maController: null,
   });
 }
 
@@ -214,6 +222,8 @@ export async function startTaskRunner(
     pauseRequested: false,
     controller: null,
     consecutiveNoProgress: 0,
+    executionMode: "single_agent",
+    maController: null,
   };
   _runners.set(task.id, state);
 
@@ -253,6 +263,92 @@ async function _runLoop(
       planVersion: state.plan.version,
     },
   });
+
+  // ── Multi-agent mode dispatch ────────────────────────────────────────────
+  // If complexity heuristic selects multi_agent, hand off to MAManager.
+  // MAManager reports back via callbacks — it never writes ForgeTask.status directly.
+  if (shouldUseMultiAgent(state.plan, false)) {
+    state.executionMode = "multi_agent";
+    const maController = new AbortController();
+    state.maController = maController;
+
+    // Chain pause/cancel → abort MA controller
+    const pauseWatcher = setInterval(() => {
+      if (state.pauseRequested && !maController.signal.aborted) {
+        maController.abort();
+      }
+    }, 100);
+
+    let maReadyForVerification = false;
+    let maReplanReason = "";
+    let maPauseReason = "";
+
+    try {
+      await runMultiAgentOrchestration({
+        task: state.task,
+        plan: state.plan,
+        cfg,
+        apiKey,
+        signal: maController.signal,
+        onTaskUpdate: (updatedTask) => {
+          state.task = updatedTask;
+          callbacks.onTaskUpdate(updatedTask);
+        },
+        pushSnapshot: (t, p) => callbacks.pushSnapshot(t, p),
+        onReadyForVerification: (summary, evidenceRefs) => {
+          maReadyForVerification = true;
+          void summary;
+          void evidenceRefs;
+        },
+        onReplanRequested: (reason) => {
+          maReplanReason = reason;
+        },
+        onPauseRequested: (reason) => {
+          maPauseReason = reason;
+        },
+        onIncident: (invariantId, meta) => {
+          callbacks.onIncident(invariantId, meta);
+        },
+      });
+    } finally {
+      clearInterval(pauseWatcher);
+      state.maController = null;
+    }
+
+    // Handle MA outcomes
+    if (maReadyForVerification) {
+      // Mark all plan steps completed (MA managed them internally)
+      const completedPlan = {
+        ...state.plan,
+        steps: state.plan.steps.map((s) => ({
+          ...s,
+          status: (s.status === "running" || s.status === "pending" ? "completed" : s.status) as import("../../shared/types.js").TaskStepStatus,
+        })),
+        updatedAt: Date.now(),
+      };
+      state.plan = completedPlan;
+      callbacks.onPlanUpdate(completedPlan);
+      await _runVerification(state, cfg, apiKey, callbacks);
+      return;
+    }
+
+    if (maReplanReason) {
+      // Replan — fall through to single-agent loop which will replan
+      forgeLogger.info("task", "TASK_STARTED", {
+        metadata: { taskId: task.id, replanReason: maReplanReason },
+      });
+      // Continue into single-agent loop for replan handling
+    } else if (maPauseReason || state.pauseRequested) {
+      const paused = _transitionTask(state, "paused");
+      callbacks.onTaskUpdate(paused);
+      callbacks.pushSnapshot(paused, state.plan);
+      forgeLogger.info("task", "TASK_PAUSED", { metadata: { taskId: task.id, reason: maPauseReason } });
+      return;
+    } else {
+      // Cancelled / aborted
+      return;
+    }
+  }
 
   for (;;) {
     // Check pause

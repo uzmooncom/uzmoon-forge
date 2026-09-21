@@ -937,6 +937,11 @@ export interface AgentRun {
   taskId?: string;
   /** Step ID when this run executes a task step */
   stepId?: string;
+  // ── Multi-agent metadata (set only for work-item runs) ──────────────
+  /** Work item ID when this run executes a multi-agent work item */
+  workItemId?: string;
+  /** Agent instance ID for this work item run */
+  agentInstanceId?: string;
 }
 
 /** IPC channels for V0.4 agent tool ledger */

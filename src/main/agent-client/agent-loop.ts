@@ -140,6 +140,11 @@ export interface AgentLoopOptions {
   planVersion?: number;
   /** Step attempt number (1-based) */
   stepAttempt?: number;
+  // ── Multi-agent metadata (optional — only set for work-item runs) ────
+  /** Work item ID when executing a multi-agent work item */
+  workItemId?: string;
+  /** Agent instance ID for this work item run */
+  agentInstanceId?: string;
 }
 
 export interface AgentLoopResult {
@@ -616,6 +621,8 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     onWaitingForHuman,
     taskId,
     stepId,
+    workItemId,
+    agentInstanceId,
   } = opts;
 
   // ── Initialize AgentRun ────────────────────────────────────────────────────
@@ -635,6 +642,9 @@ export async function runAgentLoop(opts: AgentLoopOptions): Promise<AgentLoopRes
     // Task step identity — only set for task-step runs
     ...(taskId !== undefined && { taskId }),
     ...(stepId !== undefined && { stepId }),
+    // Multi-agent metadata — only set for work-item runs
+    ...(workItemId !== undefined && { workItemId }),
+    ...(agentInstanceId !== undefined && { agentInstanceId }),
   };
 
   // Start trace for this request

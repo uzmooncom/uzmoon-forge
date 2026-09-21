@@ -33,6 +33,13 @@ import type {
   TaskStatus,
 } from "../../shared/types.js";
 import { DEFAULT_APP_SETTINGS } from "../../shared/types.js";
+import type {
+  AgentInstance,
+  AgentWorkItem,
+  SubtaskProposal,
+  ReviewResult,
+  AssignmentHistoryEntry,
+} from "../tasks/multi-agent/ma-types.js";
 
 // ── Store shape ────────────────────────────────────────────────────────────
 
@@ -96,6 +103,17 @@ interface Store {
   taskPlans: Record<string, ForgeTaskPlan>;
   /** Full plan version history keyed by task id */
   taskPlanHistory: Record<string, ForgeTaskPlan[]>;
+  // ── Multi-Agent Orchestration V1 ────────────────────────────────────────
+  /** AgentInstance records keyed by id */
+  agentInstances: Record<string, AgentInstance>;
+  /** AgentWorkItem records keyed by id */
+  workItems: Record<string, AgentWorkItem>;
+  /** SubtaskProposal records keyed by id */
+  subtaskProposals: Record<string, SubtaskProposal>;
+  /** ReviewResult records keyed by id (workItemId:attempt) */
+  reviewResults: Record<string, ReviewResult>;
+  /** AssignmentHistoryEntry records keyed by id */
+  assignmentHistory: Record<string, AssignmentHistoryEntry>;
 }
 
 const DEFAULT_STORE: Store = {
@@ -123,6 +141,11 @@ const DEFAULT_STORE: Store = {
   tasks: {},
   taskPlans: {},
   taskPlanHistory: {},
+  agentInstances: {},
+  workItems: {},
+  subtaskProposals: {},
+  reviewResults: {},
+  assignmentHistory: {},
 };
 
 // ── Singleton ──────────────────────────────────────────────────────────────
@@ -165,6 +188,11 @@ function load(): Store {
       tasks: raw.tasks ?? {},
       taskPlans: raw.taskPlans ?? {},
       taskPlanHistory: raw.taskPlanHistory ?? {},
+      agentInstances: raw.agentInstances ?? {},
+      workItems: raw.workItems ?? {},
+      subtaskProposals: raw.subtaskProposals ?? {},
+      reviewResults: raw.reviewResults ?? {},
+      assignmentHistory: raw.assignmentHistory ?? {},
     };
 
     // ── One-time migration: AgentConfig → AgentProfile ─────────────────
@@ -1366,3 +1394,160 @@ export function listInterruptedTasks(_db: true): ForgeTask[] {
     .map((t) => structuredClone(t));
 }
 
+
+// ── Multi-Agent Orchestration V1 — DB functions ─────────────────────────────
+
+// ── AgentInstance ──────────────────────────────────────────────────────────
+
+export function saveAgentInstance(_db: true, inst: AgentInstance): void {
+  const s = store();
+  s.agentInstances[inst.id] = structuredClone(inst);
+  persist();
+}
+
+export function getAgentInstance(_db: true, id: string): AgentInstance | null {
+  return structuredClone(store().agentInstances[id] ?? null);
+}
+
+export function updateAgentInstance(_db: true, id: string, patch: Partial<AgentInstance>): AgentInstance | null {
+  const s = store();
+  const existing = s.agentInstances[id];
+  if (!existing) return null;
+  const updated: AgentInstance = { ...existing, ...patch, updatedAt: Date.now() };
+  s.agentInstances[id] = updated;
+  persist();
+  return structuredClone(updated);
+}
+
+export function listAgentInstances(_db: true, taskId: string): AgentInstance[] {
+  return Object.values(store().agentInstances)
+    .filter((i) => i.taskId === taskId)
+    .map((i) => structuredClone(i));
+}
+
+export function listAllAgentInstances(_db: true): AgentInstance[] {
+  return Object.values(store().agentInstances).map((i) => structuredClone(i));
+}
+
+// ── AgentWorkItem ──────────────────────────────────────────────────────────
+
+export function saveWorkItem(_db: true, item: AgentWorkItem): void {
+  const s = store();
+  s.workItems[item.id] = structuredClone(item);
+  persist();
+}
+
+export function getWorkItem(_db: true, id: string): AgentWorkItem | null {
+  return structuredClone(store().workItems[id] ?? null);
+}
+
+export function updateWorkItem(_db: true, id: string, patch: Partial<AgentWorkItem>): AgentWorkItem | null {
+  const s = store();
+  const existing = s.workItems[id];
+  if (!existing) return null;
+  const updated: AgentWorkItem = { ...existing, ...patch, updatedAt: Date.now() };
+  s.workItems[id] = updated;
+  persist();
+  return structuredClone(updated);
+}
+
+export function listWorkItems(_db: true, taskId: string): AgentWorkItem[] {
+  return Object.values(store().workItems)
+    .filter((w) => w.taskId === taskId)
+    .map((w) => structuredClone(w));
+}
+
+export function listInterruptedWorkItems(_db: true): AgentWorkItem[] {
+  const activeStatuses: AgentWorkItem["status"][] = [
+    "running",
+    "assigned",
+    "waiting_for_human",
+    "waiting_for_approval",
+    "reviewing",
+  ];
+  return Object.values(store().workItems)
+    .filter((w) => activeStatuses.includes(w.status))
+    .map((w) => structuredClone(w));
+}
+
+export function listAllWorkItems(_db: true): AgentWorkItem[] {
+  return Object.values(store().workItems).map((w) => structuredClone(w));
+}
+
+// ── SubtaskProposal ────────────────────────────────────────────────────────
+
+export function saveSubtaskProposal(_db: true, proposal: SubtaskProposal): void {
+  const s = store();
+  s.subtaskProposals[proposal.id] = structuredClone(proposal);
+  persist();
+}
+
+export function getSubtaskProposal(_db: true, id: string): SubtaskProposal | null {
+  return structuredClone(store().subtaskProposals[id] ?? null);
+}
+
+export function updateSubtaskProposal(_db: true, id: string, patch: Partial<SubtaskProposal>): SubtaskProposal | null {
+  const s = store();
+  const existing = s.subtaskProposals[id];
+  if (!existing) return null;
+  const updated: SubtaskProposal = { ...existing, ...patch };
+  s.subtaskProposals[id] = updated;
+  persist();
+  return structuredClone(updated);
+}
+
+export function listSubtaskProposals(_db: true, taskId: string): SubtaskProposal[] {
+  return Object.values(store().subtaskProposals)
+    .filter((p) => p.taskId === taskId)
+    .map((p) => structuredClone(p));
+}
+
+// ── ReviewResult ──────────────────────────────────────────────────────────
+
+export function saveReviewResult(_db: true, review: ReviewResult): void {
+  const key = `${review.targetWorkItemId}:${review.reviewedAttempt}`;
+  const s = store();
+  s.reviewResults[key] = structuredClone(review);
+  persist();
+}
+
+export function getReviewResult(_db: true, targetWorkItemId: string, reviewedAttempt: number): ReviewResult | null {
+  const key = `${targetWorkItemId}:${reviewedAttempt}`;
+  return structuredClone(store().reviewResults[key] ?? null);
+}
+
+export function listReviewResults(_db: true, taskId?: string): ReviewResult[] {
+  const all = Object.values(store().reviewResults).map((r) => structuredClone(r));
+  if (!taskId) return all;
+  // Filter by looking up the work item's taskId
+  const wis = store().workItems;
+  return all.filter((r) => {
+    const wi = wis[r.targetWorkItemId];
+    return wi?.taskId === taskId;
+  });
+}
+
+// ── AssignmentHistoryEntry ────────────────────────────────────────────────
+
+export function saveAssignmentHistory(_db: true, entry: AssignmentHistoryEntry): void {
+  const s = store();
+  s.assignmentHistory[entry.id] = structuredClone(entry);
+  persist();
+}
+
+export function updateAssignmentHistory(_db: true, id: string, patch: Partial<AssignmentHistoryEntry>): AssignmentHistoryEntry | null {
+  const s = store();
+  const existing = s.assignmentHistory[id];
+  if (!existing) return null;
+  const updated: AssignmentHistoryEntry = { ...existing, ...patch };
+  s.assignmentHistory[id] = updated;
+  persist();
+  return structuredClone(updated);
+}
+
+export function listAssignmentHistory(_db: true, taskId: string): AssignmentHistoryEntry[] {
+  return Object.values(store().assignmentHistory)
+    .filter((e) => e.taskId === taskId)
+    .sort((a, b) => a.assignedAt - b.assignedAt)
+    .map((e) => structuredClone(e));
+}
