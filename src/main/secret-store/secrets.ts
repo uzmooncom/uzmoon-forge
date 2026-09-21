@@ -13,7 +13,15 @@ export class SecretStore {
   }
 
   private load(): void {
-    if (!fs.existsSync(this.filePath)) return;
+    // If main file is missing, attempt recovery from the .tmp file written
+    // just before a crash (belt-and-suspenders alongside atomic rename).
+    if (!fs.existsSync(this.filePath)) {
+      const tmp = this.filePath + ".tmp";
+      if (fs.existsSync(tmp)) {
+        try { fs.renameSync(tmp, this.filePath); } catch { /* ignore */ }
+      }
+      if (!fs.existsSync(this.filePath)) return;
+    }
     try {
       const raw = fs.readFileSync(this.filePath, "utf8");
       this.cache = JSON.parse(raw) as Record<string, string>;
@@ -23,10 +31,12 @@ export class SecretStore {
   }
 
   private save(): void {
-    fs.writeFileSync(this.filePath, JSON.stringify(this.cache), {
+    const tmp = this.filePath + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(this.cache), {
       encoding: "utf8",
       mode: 0o600,
     });
+    fs.renameSync(tmp, this.filePath);
   }
 
   set(key: string, plaintext: string): void {
