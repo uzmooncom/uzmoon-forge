@@ -267,6 +267,7 @@ export function setBrowserNativeWindow(
     for (const [tabId, view] of _tabViews) {
       try {
         if (!view.webContents.isDestroyed()) {
+          view.webContents.removeAllListeners();
           view.webContents.stop();
         }
       } catch { /* non-fatal — view may already be destroyed */ }
@@ -945,6 +946,7 @@ function _releaseTabView(tabId: string): void {
   const view = _tabViews.get(tabId);
   if (!view) return;
   try {
+    view.webContents.removeAllListeners();
     view.webContents.stop();
     _browserWindow?.contentView.removeChildView(view);
   } catch { /* non-fatal */ }

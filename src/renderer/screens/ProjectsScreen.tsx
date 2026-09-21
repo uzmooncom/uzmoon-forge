@@ -477,8 +477,12 @@ export default function ProjectsScreen({ onOpenProject, onOpenSettings }: Projec
     if (!removing) return;
     const id = removing.id;
     setRemoving(null);
-    await window.forgeApi.removeProject(id);
-    setProjects((prev) => prev.filter((p) => p.id !== id));
+    try {
+      await window.forgeApi.removeProject(id);
+      setProjects((prev) => prev.filter((p) => p.id !== id));
+    } catch {
+      // IPC error — project stays in list; user can retry
+    }
   };
 
   const handleReveal = (p: Project) => {

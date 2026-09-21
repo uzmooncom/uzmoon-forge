@@ -26,6 +26,7 @@ import { DeleteConfirmDialog } from "../chat/components/DeleteConfirmDialog.js";
 import { MessageBubble } from "../chat/components/MessageBubble.js";
 import { StreamingBubble } from "../chat/components/StreamingBubble.js";
 import { ConversationItem } from "../chat/components/ConversationItem.js";
+import { ErrorBoundary } from "../components/ErrorBoundary.js";
 
 // Helpers, types, icons
 import {
@@ -1605,16 +1606,17 @@ export default function ChatScreen({
 
             {/* Messages */}
             {messages.map((msg) => (
-              <MessageBubble
-                key={msg.id}
-                msg={msg}
-                allMessages={messages}
-                onExpand={setLightboxAtt}
-                onCopy={handleCopy}
-                onQuote={handleQuote}
-                {...(msg.role === "error" ? { onRetry: handleRetry } : {})}
-                {...(msg.role === "user" ? { onEdit: handleEdit } : {})}
-              />
+              <ErrorBoundary key={msg.id}>
+                <MessageBubble
+                  msg={msg}
+                  allMessages={messages}
+                  onExpand={setLightboxAtt}
+                  onCopy={handleCopy}
+                  onQuote={handleQuote}
+                  {...(msg.role === "error" ? { onRetry: handleRetry } : {})}
+                  {...(msg.role === "user" ? { onEdit: handleEdit } : {})}
+                />
+              </ErrorBoundary>
             ))}
 
             {/* Streaming bubble */}

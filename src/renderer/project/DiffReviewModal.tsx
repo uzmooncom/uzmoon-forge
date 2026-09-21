@@ -215,11 +215,15 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
 
   const handlePreflight = useCallback(async () => {
     if (selectedIds.size === 0) return;
-    const results = await window.forgeApi.fileEditing.preflightCheck(
-      proposal.id,
-      Array.from(selectedIds)
-    );
-    setPreflightResults(results);
+    try {
+      const results = await window.forgeApi.fileEditing.preflightCheck(
+        proposal.id,
+        Array.from(selectedIds)
+      );
+      setPreflightResults(results);
+    } catch {
+      setApplyError("Preflight check failed. Please try again.");
+    }
   }, [proposal.id, selectedIds]);
 
   const handleApply = useCallback(async () => {
@@ -227,33 +231,41 @@ export function DiffReviewModal({ proposal, onClose, onProposalUpdate }: DiffRev
     setApplying(true);
     setApplyError(null);
     setPreflightResults(null);
+    try {
+      const result = await window.forgeApi.fileEditing.applySelected(
+        proposal.id,
+        Array.from(selectedIds)
+      );
 
-    const result = await window.forgeApi.fileEditing.applySelected(
-      proposal.id,
-      Array.from(selectedIds)
-    );
+      if (result.preflightFailures && result.preflightFailures.length > 0) {
+        setPreflightResults(result.preflightFailures);
+        setApplyError("Some files failed pre-apply checks. No changes were written.");
+        return;
+      }
 
-    setApplying(false);
+      if (!result.ok) {
+        setApplyError(result.error ?? "Apply failed");
+        return;
+      }
 
-    if (result.preflightFailures && result.preflightFailures.length > 0) {
-      setPreflightResults(result.preflightFailures);
-      setApplyError("Some files failed pre-apply checks. No changes were written.");
-      return;
+      setApplySuccess(true);
+    } catch {
+      setApplyError("Apply failed due to an unexpected error. Please try again.");
+    } finally {
+      setApplying(false);
     }
-
-    if (!result.ok) {
-      setApplyError(result.error ?? "Apply failed");
-      return;
-    }
-
-    setApplySuccess(true);
   }, [proposal.id, selectedIds]);
 
   const handleRejectAll = useCallback(async () => {
     setRejecting(true);
-    await window.forgeApi.fileEditing.rejectProposal(proposal.id);
-    setRejecting(false);
-    onClose();
+    try {
+      await window.forgeApi.fileEditing.rejectProposal(proposal.id);
+      onClose();
+    } catch {
+      // IPC error — button re-enables so user can retry
+    } finally {
+      setRejecting(false);
+    }
   }, [proposal.id, onClose]);
 
   // Escape to close
