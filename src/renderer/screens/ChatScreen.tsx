@@ -616,6 +616,10 @@ export default function ChatScreen({
     return convs;
   }, [showArchived, projectId]);
 
+  // Stable ref so IPC subscriptions never re-register just because showArchived/projectId changed
+  const loadConversationsRef = useRef(loadConversations);
+  useEffect(() => { loadConversationsRef.current = loadConversations; }, [loadConversations]);
+
   useEffect(() => { void loadConversations(); }, [showArchived, loadConversations, projectId]);
 
   const initializedRef = useRef(false);
@@ -789,7 +793,7 @@ export default function ChatScreen({
           return prev.map((c) => (c.id === conversation.id ? conversation : c));
         });
       }
-      if (!cancelled) void loadConversations();
+      if (!cancelled) void loadConversationsRef.current();
     });
 
     const unsubErr = window.forgeApi.onStreamError(({ streamId, message }) => {
@@ -828,7 +832,7 @@ export default function ChatScreen({
       unsubWaiting();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadConversations, setStreaming]);
+  }, [setStreaming]);
 
   // Global keyboard shortcuts
   useEffect(() => {

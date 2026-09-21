@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import type { AppState, Project } from "@shared/types.js";
+import type { AppState, Project, PermissionApprovalRequest, PermissionApprovalAction } from "@shared/types.js";
 import WelcomeScreen from "./screens/WelcomeScreen.js";
 import ConnectAgentScreen from "./screens/ConnectAgentScreen.js";
 import ChatScreen from "./screens/ChatScreen.js";
@@ -8,6 +8,7 @@ import ProjectWorkspace from "./screens/ProjectWorkspace.js";
 import AgentProfilesModal from "./components/AgentProfilesModal.js";
 import SettingsModal from "./components/SettingsModal.js";
 import { DevPanel } from "./components/DevPanel.js";
+import { PermissionApprovalModal } from "./components/PermissionApprovalModal.js";
 // BrowserWorkspace removed — browser runs as a standalone native window
 
 // ── Nav icons ──────────────────────────────────────────────────────────────
@@ -199,6 +200,24 @@ export default function App(): React.ReactElement {
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [settingsConfig, setSettingsConfig] = useState<import("@shared/types.js").AgentConfig | null>(null);
   const [showDevPanel, setShowDevPanel] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState<PermissionApprovalRequest | null>(null);
+
+  // Permission approval IPC — subscribe for the lifetime of the App
+  useEffect(() => {
+    const unsubRequest = window.forgeApi.permissions.onApprovalRequest((req) => {
+      setPendingApproval(req);
+    });
+    const unsubCancelled = window.forgeApi.permissions.onApprovalCancelled((approvalId) => {
+      setPendingApproval((prev) => (prev?.approvalId === approvalId ? null : prev));
+    });
+    return () => { unsubRequest(); unsubCancelled(); };
+  }, []);
+
+  const handleApprovalResponse = (action: PermissionApprovalAction): void => {
+    if (!pendingApproval) return;
+    void window.forgeApi.permissions.approvalRespond({ approvalId: pendingApproval.approvalId, action });
+    setPendingApproval(null);
+  };
 
   // V17: Cmd+Shift+D toggles the Dev Panel (development aid)
   useEffect(() => {
@@ -280,6 +299,12 @@ export default function App(): React.ReactElement {
       )}
       {showDevPanel && (
         <DevPanel onClose={() => setShowDevPanel(false)} />
+      )}
+      {pendingApproval && (
+        <PermissionApprovalModal
+          request={pendingApproval}
+          onRespond={handleApprovalResponse}
+        />
       )}
     </>
   );

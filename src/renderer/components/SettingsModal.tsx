@@ -28,6 +28,13 @@ export default function SettingsModal({
   const [sharingEnabled, setSharingEnabled] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(false);
 
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
   useEffect(() => {
     void window.forgeApi.settings.getSettings().then((s: { incidentSharingEnabled: boolean }) => setSharingEnabled(s.incidentSharingEnabled));
   }, []);
