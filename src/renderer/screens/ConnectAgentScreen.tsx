@@ -135,41 +135,50 @@ export default function ConnectAgentScreen({
     setIsTesting(true);
     setTestStatus("connecting");
     setTestMessage("Connecting…");
+    try {
+      const id = existingId ?? randomUUID();
+      if (!existingId) setExistingId(id);
 
-    const id = existingId ?? randomUUID();
-    if (!existingId) setExistingId(id);
+      const cfg = buildConfig(id);
 
-    const cfg = buildConfig(id);
+      // Store secret before testing (needed in main process)
+      await window.forgeApi.saveConfig(cfg);
+      await window.forgeApi.setSecret(id, form.apiKey.trim());
 
-    // Store secret before testing (needed in main process)
-    await window.forgeApi.saveConfig(cfg);
-    await window.forgeApi.setSecret(id, form.apiKey.trim());
-
-    const result = await window.forgeApi.testConnection(cfg);
-    setTestStatus(result.status);
-    setTestMessage(result.message);
-    setIsTesting(false);
+      const result = await window.forgeApi.testConnection(cfg);
+      setTestStatus(result.status);
+      setTestMessage(result.message);
+    } catch {
+      setTestStatus("error");
+      setTestMessage("Connection failed. Check your settings and try again.");
+    } finally {
+      setIsTesting(false);
+    }
   };
 
   const handleContinue = async (): Promise<void> => {
     if (testStatus !== "connected" || isSubmitting) return;
     setIsSubmitting(true);
+    try {
+      const id = existingId ?? randomUUID();
+      const cfg = buildConfig(id);
 
-    const id = existingId ?? randomUUID();
-    const cfg = buildConfig(id);
+      await window.forgeApi.saveConfig(cfg);
+      await window.forgeApi.setSecret(id, form.apiKey.trim());
 
-    await window.forgeApi.saveConfig(cfg);
-    await window.forgeApi.setSecret(id, form.apiKey.trim());
+      const newState: AppState = {
+        onboardingComplete: true,
+        agentConfigId: id,
+        defaultAgentProfileId: id,
+      };
+      await window.forgeApi.setAppState(newState);
 
-    const newState: AppState = {
-      onboardingComplete: true,
-      agentConfigId: id,
-      defaultAgentProfileId: id,
-    };
-    await window.forgeApi.setAppState(newState);
-
-    onComplete(newState);
-    setIsSubmitting(false);
+      onComplete(newState);
+    } catch {
+      // IPC error — re-enable button so user can retry
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (

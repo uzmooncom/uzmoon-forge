@@ -60,30 +60,40 @@ export default function SettingsModal({
 
   const handleSave = async (): Promise<void> => {
     setIsSaving(true);
-    const updated: AgentConfig = {
-      ...config,
-      name: name.trim() || config.name,
-      endpoint: endpoint.trim() || config.endpoint,
-      protocol,
-      model: model.trim() || config.model,
-    };
-    await onSave(updated);
-    setIsSaving(false);
+    try {
+      const updated: AgentConfig = {
+        ...config,
+        name: name.trim() || config.name,
+        endpoint: endpoint.trim() || config.endpoint,
+        protocol,
+        model: model.trim() || config.model,
+      };
+      await onSave(updated);
+    } catch {
+      // IPC error — button re-enables so user can retry
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleTest = async (): Promise<void> => {
     setIsTesting(true);
     setTestResult(null);
-    const updated: AgentConfig = {
-      ...config,
-      name: name.trim() || config.name,
-      endpoint: endpoint.trim() || config.endpoint,
-      protocol,
-      model: model.trim() || config.model,
-    };
-    const result = await window.forgeApi.testConnection(updated);
-    setTestResult(result);
-    setIsTesting(false);
+    try {
+      const updated: AgentConfig = {
+        ...config,
+        name: name.trim() || config.name,
+        endpoint: endpoint.trim() || config.endpoint,
+        protocol,
+        model: model.trim() || config.model,
+      };
+      const result = await window.forgeApi.testConnection(updated);
+      setTestResult(result);
+    } catch {
+      setTestResult({ status: "error", message: "Connection failed. Check settings and try again." });
+    } finally {
+      setIsTesting(false);
+    }
   };
 
   return (

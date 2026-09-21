@@ -482,6 +482,7 @@ export default function ChatScreen({
 
   // ── Draft conversation id ──────────────────────────────────────────────
   const draftConvId = useRef<string>(randomId());
+  const sendingRef = useRef(false);
 
   // ── Agent profiles ─────────────────────────────────────────────────────
   const [profiles, setProfiles] = useState<AgentProfile[]>([]);
@@ -1169,6 +1170,9 @@ export default function ChatScreen({
     }
 
     if (!canSend) return;
+    if (sendingRef.current) return; // Prevent double-send on rapid Enter/button presses
+    sendingRef.current = true;
+    try {
     let content = input.trim();
     const convId = activeConvId ?? draftConvId.current;
     const attachmentIds = pendingAttachments.filter((a) => a.savedId).map((a) => a.savedId!);
@@ -1292,6 +1296,9 @@ export default function ChatScreen({
         if (!exists) return [res.conversation!, ...prev];
         return prev.map((c) => (c.id === res.conversation!.id ? res.conversation! : c));
       });
+    }
+    } finally {
+      sendingRef.current = false;
     }
   }, [
     editingQueueItemId,

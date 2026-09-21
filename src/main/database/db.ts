@@ -160,9 +160,18 @@ function storePath(): string {
 
 function load(): Store {
   const p = storePath();
-  if (!fs.existsSync(p)) return structuredClone(DEFAULT_STORE);
+  // If main file is missing or corrupt, attempt to recover from the .tmp file
+  // that would have been written atomically just before a crash.
+  let fileToRead = p;
+  if (!fs.existsSync(p)) {
+    const tmp = p + ".tmp";
+    if (fs.existsSync(tmp)) {
+      try { fs.renameSync(tmp, p); fileToRead = p; } catch { /* ignore */ }
+    }
+    if (!fs.existsSync(p)) return structuredClone(DEFAULT_STORE);
+  }
   try {
-    const raw = JSON.parse(fs.readFileSync(p, "utf8")) as Partial<Store>;
+    const raw = JSON.parse(fs.readFileSync(fileToRead, "utf8")) as Partial<Store>;
     const base: Store = {
       appState: raw.appState ?? DEFAULT_STORE.appState,
       agentConfig: raw.agentConfig ?? null,
@@ -264,7 +273,12 @@ function load(): Store {
 }
 
 function save(s: Store): void {
-  fs.writeFileSync(storePath(), JSON.stringify(s, null, 2), "utf8");
+  // Atomic write: write to a temp file then rename to prevent torn writes
+  // on crash or SIGKILL mid-persist.
+  const target = storePath();
+  const tmp = target + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(s, null, 2), "utf8");
+  fs.renameSync(tmp, target);
 }
 
 // ── Public init ────────────────────────────────────────────────────────────

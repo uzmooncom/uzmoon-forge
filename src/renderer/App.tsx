@@ -252,7 +252,10 @@ export default function App(): React.ReactElement {
 
       if (!state.onboardingComplete) { setScreen("welcome"); return; }
       setScreen("connect");
-    })();
+    })().catch(() => {
+      // Startup failed — fall back to connect screen so user isn't stuck on loading
+      setScreen("connect");
+    });
   }, []);
 
   if (screen === "loading") {

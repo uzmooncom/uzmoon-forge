@@ -327,35 +327,45 @@ function ProfileEditForm({
     if (!name.trim() || !endpoint.trim() || !model.trim()) return;
     if (replaceKey && !apiKey.trim()) return;
     setIsSaving(true);
-    const p = buildProfile();
-    await window.forgeApi.saveProfile(p);
-    if (replaceKey && apiKey.trim()) {
-      await window.forgeApi.setSecret(p.id, apiKey.trim());
+    try {
+      const p = buildProfile();
+      await window.forgeApi.saveProfile(p);
+      if (replaceKey && apiKey.trim()) {
+        await window.forgeApi.setSecret(p.id, apiKey.trim());
+      }
+      onSaved();
+    } catch {
+      // IPC error — button re-enables so user can retry
+    } finally {
+      setIsSaving(false);
     }
-    setIsSaving(false);
-    onSaved();
   };
 
   const handleTest = async () => {
     if (!endpoint.trim() || !model.trim()) return;
     setIsTesting(true);
     setTestResult(null);
-    const p = buildProfile();
-    // If replacing key, use the new one for the test; otherwise use stored
-    if (replaceKey && apiKey.trim()) {
-      await window.forgeApi.setSecret(p.id, apiKey.trim());
+    try {
+      const p = buildProfile();
+      // If replacing key, use the new one for the test; otherwise use stored
+      if (replaceKey && apiKey.trim()) {
+        await window.forgeApi.setSecret(p.id, apiKey.trim());
+      }
+      const result = await window.forgeApi.testConnection({
+        id: p.id,
+        name: p.name,
+        endpoint: p.endpoint,
+        protocol: p.protocol,
+        model: p.model,
+        ...(p.apiKeyHeader && { apiKeyHeader: p.apiKeyHeader }),
+        ...(p.timeoutMs !== undefined && { timeoutMs: p.timeoutMs }),
+      });
+      setTestResult(result);
+    } catch {
+      setTestResult({ status: "error", message: "Connection failed. Check settings and try again." });
+    } finally {
+      setIsTesting(false);
     }
-    const result = await window.forgeApi.testConnection({
-      id: p.id,
-      name: p.name,
-      endpoint: p.endpoint,
-      protocol: p.protocol,
-      model: p.model,
-      ...(p.apiKeyHeader && { apiKeyHeader: p.apiKeyHeader }),
-      ...(p.timeoutMs !== undefined && { timeoutMs: p.timeoutMs }),
-    });
-    setTestResult(result);
-    setIsTesting(false);
   };
 
   const canSave = name.trim() && endpoint.trim() && model.trim() && (!replaceKey || apiKey.trim());
