@@ -858,6 +858,12 @@ export class QueueManager {
     };
     db.enqueueItem(true, queueItem);
 
+    // Sending a new message is an implicit resume signal — unpause the queue
+    // so that the user doesn't have to manually resume after a Stop or failure.
+    // (Queue pauses on stop/failure to let the user inspect; but a new explicit
+    // send means "I am ready to continue")
+    db.setQueuePaused(true, conversationId, false);
+
     const updatedConv = db.getConversation(true, conversationId)!;
     this.pushQueueState(conversationId);
 

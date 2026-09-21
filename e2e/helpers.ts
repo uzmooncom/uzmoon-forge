@@ -144,12 +144,21 @@ export async function setupFakeAgent(page: Page): Promise<{ profileId: string; c
 }
 
 /**
- * Subscribe to onStreamStart for convId and wait until it fires.
- * Sets window.forgeApi._e2eStreamStarted = true when stream begins.
+ * Subscribe to onStreamStart and wait until the stream is live.
+ * Uses two signals:
+ *   1. CHAT_STREAM_START IPC event → sets _e2eStreamStarted flag
+ *   2. getRuntimeState non-null → stream is definitely active (fallback for
+ *      the case where STREAM_START fired before the listener was registered)
+ *
+ * IMPORTANT: For reliable use, call this BEFORE sendAndAwaitEnd so the
+ * listener is registered before the message is sent. If called after, the
+ * getRuntimeState fallback ensures we still detect an in-progress stream.
+ *
  * Returns true if stream started within timeout, false otherwise.
  */
-export async function waitForStreamStart(page: Page, timeout = 8000): Promise<boolean> {
-  // Register listener
+export async function waitForStreamStart(page: Page, timeout = 8000, convId?: string): Promise<boolean> {
+  // Register listener (may miss the event if STREAM_START already fired, but
+  // the getRuntimeState fallback handles that case)
   await page.evaluate(() => {
     const api = (window as { forgeApi?: { onStreamStart?: (cb: () => void) => () => void; _e2eStreamStarted?: boolean } }).forgeApi;
     if (api?.onStreamStart) {
@@ -158,14 +167,28 @@ export async function waitForStreamStart(page: Page, timeout = 8000): Promise<bo
     }
   });
 
-  // Poll until true or timeout
+  // Poll: check both the listener flag and getRuntimeState (non-null = active)
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    await page.waitForTimeout(150);
-    const started = await page.evaluate(() => {
-      return (window as { forgeApi?: { _e2eStreamStarted?: boolean } }).forgeApi?._e2eStreamStarted === true;
-    });
-    if (started) return true;
+    await page.waitForTimeout(100);
+    const result = await page.evaluate(async (cid) => {
+      const api = (window as { forgeApi?: {
+        _e2eStreamStarted?: boolean;
+        getRuntimeState: (c: string) => Promise<unknown>;
+      } }).forgeApi;
+      if (!api) return false;
+      // Signal 1: listener already caught STREAM_START
+      if (api._e2eStreamStarted) return true;
+      // Signal 2: runtime is active (stream started before listener registered)
+      if (cid) {
+        try {
+          const rt = await api.getRuntimeState(cid);
+          if (rt !== null) return true;
+        } catch { /* ignore */ }
+      }
+      return false;
+    }, convId ?? null);
+    if (result) return true;
   }
   return false;
 }
